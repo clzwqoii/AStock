@@ -2,6 +2,7 @@
 library;
 
 import 'dart:convert';
+import 'dart:io';
 import 'dart:isolate';
 
 import 'package:http/http.dart' as h;
@@ -13,7 +14,7 @@ import 'package:stock/data/sync_service.dart';
 import 'package:stock/data/tushare_client.dart';
 
 /// 当前应用版本（发布新包时同步修改，与 pubspec.version 保持一致）。
-const kAppVersion = '1.0.0';
+const kAppVersion = '1.0.1';
 
 /// 更新清单候选源（并发竞速，第一个响应的胜出）。
 /// 国内网络优先命中 Gitee；jsDelivr 镜像可加速 GitHub raw。建仓库后替换为你的地址。
@@ -122,6 +123,90 @@ class ScreenRow {
   final double volumeRatio;
   final double amountWan;
   final double ma20;
+}
+
+/// 结果表可排序列（与工作台表头一一对应；点表头切换升降序）。
+enum SortField { close, changePct, volumeRatio, amount, ma20 }
+
+/// 按 [field] 排序（默认降序）；同值保持入参顺序（稳定排序，表头重复点击不抖动）。
+/// 返回新列表，不改 [rows]。
+List<ScreenRow> sortRows(List<ScreenRow> rows, SortField field, {bool ascending = false}) {
+  double value(ScreenRow r) => switch (field) {
+        SortField.close => r.close,
+        SortField.changePct => r.changePct,
+        SortField.volumeRatio => r.volumeRatio,
+        SortField.amount => r.amountWan,
+        SortField.ma20 => r.ma20,
+      };
+  final decorated = [for (var i = 0; i < rows.length; i++) (v: rows[i], i: i)];
+  decorated.sort((a, b) {
+    final c = value(a.v).compareTo(value(b.v));
+    if (c != 0) return ascending ? c : -c;
+    return a.i.compareTo(b.i);
+  });
+  return [for (final d in decorated) d.v];
+}
+
+/// CSV 单元格转义：含逗号/引号/换行时按 RFC4180 加双引号并转义内部引号。
+String _csvCell(Object? v) {
+  final s = v == null ? '' : '$v';
+  return s.contains(RegExp(r'[",\n\r]')) ? '"${s.replaceAll('"', '""')}"' : s;
+}
+
+/// 选股结果 → CSV 文本（UTF-8 文本，导出时由 [exportRowsCsv] 加 BOM 以便 Excel 识别中文）。
+/// 第一行是说明行（含数据日期与规则组合），第二行起是表头与数据，列序与工作台表头一致。
+String rowsToCsv(List<ScreenRow> rows, {String? dataDate, String? combo}) {
+  final buf = StringBuffer()
+    ..writeln('# A股选股结果（不复权·手）'
+        '${dataDate == null ? '' : '  数据截至 $dataDate'}'
+        '${combo == null || combo.isEmpty ? '' : '  规则：$combo'}')
+    ..writeln('代码,名称,收盘,涨跌,涨跌幅%,量比,成交额(万),MA20,数据截至,规则组合');
+  for (final r in rows) {
+    buf.writeln([
+      _csvCell(r.symbol),
+      _csvCell(r.name ?? ''),
+      r.close.toStringAsFixed(2),
+      '${r.change >= 0 ? '+' : '-'}${r.change.abs().toStringAsFixed(2)}',
+      '${r.changePct >= 0 ? '+' : '-'}${r.changePct.abs().toStringAsFixed(2)}',
+      r.volumeRatio.toStringAsFixed(2),
+      r.amountWan.toStringAsFixed(2),
+      r.ma20.toStringAsFixed(2),
+      _csvCell(dataDate ?? ''),
+      _csvCell(combo ?? ''),
+    ].join(','));
+  }
+  return buf.toString();
+}
+
+/// 写文件回调（测试注入假实现；默认用 dart:io 写库同目录）。
+typedef WriteCsvFn = Future<void> Function(String path, List<int> bytes);
+
+/// 导出 CSV 到 [dirPath]（传数据库所在目录：桌面 ~/.stock、移动端沙盒应用目录）。
+/// 文件名带日期时间戳，重复导出不覆盖。返回落盘路径（UI 弹提示用）。
+Future<String> exportRowsCsv(
+  List<ScreenRow> rows, {
+  required String dirPath,
+  String? dataDate,
+  String? combo,
+  WriteCsvFn? write,
+}) async {
+  final stamp = _stamp();
+  final file = File('$dirPath/选股结果-$stamp.csv');
+  await (write ?? (p, bytes) async {
+        await File(p).parent.create(recursive: true);
+        await File(p).writeAsBytes(bytes);
+      })(file.path, [
+    0xEF, 0xBB, 0xBF, // BOM：没有它 Excel 打开中文 CSV 会乱码
+    ...utf8.encode(rowsToCsv(rows, dataDate: dataDate, combo: combo)),
+  ]);
+  return file.path;
+}
+
+/// `YYYYMMDD-HHMMSS` 本地时间戳（写到文件名里避免覆盖上次导出）。
+String _stamp() {
+  final n = DateTime.now();
+  String p2(int v) => v.toString().padLeft(2, '0');
+  return '${n.year}${p2(n.month)}${p2(n.day)}-${p2(n.hour)}${p2(n.minute)}${p2(n.second)}';
 }
 
 /// 选股：后台 isolate 里打开库 → 全量加载 → 规则筛选 → 组装展示行 → 关库。

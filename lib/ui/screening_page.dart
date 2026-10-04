@@ -2,6 +2,8 @@
 /// 布局参照 docs/design/c-compact-workbench.html。
 library;
 
+import 'dart:io';
+
 import 'package:flutter/material.dart';
 
 import '../app_logic.dart';
@@ -11,6 +13,10 @@ import 'stock_detail_page.dart';
 
 typedef ScreenFn = Future<({int total, List<ScreenRow> picked, String? dataDate})> Function(
     String dbPath, List<Rule> rules);
+
+/// CSV 导出（默认写数据库同目录；测试注入假实现，避免真实 IO）。
+typedef ExportCsvFn = Future<String> Function(List<ScreenRow> rows,
+    {String? dataDate, String? combo});
 
 /// 规则分组（展示用，引擎不感知）。
 const ruleGroups = <String, List<String>>{
@@ -27,6 +33,7 @@ class ScreeningPage extends StatefulWidget {
     this.syncing = false,
     this.syncStatus,
     this.onOpenSettings,
+    this.exportCsv,
   });
 
   final String dbPath;
@@ -39,6 +46,9 @@ class ScreeningPage extends StatefulWidget {
   /// 侧栏「设置」按钮回调（外壳弹出设置弹框）。
   final VoidCallback? onOpenSettings;
 
+  /// CSV 导出；null 时写数据库同目录（桌面 ~/.stock、移动端沙盒）。
+  final ExportCsvFn? exportCsv;
+
   @override
   State<ScreeningPage> createState() => _ScreeningPageState();
 }
@@ -48,6 +58,51 @@ class _ScreeningPageState extends State<ScreeningPage> {
   bool _loading = false;
   String? _error;
   ({int total, List<ScreenRow> picked, String? dataDate})? _result;
+
+  /// 当前排序列与方向；null = 引擎返回顺序。
+  SortField? _sortField;
+  bool _sortAsc = false;
+
+  /// 当前展示顺序的入选行（排序只影响展示与导出，不改引擎结果）。
+  List<ScreenRow> _rows() {
+    final r = _result;
+    if (r == null) return const [];
+    final field = _sortField;
+    if (field == null) return r.picked;
+    return sortRows(r.picked, field, ascending: _sortAsc);
+  }
+
+  /// 表头点击：同列切换升降序，换列默认降序。
+  void _sortBy(SortField field) {
+    setState(() {
+      if (_sortField == field) {
+        _sortAsc = !_sortAsc;
+      } else {
+        _sortField = field;
+        _sortAsc = false;
+      }
+    });
+  }
+
+  Future<void> _export() async {
+    final r = _result;
+    if (r == null || r.picked.isEmpty) return;
+    final rows = _rows();
+    final combo = _selected.isEmpty ? '全部' : _selected.map((id) => ruleById(id).name).join(' ∧ ');
+    final messenger = ScaffoldMessenger.of(context);
+    try {
+      final path = await (widget.exportCsv ??
+          (rows, {dataDate, combo}) => exportRowsCsv(
+                rows,
+                dirPath: File(widget.dbPath).parent.path,
+                dataDate: dataDate,
+                combo: combo,
+              ))(rows, dataDate: r.dataDate, combo: combo);
+      messenger.showSnackBar(SnackBar(content: Text('已导出 $path')));
+    } catch (e) {
+      messenger.showSnackBar(SnackBar(content: Text('导出失败：$e')));
+    }
+  }
 
   void _toggle(String id) {
     setState(() {
@@ -101,7 +156,7 @@ class _ScreeningPageState extends State<ScreeningPage> {
                   Text('A股选股台',
                       style: TextStyle(fontSize: 16, fontWeight: FontWeight.w800, color: AppColors.text)),
                   SizedBox(height: 2),
-                  Text('Stock Screener v0.1', style: TextStyle(fontSize: 11, color: AppColors.dim)),
+                  Text('Stock Screener v$kAppVersion', style: TextStyle(fontSize: 11, color: AppColors.dim)),
                 ],
               ),
             ),
@@ -268,6 +323,13 @@ class _ScreeningPageState extends State<ScreeningPage> {
                 icon: const Icon(Icons.settings_outlined, size: 20),
                 color: AppColors.text,
               ),
+            if (_result?.picked.isNotEmpty ?? false)
+              IconButton(
+                tooltip: '导出 CSV',
+                onPressed: _export,
+                icon: const Icon(Icons.file_download_outlined, size: 19),
+                color: AppColors.dim,
+              ),
             FilledButton(
               onPressed: _selected.isEmpty || _loading ? null : _run,
               style: FilledButton.styleFrom(
@@ -342,8 +404,8 @@ class _ScreeningPageState extends State<ScreeningPage> {
         _headerRow(wide),
         Expanded(
           child: ListView.builder(
-            itemCount: r.picked.length,
-            itemBuilder: (_, i) => _row(r.picked[i], i, wide),
+            itemCount: _rows().length,
+            itemBuilder: (_, i) => _row(_rows()[i], i, wide),
           ),
         ),
       ],
@@ -376,21 +438,52 @@ class _ScreeningPageState extends State<ScreeningPage> {
               ? [
                   _headerCell('代码', 104, left: true),
                   _headerCell('名称', null, left: true),
-                  _headerCell('收盘', 56),
-                  _headerCell('涨跌', 56),
-                  _headerCell('涨跌幅', 68),
-                  _headerCell('量比', 48),
-                  _headerCell('成交额(万)', 90),
-                  _headerCell('MA20', 56),
+                  _sortableHeader('收盘', 56, SortField.close),
+                  _sortableHeader('涨跌', 56, null),
+                  _sortableHeader('涨跌幅', 68, SortField.changePct),
+                  _sortableHeader('量比', 48, SortField.volumeRatio),
+                  _sortableHeader('成交额(万)', 90, SortField.amount),
+                  _sortableHeader('MA20', 56, SortField.ma20),
                 ]
               : [
                   _headerCell('代码', 104, left: true),
                   _headerCell('名称', null, left: true),
-                  _headerCell('收盘', 56),
-                  _headerCell('涨跌幅', 68),
+                  _sortableHeader('收盘', 56, SortField.close),
+                  _sortableHeader('涨跌幅', 68, SortField.changePct),
                 ],
         ),
       );
+
+  /// 可排序表头：点一下降序，再点升序；当前列名加粗并显示箭头。
+  Widget _sortableHeader(String text, double width, SortField? field) {
+    final active = field != null && _sortField == field;
+    final style = TextStyle(
+        fontSize: 10,
+        letterSpacing: 0.5,
+        fontWeight: active ? FontWeight.w900 : FontWeight.w700,
+        color: active ? AppColors.text : AppColors.dim);
+    return GestureDetector(
+      behavior: HitTestBehavior.translucent,
+      onTap: field == null ? null : () => _sortBy(field),
+      child: Container(
+        height: 32,
+        alignment: Alignment.centerRight,
+        padding: const EdgeInsets.only(right: 14),
+        width: width,
+        child: Row(
+          mainAxisSize: MainAxisSize.min,
+          children: [
+            Text(text, style: style),
+            if (active) ...[
+              const SizedBox(width: 2),
+              Icon(_sortAsc ? Icons.arrow_upward : Icons.arrow_downward,
+                  size: 10, color: AccentScope.of(context)),
+            ],
+          ],
+        ),
+      ),
+    );
+  }
 
   void _openDetail(ScreenRow row) {
     Navigator.of(context).push(MaterialPageRoute(

@@ -1,0 +1,58 @@
+# A股选股台（Flutter）持续集成：装环境 → 静态检查 → 跑测试
+# 只做检查与测试，不部署；测试全部 mock，不读取 token，因此无需任何 Secrets
+name: CI
+
+on:
+  push:
+    branches: [main, master] # 推到主分支时触发
+  pull_request: # 任何 Pull Request 都触发（评审阶段就发现问题）
+  workflow_dispatch: # 允许在 Actions 页面手动触发，便于复跑/排障
+
+# 同一分支或 PR 有新提交时，自动取消还在跑的上一次任务，省 runner 时间
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  analyze-and-test:
+    name: 静态检查与单元测试
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+
+    env:
+      # AGENTS.md「中国网络环境必配」：pub 与 Flutter SDK 走国内镜像，否则拉包会卡死
+      PUB_HOSTED_URL: https://pub.flutter-io.cn
+      FLUTTER_STORAGE_BASE_URL: https://storage.flutter-io.cn
+
+    steps:
+      # 1）检出仓库代码
+      - name: 检出代码
+        uses: actions/checkout@v4
+
+      # 2）装 JDK 17（与 AGENTS.md 中本机开发环境保持一致；flutter test 本身不需要 Android SDK）
+      - name: 安装 JDK 17
+        uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: '17'
+
+      # 3）安装 Flutter：固定走 stable 渠道，不写死具体 patch 版本
+      #    cache: true 会同时缓存 Flutter SDK 与 ~/.pub-cache 依赖（pub 依赖缓存键含 pubspec.lock 哈希），
+      #    依赖没变时后续运行可直接命中缓存，明显缩短运行时间
+      - name: 安装 Flutter (stable)
+        uses: subosito/flutter-action@v2
+        with:
+          channel: stable
+          cache: true
+
+      # 4）拉取项目依赖
+      - name: 拉取依赖
+        run: flutter pub get
+
+      # 5）静态检查：analyze 出现任何 issue（含 info 级）都会以非 0 退出，CI 即失败（项目要求 0 issue）
+      - name: 静态检查（必须 0 issue）
+        run: flutter analyze
+
+      # 6）跑全部测试（--no-pub：上一步已 pub get，跳过重复拉包）
+      - name: 单元测试
+        run: flutter test --no-pub
