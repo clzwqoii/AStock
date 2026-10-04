@@ -79,6 +79,11 @@ const kUpdateCheckUrls = <String>[
 
    若希望境外用户更快，可把同一文件同步一份到 GitHub 公开仓库——App 自动择优。
 2. `flutter build ... --build-name=1.1.0` 出包，并把 `pubspec.yaml` 与 `lib/app_logic.dart` 的 `kAppVersion` 同步为新版本
+3. 在 [Releases](https://github.com/clzwqoii/AStock/releases) 新建版本标签（如 `v1.1.0`）并上传安装包（`A股选股台.dmg`、`app-release.apk`），发布说明复制 [RELEASE_NOTES.md](RELEASE_NOTES.md) 的对应段落
+
+### 下载安装包
+
+发行版统一挂在 GitHub Releases（`https://github.com/clzwqoii/AStock/releases/latest`，`update.json` 的下载链接即指向此处）。国内用户若打不开 GitHub，可在 Gitee 仓库的「发行版」页上传同一批安装包，并把 `update.json` 的 `url` 换成 Gitee 地址。
 
 ## 开源协议
 
