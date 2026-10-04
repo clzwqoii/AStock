@@ -18,6 +18,11 @@ const kTushareHost = 'api.tushare.pro';
 String describeSyncError(Object e) {
   final text = '$e';
   final lower = text.toLowerCase();
+  final networked = e is SocketException ||
+      e is HandshakeException ||
+      e is TimeoutException ||
+      lower.contains('failed host lookup') ||
+      lower.contains('no address associated with hostname');
 
   if (e is TushareException) {
     switch (e.code) {
@@ -40,14 +45,10 @@ String describeSyncError(Object e) {
     return '连接超时：网络过慢或不稳定，请切换 Wi-Fi/蜂窝数据后重试';
   }
 
-  if (e is SocketException) {
-    if (lower.contains('failed host lookup') ||
-        lower.contains('no address associated with hostname') ||
-        lower.contains('name or service not known')) {
-      return 'DNS 解析失败：取不到 $kTushareHost 的地址。'
-          '请检查当前网络；若开着代理/VPN 请先关闭，或切换 Wi-Fi/蜂窝数据再试';
-    }
-    return '网络不通：连不上 $kTushareHost，请检查 Wi-Fi/蜂窝数据或代理设置后重试';
+  if (networked) {
+    // 网络不通时同步会自动降级新浪逐股补数（全市场约 10 分钟），提示里说清楚，避免误以为卡死
+    return 'tushare 连不上（${e is TushareException ? e.message : '网络不可达'}），'
+        '已自动降级为新浪逐股补数：慢一些但数据照常入库，请保持 App 在前台';
   }
 
   return '同步失败：$text';

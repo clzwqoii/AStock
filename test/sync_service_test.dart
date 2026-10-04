@@ -490,4 +490,160 @@ void main() {
     expect(r.dates, 1);
     expect(dailyRequested, ['20260102', '20260105', '20260106', '20260109']);
   });
+
+  // ── 网络层异常（DNS 失败/被墙/断网）也必须走降级，而不是整个同步中断 ──
+
+  test('trade_cal 网络层失败 → 退化为工作日候选，不中断同步', () async {
+    var dailyCalls = 0;
+    final client = TushareClient(
+      token: 'tok',
+      http: MockClient((req) async {
+        final api = (jsonDecode(req.body) as Map)['api_name'] as String;
+        if (api == 'trade_cal') throw const SocketException('Failed host lookup');
+        if (api == 'stock_basic') {
+          return http.Response.bytes(
+            utf8.encode(jsonEncode({
+              'code': 0,
+              'data': {
+                'fields': ['ts_code', 'name'],
+                'items': [
+                  ['S1.SH', '股票一']
+                ],
+              },
+            })),
+            200,
+          );
+        }
+        dailyCalls++;
+        final td = ((jsonDecode(req.body) as Map)['params'] as Map)['trade_date'] as String;
+        return http.Response.bytes(
+          utf8.encode(jsonEncode({
+            'code': 0,
+            'data': {
+              'fields': ['ts_code', 'trade_date', 'open', 'high', 'low', 'close', 'vol', 'amount'],
+              'items': [['S1.SH', td, 1.0, 1.0, 1.0, 1.0, 100.0, 10.0]],
+            },
+          })),
+          200,
+        );
+      }),
+    );
+    // 2026-01-08 周四：工作日候选 = 1/8、1/7、1/6
+    final r = await SyncService(client, repo,
+            now: () => DateTime(2026, 1, 8, 18), retryWait: Duration.zero)
+        .sync(backfillDays: 3, rateDelay: Duration.zero);
+    expect(dailyCalls, 3, reason: '日历挂了也要继续拉日线');
+    expect(r.dates, 3);
+    expect(repo.maxTradeDate(), '20260108');
+  });
+
+  test('daily 网络层失败 → 立刻降级新浪逐股补数（不等 65 秒限频重试）', () async {
+    // 预置一只本地代码，逐股备源才有可遍历清单
+    repo.upsertBars([
+      for (var i = 0; i < 21; i++)
+        DailyRow(
+          tsCode: '600000.SH',
+          tradeDate: DateTime(2026, 8, 22).add(Duration(days: i)).toString().substring(0, 10).replaceAll('-', ''),
+          open: 10,
+          high: 10,
+          low: 10,
+          close: 10,
+          vol: 1000,
+          amount: 1,
+        ),
+    ]);
+    var sinaCalls = 0;
+    final tushare = TushareClient(
+      token: 'tok',
+      http: MockClient((req) async {
+        final api = (jsonDecode(req.body) as Map)['api_name'] as String;
+        if (api == 'daily') throw const SocketException('Failed host lookup');
+        return http.Response.bytes(
+          utf8.encode(jsonEncode({
+            'code': 0,
+            'data': {
+              'fields': ['cal_date', 'is_open'],
+              'items': [
+                ['20260930', '1']
+              ],
+            },
+          })),
+          200,
+        );
+      }),
+    );
+    final sina = SinaClient(
+      http: MockClient((req) async {
+        sinaCalls++;
+        return http.Response.bytes(
+          utf8.encode(jsonEncode([
+            {
+              'day': '2026-09-30',
+              'open': '10.0',
+              'high': '10.6',
+              'low': '10.0',
+              'close': '10.5',
+              'volume': '920000',
+            }
+          ])),
+          200,
+        );
+      }),
+    );
+    final r = await SyncService(tushare, repo,
+            now: () => DateTime(2026, 9, 30, 18), retryWait: Duration.zero, sina: sina)
+        .sync(backfillDays: 3, rateDelay: Duration.zero);
+    expect(sinaCalls, greaterThan(0), reason: '必须真的走到新浪备源');
+    expect(r.rows, greaterThan(0), reason: 'tushare 挂了也要用新浪把数据补上');
+    expect(repo.maxTradeDate(), '20260930');
+  });
+
+  test('stock_basic 网络层失败 → 走东财名单；东财也挂则回填名称，不中断', () async {
+    var emCalls = 0;
+    final client = TushareClient(
+      token: 'tok',
+      http: MockClient((req) async {
+        final api = (jsonDecode(req.body) as Map)['api_name'] as String;
+        if (api == 'stock_basic') throw const SocketException('Failed host lookup');
+        if (api == 'trade_cal') {
+          return http.Response.bytes(
+            utf8.encode(jsonEncode({
+              'code': 0,
+              'data': {
+                'fields': ['cal_date', 'is_open'],
+                'items': [
+                  ['20260106', '1'],
+                  ['20260107', '1'],
+                  ['20260108', '1'],
+                ],
+              },
+            })),
+            200,
+          );
+        }
+        final td = ((jsonDecode(req.body) as Map)['params'] as Map)['trade_date'] as String;
+        return http.Response.bytes(
+          utf8.encode(jsonEncode({
+            'code': 0,
+            'data': {
+              'fields': ['ts_code', 'trade_date', 'open', 'high', 'low', 'close', 'vol', 'amount'],
+              'items': [['S1.SH', td, 1.0, 1.0, 1.0, 1.0, 100.0, 10.0]],
+            },
+          })),
+          200,
+        );
+      }),
+    );
+    final em = EastmoneyClient(
+      http: MockClient((req) async {
+        emCalls++;
+        throw const SocketException('Failed host lookup');
+      }),
+    );
+    final r = await SyncService(client, repo,
+            now: () => DateTime(2026, 1, 8, 18), retryWait: Duration.zero, eastmoney: em)
+        .sync(backfillDays: 1, rateDelay: Duration.zero);
+    expect(emCalls, greaterThan(0), reason: 'tushare 名单失败应换东财');
+    expect(r.rows, greaterThan(0), reason: '名单源全挂也不能影响日线入库');
+  });
 }

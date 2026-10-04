@@ -80,6 +80,8 @@ class SyncService {
     // 交易日历：低积分限频严格（如 1 次/小时），失败时退化为工作日候选；
     // 节假日会拉到空数据、不入库，下次同步自动重试（自愈）。
     List<String> candidates;
+    // 网络层异常（DNS 失败/被墙/断网）与 tushare 错误码同样要降级：
+    // 真机实测过 api.tushare.pro 解析失败时整个同步中断、一格数据都没进库。
     try {
       final cal = await _withRateRetry(
           () => _client.tradeCal(
@@ -87,7 +89,7 @@ class SyncService {
           label: 'trade_cal',
           maxAttempts: 1);
       candidates = [for (final c in cal) if (c.isOpen) c.date];
-    } on TushareException {
+    } on Exception {
       stderr.writeln('交易日历不可用，改用工作日候选（节假日会拉到空数据并自动跳过）');
       candidates = [];
       for (var d = today.subtract(Duration(days: calendarWindowDays));
@@ -117,7 +119,7 @@ class SyncService {
     try {
       _repo.upsertStocks(
           await _withRateRetry(_client.stockBasic, label: 'stock_basic', maxAttempts: 1));
-    } on TushareException {
+    } on Exception {
       try {
         _repo.upsertStocks(await (eastmoney ?? EastmoneyClient()).stockList());
         stderr.writeln('tushare 股票列表限频，已自动改用东方财富数据源');
@@ -137,7 +139,8 @@ class SyncService {
         onProgress?.call('$d ${dayRows.length} 行');
         if (rateDelay > Duration.zero) await Future.delayed(rateDelay);
       }
-    } on TushareException {
+    } on Exception {
+      // 错误码与网络层异常（DNS/超时/连接被拒）都走逐股备源；备源为空才把异常抛给上层提示。
       final sources = _perStockSources();
       if (sources.isEmpty) rethrow;
       stderr.writeln(

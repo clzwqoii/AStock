@@ -10,18 +10,18 @@ import 'package:stock/net_diag.dart';
 
 void main() {
   group('describeSyncError', () {
-    test('DNS 解析失败 → 提示关代理/VPN', () {
+    test('DNS 解析失败 → 提示已降级新浪 + 关代理/VPN', () {
       final s = describeSyncError(const SocketException(
           "Failed host lookup: 'api.tushare.pro' (OS Error: No address associated with hostname, errno = 7)"));
-      expect(s, contains('DNS'));
-      expect(s, contains('代理'));
-      expect(s, contains('VPN'));
-      expect(s, contains('api.tushare.pro'));
+      expect(s, contains('新浪'));
+      expect(s, contains('数据照常入库'));
     });
 
-    test('连接类错误 → 提示检查网络', () {
+    test('连接类错误 → 同样走降级文案', () {
       for (final msg in ['Connection refused', 'Connection failed', 'Network is unreachable']) {
-        expect(describeSyncError(SocketException(msg)), contains('网络'));
+        final s = describeSyncError(SocketException(msg));
+        expect(s, contains('新浪'));
+        expect(s, contains('数据照常入库'));
       }
     });
 
