@@ -55,6 +55,24 @@ hdiutil create -volname A股选股台 -srcfolder build/dmg -format UDZO build/A�
 - 签名密钥：`android/app/*.jks` 与 `android/key.properties`，**禁止提交**；口令见 key.properties
 - release 与 debug 同 bundle id，**一次只运行一个**；手机上从 debug 版切 release 需先卸载（签名不同）
 
+### 一键发版（双平台发行版自动上传）
+
+```bash
+tool/release.sh 1.1.0 --dry-run   # 仅本地构建与版本号校验，不推送
+tool/release.sh 1.1.0             # 全自动：构建 → 提交推送双平台 → GitHub + Gitee 双发行版
+```
+
+发版前需在三处同步版本号（脚本会校验，不一致直接报错）：`pubspec.yaml`、`lib/app_logic.dart` 的 `kAppVersion`、`update.json`。发行说明自动取 [RELEASE_NOTES.md](RELEASE_NOTES.md) 中对应版本段落。
+
+**Gitee 发行版需要一个私人令牌**（https://gitee.com/profile/personal_access_tokens 新建，勾选 `projects` 权限），二选一配置：
+
+```bash
+security add-generic-password -s gitee-release -a clzwqoii -w <令牌>   # 存钥匙串（推荐）
+GITEE_TOKEN=<令牌> tool/release.sh 1.1.0                          # 或临时环境变量
+```
+
+GitHub 发行版无需额外配置（`gh` 已认证）。
+
 ## 检查更新（多源自动分流）
 
 菜单栏「检查更新…」会**并发请求所有候选源，第一个响应的胜出**（15 秒超时）：国内网络自动命中 Gitee，境外命中 GitHub，被墙的源直接被忽略、不拖慢检查。候选源在 `lib/app_logic.dart` 的 `kUpdateCheckUrls`（建仓库后替换为你的地址）：
