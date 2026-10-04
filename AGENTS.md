@@ -11,6 +11,7 @@
 - 运行 macOS demo：`flutter run -d macos`
 - 正式构建：`flutter build apk --release`（签名读 android/key.properties，已 gitignore；口令勿写进任何文档）
 - 正式构建：`flutter build macos --release`；dmg：`hdiutil create -volname A股选股台 -srcfolder build/dmg -format UDZO build/A股选股台.dmg`
+- 重生成安卓启动图标（源图 = macOS 图标集里的 1024，即用户选定的图标方案 H）：`python3 tool/gen_android_icons.py`（幂等；同时产出 legacy PNG 与 adaptive icon 两套，换源图后必须重跑）
 
 ## 中国网络环境必配
 
