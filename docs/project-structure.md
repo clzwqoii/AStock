@@ -28,7 +28,8 @@ stock/
 │       ├── bar_repository.dart#   SQLite 读写：stocks / daily_bars 表，upsert 幂等，loadAllStocks 供引擎消费
 │       └── sync_service.dart  #   增量同步编排：交易日历（失败退化为工作日候选）→ 待拉日期 → 逐日入库；40203 限频自动重试
 │   ├── ui/                    # ── Flutter 界面 ──
-│       ├── candle_chart.dart  #   日K蜡烛图（CustomPainter 自绘：蜡烛+成交量+MA5/10/20）
+│       ├── candle_chart.dart  #   日K蜡烛图（CustomPainter 自绘：蜡烛+成交量+MA5/10/20）；十字光标（桌面悬停/移动拖动）与读数浮层
+│       ├── candle_chart_math.dart # K线图纯计算：ChartGeometry（像素↔索引/价格双向换算）、priceRange、CandleReadout、formatVolume；不依赖绘制，可独立单测
 │       ├── stock_detail_page.dart # 个股详情页（指标数值 + K线），桌面/移动共用
 │       ├── onboarding.dart     #   首次启动引导（无 token 时弹三步：注册→填token→开始），url_launcher 跳转注册页
 │       ├── colors.dart        #   AppColors 静态中性色 + AccentColor 枚举（红/深/蓝/绿）+ AccentScope 继承作用域

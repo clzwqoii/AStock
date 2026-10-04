@@ -117,7 +117,7 @@ void main() {
 
     expect(find.byType(CandleChart), findsOneWidget);
     expect(find.textContaining('RSI14'), findsWidgets);
-    expect(find.textContaining('前复权'), findsOneWidget);
+    expect(find.textContaining('不复权'), findsOneWidget);
   });
 
   testWidgets('底部导航切到设置页可切换主题色并持久化', (tester) async {

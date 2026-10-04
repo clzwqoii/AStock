@@ -74,7 +74,7 @@ class _StockDetailPageState extends State<StockDetailPage> {
                           _legend('MA${i == 0 ? 5 : i == 1 ? 10 : 20}', _maColors[i]),
                           const SizedBox(width: 16),
                         ],
-                        const Text('· 前复权', style: TextStyle(fontSize: 10, color: AppColors.dim)),
+                        const Text('· 不复权 · 手', style: TextStyle(fontSize: 10, color: AppColors.dim)),
                       ],
                     ),
                   ),
