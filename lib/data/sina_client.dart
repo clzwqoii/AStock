@@ -50,7 +50,7 @@ class SinaClient {
           high: _d(k['high']),
           low: _d(k['low']),
           close: _d(k['close']),
-          vol: _d(k['volume']),
+          vol: _d(k['volume']) / 100, // 新浪成交量单位是股，统一换算成手
           amount: 0,
         ),
     ];

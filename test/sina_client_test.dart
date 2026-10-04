@@ -21,7 +21,7 @@ void main() {
               'high': '10.6',
               'low': '10.0',
               'close': '10.5',
-              'volume': '9200',
+              'volume': '920000',
             },
           ])),
           200,
@@ -38,7 +38,7 @@ void main() {
     expect(rows.single.high, 10.6);
     expect(rows.single.low, 10.0);
     expect(rows.single.close, 10.5);
-    expect(rows.single.vol, 9200);
+    expect(rows.single.vol, 9200, reason: '新浪成交量单位是股，统一换算成手');
     expect(rows.single.amount, 0, reason: '该接口无成交额');
   });
 

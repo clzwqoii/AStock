@@ -23,9 +23,8 @@ stock/
 │   └── data/                  # ── 数据层（网络与存储）──
 │       ├── tushare_client.dart#   tushare pro HTTP 客户端：请求构造、offset 翻页、错误码翻译（TushareException）
 │       ├── eastmoney_client.dart#  东方财富公开接口（免 token）：股票代码+名称名单，tushare stock_basic 限频时的自动降级源
-│       ├── tencent_client.dart #  腾讯日K（免 token，逐股 400 根，开收高低序，不含北交所）
-│       ├── sina_client.dart    #  新浪日K（免 token，scale=240，不含北交所）
-│       ├── netease_client.dart #  网易历史日线 CSV（免 token，GB2312 头按列位解析，元→千元，不含北交所）
+│       ├── tencent_client.dart #  腾讯股票名称（fqkline 响应自带 qt 块；日K仅前复权，禁止进日线链路）
+│       ├── sina_client.dart    #  新浪日K（免 token，scale=240，不复权，vol 股→手，不含北交所）
 │       ├── bar_repository.dart#   SQLite 读写：stocks / daily_bars 表，upsert 幂等，loadAllStocks 供引擎消费
 │       └── sync_service.dart  #   增量同步编排：交易日历（失败退化为工作日候选）→ 待拉日期 → 逐日入库；40203 限频自动重试
 │   ├── ui/                    # ── Flutter 界面 ──
@@ -118,8 +117,8 @@ tushare pro HTTP ──> TushareClient（翻页/错误码）
 - ✅ 数据库已开 WAL 模式：自动同步（写）与选股（读）并发不互锁
 - ✅ 真数据：120 交易日 / 62.4 万行已入库，端到端选股已验证（CLI 与引擎层）
 - ⏳ UI 待做：K 线图查看个股、选股结果展示股票名称（依赖 stock_basic 恢复拉取）、真机/桌面端视觉验收
-- ✅ HTTP 超时：tushare/腾讯/新浪/网易/东财 全部 15 秒超时（可注入），超时抛 TushareException(408)「请求超时（15秒）：接口名」，避免界面长时间「同步中」
+- ✅ HTTP 超时：tushare/腾讯/新浪/东财 全部 15 秒超时（可注入），超时抛 TushareException(408)「请求超时（15秒）：接口名」，避免界面长时间「同步中」
 - ✅ Android 模拟器端到端验证（2026-10-04）：release APK 安装启动、debug 版沙盒路径注入 62 万行、自动同步（真实网络成功）、勾规则选股（5586→1800）、卡片进入 K 线详情（真实名称+均线+成交量）全通过；AVD 名 stock_test（无头启动 `-no-window -no-audio -no-snapshot -gpu swiftshader_indirect`）
 - ✅ iOS 模拟器验证（2026-10-04）：移动布局/主题/沙盒路径/本地数据/同步状态展示均正常；**模拟器内网络受宿主机代理 fake-ip（198.18.x）影响不可用（非代码问题，真机正常）**
-- ⏳ 数据源备份：✅ 日线四源优先级链 **tushare(按日全市场) → 腾讯 → 新浪 → 网易（均逐股）**，前一级失败/无数据自动切下一级；✅ 股票名单/名称三级链 **tushare stock_basic → 东财 clist → 腾讯/东财逐股名称回填**（东财 push2 域名在部分网络被拦时自动走逐股，一次性约 10 分钟，只补缺失名称）；交易日历 tushare → 工作日候选自愈
+- ⏳ 数据源备份：✅ 日线双源 **tushare(按日全市场) → 新浪（逐股，与主源同口径：不复权/手）**；✅ 股票名单/名称三级链 **tushare stock_basic → 东财 clist → 腾讯/东财逐股名称回填**（东财 push2 域名在部分网络被拦时自动走逐股，一次性约 10 分钟，只补缺失名称）；交易日历 tushare → 工作日候选自愈
 - ⏳ macOS/iOS 桌面构建需先完成 Xcode 许可初始化（三条 sudo 命令，须分行执行）

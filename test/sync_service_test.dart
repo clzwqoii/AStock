@@ -252,7 +252,7 @@ void main() {
     expect(names['000002.SZ'], '东财二');
   });
 
-  test('tushare daily 限频时自动降级腾讯逐股补数', () async {
+  test('tushare daily 限频时自动降级新浪逐股补数', () async {
     // 预置 600000.SH 39 根日线（2026-08-22 起），同步水位 20260929。
     final dates = [
       for (var i = 0; i < 39; i++)
@@ -291,18 +291,18 @@ void main() {
         );
       }),
     );
-    final tencent = TencentClient(
+    final sina = SinaClient(
       http: MockClient((req) async => http.Response.bytes(
-            utf8.encode(jsonEncode({
-              'code': 0,
-              'data': {
-                'sh600000': {
-                  'qfqday': [
-                    ['2026-09-30', '10.0', '10.5', '10.6', '10.0', '9200'],
-                  ],
-                },
+            utf8.encode(jsonEncode([
+              {
+                'day': '2026-09-30',
+                'open': '10.0',
+                'high': '10.6',
+                'low': '10.0',
+                'close': '10.5',
+                'volume': '920000',
               },
-            })),
+            ])),
             200,
           )),
     );
@@ -310,33 +310,27 @@ void main() {
     final r = await SyncService(tushare, repo,
             now: () => DateTime(2026, 9, 30, 18),
             retryWait: Duration.zero,
-            tencent: tencent)
+            sina: sina)
         .sync(backfillDays: 3, rateDelay: Duration.zero);
 
-    expect(r.rows, 1, reason: '腾讯应补上 20260930 这天');
+    expect(r.rows, 1, reason: '新浪应补上 20260930 这天');
     expect(repo.maxTradeDate(), '20260930');
     final bars = repo.loadAllStocks().firstWhere((s) => s.symbol == '600000.SH').bars;
     expect(bars.last.close, 10.5);
     expect(bars.last.volume, 9200);
   });
 
-  test('日线源按优先级降级：腾讯挂了自动切新浪', () async {
+  test('tushare daily 不可用时降级新浪逐股补数（不复权·手口径）', () async {
+    // 预置 600000.SH 39 根历史，使逐股备源有可遍历的本地代码（空库会去拉名单）
     final dates = [
       for (var i = 0; i < 39; i++)
-        DateTime(2026, 8, 22)
-            .add(Duration(days: i))
-            .toIso8601String()
-            .substring(0, 10)
-            .replaceAll('-', '')
+        DateTime(2026, 8, 22).add(Duration(days: i)).toIso8601String().substring(0, 10).replaceAll('-', '')
     ];
     repo.upsertBars([
       for (final d in dates)
-        DailyRow(
-            tsCode: '600000.SH',
-            tradeDate: d,
+        DailyRow(tsCode: '600000.SH', tradeDate: d,
             open: 10.0, high: 10.0, low: 10.0, close: 10.0, vol: 100.0, amount: 1),
     ]);
-
     final tushare = TushareClient(
       token: 'tok',
       http: MockClient((req) async {
@@ -356,104 +350,32 @@ void main() {
         );
       }),
     );
-    final tencent = TencentClient(
-      http: MockClient((req) async => http.Response('<html>server error</html>', 500)),
-    );
-    var sinaCalled = false;
     final sina = SinaClient(
-      http: MockClient((req) async {
-        sinaCalled = true;
-        return http.Response.bytes(
-          utf8.encode(jsonEncode([
-            {'day': '2026-09-30', 'open': '10.0', 'high': '10.6', 'low': '10.0', 'close': '9.9', 'volume': '7000'},
-          ])),
-          200,
-        );
-      }),
+      http: MockClient((req) async => http.Response.bytes(
+            utf8.encode(jsonEncode([
+              {
+                'day': '2026-09-30',
+                'open': '10.0',
+                'high': '10.6',
+                'low': '10.0',
+                'close': '10.5',
+                'volume': '920000',
+              },
+            ])),
+            200,
+          )),
     );
 
     final r = await SyncService(tushare, repo,
             now: () => DateTime(2026, 9, 30, 18),
             retryWait: Duration.zero,
-            tencent: tencent,
             sina: sina)
         .sync(backfillDays: 3, rateDelay: Duration.zero);
 
-    expect(sinaCalled, isTrue);
     expect(r.rows, 1);
     final bars = repo.loadAllStocks().firstWhere((s) => s.symbol == '600000.SH').bars;
-    expect(bars.last.close, 9.9, reason: '数据应来自新浪（腾讯已挂）');
-  });
-
-  test('优先级：腾讯可用时新浪不被调用', () async {
-    final dates = [
-      for (var i = 0; i < 39; i++)
-        DateTime(2026, 8, 22)
-            .add(Duration(days: i))
-            .toIso8601String()
-            .substring(0, 10)
-            .replaceAll('-', '')
-    ];
-    repo.upsertBars([
-      for (final d in dates)
-        DailyRow(
-            tsCode: '600000.SH',
-            tradeDate: d,
-            open: 10.0, high: 10.0, low: 10.0, close: 10.0, vol: 100.0, amount: 1),
-    ]);
-
-    final tushare = TushareClient(
-      token: 'tok',
-      http: MockClient((req) async {
-        final api = (jsonDecode(req.body) as Map<String, dynamic>)['api_name'] as String;
-        if (api == 'daily') {
-          return http.Response.bytes(
-            utf8.encode(jsonEncode({'code': 40203, 'msg': 'daily 频率超限'})),
-            200,
-          );
-        }
-        return http.Response.bytes(
-          utf8.encode(jsonEncode({
-            'code': 0,
-            'data': {'fields': ['cal_date', 'is_open'], 'items': [['20260930', '1']]},
-          })),
-          200,
-        );
-      }),
-    );
-    final tencent = TencentClient(
-      http: MockClient((req) async => http.Response.bytes(
-            utf8.encode(jsonEncode({
-              'code': 0,
-              'data': {
-                'sh600000': {
-                  'qfqday': [
-                    ['2026-09-30', '10.0', '10.5', '10.6', '10.0', '9200'],
-                  ],
-                },
-              },
-            })),
-            200,
-          )),
-    );
-    var sinaCalled = false;
-    final sina = SinaClient(
-      http: MockClient((req) async {
-        sinaCalled = true;
-        return http.Response('[]', 200);
-      }),
-    );
-
-    await SyncService(tushare, repo,
-            now: () => DateTime(2026, 9, 30, 18),
-            retryWait: Duration.zero,
-            tencent: tencent,
-            sina: sina)
-        .sync(backfillDays: 3, rateDelay: Duration.zero);
-
-    expect(sinaCalled, isFalse, reason: '腾讯成功后不应再请求新浪');
-    final bars = repo.loadAllStocks().firstWhere((s) => s.symbol == '600000.SH').bars;
     expect(bars.last.close, 10.5);
+    expect(bars.last.volume, 9200, reason: '新浪的股已换算成手');
   });
 
   test('东财也不可用时用腾讯逐股回填名称', () async {

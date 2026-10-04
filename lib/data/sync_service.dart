@@ -5,7 +5,6 @@ import 'dart:io';
 
 import 'bar_repository.dart';
 import 'eastmoney_client.dart';
-import 'netease_client.dart';
 import 'sina_client.dart';
 import 'tencent_client.dart';
 import 'tushare_client.dart';
@@ -34,7 +33,6 @@ class SyncService {
     this.eastmoney,
     this.tencent,
     this.sina,
-    this.netease,
   })  : _now = now ?? DateTime.now;
 
   final TushareClient _client;
@@ -42,10 +40,10 @@ class SyncService {
   final DateTime Function() _now;
   final EastmoneyClient? eastmoney;
 
-  /// 日线逐股备源（按优先级排序，前一级无数据自动切下一级）。
+  /// 日线逐股备源：新浪（不复权·手，与 tushare 主源同口径）。
+  /// 腾讯仅用于股票名称查询——它的日K只有前复权（与主源混用会造成历史断层），网易接口已 502，均不进日线链路。
   final TencentClient? tencent;
   final SinaClient? sina;
-  final NeteaseClient? netease;
 
   /// 回填窗口的日历查询跨度（日历日），400 天 ≈ 270 个交易日。
   final int calendarWindowDays;
@@ -153,13 +151,11 @@ class SyncService {
     return SyncResult(dates: targets.length, rows: rows);
   }
 
-  bool get _hasPerStockSources => tencent != null || sina != null || netease != null;
+  bool get _hasPerStockSources => sina != null;
 
-  /// 日线逐股备源链（按优先级）：腾讯 → 新浪 → 网易。元素为 (源名, 按股票代码拉日K)。
+  /// 日线逐股备源链（按优先级）。元素为 (源名, 按股票代码拉日K)。
   List<(String, Future<List<DailyRow>> Function(String symbol))> _perStockSources() => [
-        if (tencent != null) ('腾讯', (sym) => tencent!.dailyBars(sym)),
         if (sina != null) ('新浪', (sym) => sina!.dailyBars(sym)),
-        if (netease != null) ('网易', (sym) => netease!.dailyBars(sym)),
       ];
 
   /// 逐股补数：遍历本地已有股票（空库时向东财要名单），
