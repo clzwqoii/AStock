@@ -1,0 +1,29 @@
+<!DOCTYPE html>
+<html><head><meta charset="UTF-8">
+<style>
+  * { margin:0; padding:0; }
+  body { width:1024px; height:1024px; background:#ddd; overflow:hidden; display:flex; align-items:center; justify-content:center; }
+  .icon { width:1024px; height:1024px; border-radius:232px; overflow:hidden; position:relative;
+          background: linear-gradient(150deg, #ffb35c 0%, #f77f3e 40%, #e8503f 75%, #d7263d 100%); }
+  .sun { position:absolute; right:-180px; top:-180px; width:640px; height:640px; border-radius:50%;
+         background:radial-gradient(closest-side, rgba(255,236,180,.5), transparent); }
+  .arrow { position:absolute; left:120px; top:180px; }
+  .bars { position:absolute; left:150px; bottom:150px; display:flex; align-items:flex-end; gap:36px; opacity:.55; }
+  .bar { width:74px; border-radius:12px 12px 0 0; background:rgba(255,255,255,.85); }
+</style></head>
+<body>
+  <div class="icon">
+    <div class="sun"></div>
+    <svg class="arrow" width="800" height="700" viewBox="0 0 800 700">
+      <path d="M 60 640 L 420 300 L 470 350 L 640 130"
+            fill="none" stroke="#ffffff" stroke-width="64" stroke-linecap="round" stroke-linejoin="round"/>
+      <path d="M 520 110 L 740 96 L 660 300 Z" fill="#ffffff"/>
+    </svg>
+    <div class="bars">
+      <div class="bar" style="height:120px"></div>
+      <div class="bar" style="height:180px"></div>
+      <div class="bar" style="height:260px"></div>
+    </div>
+  </div>
+</body>
+</html>

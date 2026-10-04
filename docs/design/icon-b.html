@@ -1,0 +1,35 @@
+<!DOCTYPE html>
+<html><head><meta charset="UTF-8">
+<style>
+  * { margin:0; padding:0; }
+  body { width:1024px; height:1024px; background:#ddd; overflow:hidden; display:flex; align-items:center; justify-content:center; }
+  .icon { width:1024px; height:1024px; border-radius:232px; overflow:hidden; position:relative;
+          background: radial-gradient(120% 100% at 20% 0%, #1d222c 0%, #12151c 55%, #0d1016 100%); }
+  .grid { position:absolute; inset:0;
+          background-image: linear-gradient(rgba(255,255,255,.045) 1px, transparent 1px), linear-gradient(90deg, rgba(255,255,255,.045) 1px, transparent 1px);
+          background-size: 128px 128px; }
+  .line { position:absolute; left:130px; right:130px; bottom:210px; height:360px; }
+  .candle { position:absolute; width:80px; border-radius:12px; }
+  .wick { position:absolute; left:50%; width:9px; transform:translateX(-50%); border-radius:5px; }
+  .c1 { left:190px; bottom:240px; height:210px; background:#f0455a; box-shadow:0 0 40px rgba(240,69,90,.45); }
+  .c1 .wick { top:-54px; height:318px; background:#f0455a; }
+  .c2 { left:415px; bottom:300px; height:185px; background:#2fbf8f; box-shadow:0 0 40px rgba(47,191,143,.4); }
+  .c2 .wick { top:-42px; height:269px; background:#2fbf8f; }
+  .c3 { left:640px; bottom:390px; height:245px; background:#f0455a; box-shadow:0 0 46px rgba(240,69,90,.5); }
+  .c3 .wick { top:-58px; height:359px; background:#f0455a; }
+  .poly { position:absolute; left:130px; right:130px; bottom:210px; height:360px; }
+</style></head>
+<body>
+  <div class="icon">
+    <div class="grid"></div>
+    <svg class="poly" viewBox="0 0 764 360" preserveAspectRatio="none">
+      <polyline points="12,330 200,265 390,292 580,150 752,40" fill="none" stroke="#e8ecf5" stroke-width="15" stroke-linecap="round" stroke-linejoin="round" opacity=".8"/>
+      <circle cx="752" cy="40" r="26" fill="#ffffff"/>
+      <circle cx="752" cy="40" r="14" fill="#f0455a"/>
+    </svg>
+    <div class="candle c1"><div class="wick"></div></div>
+    <div class="candle c2"><div class="wick"></div></div>
+    <div class="candle c3"><div class="wick"></div></div>
+  </div>
+</body>
+</html>

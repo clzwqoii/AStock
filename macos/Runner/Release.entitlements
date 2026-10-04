@@ -1,0 +1,8 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+	<!-- ponytail: 桌面直发（非 App Store）需要访问 ~/.stock 共享数据，关沙盒；
+	     若未来上架 Mac App Store，需恢复沙盒并用 path_provider 把数据/配置移进容器 -->
+</dict>
+</plist>

@@ -1,0 +1,29 @@
+<!DOCTYPE html>
+<html><head><meta charset="UTF-8">
+<style>
+  * { margin:0; padding:0; }
+  body { width:1024px; height:1024px; background:#ddd; overflow:hidden; display:flex; align-items:center; justify-content:center; }
+  .icon { width:1024px; height:1024px; border-radius:232px; overflow:hidden; position:relative;
+          background: linear-gradient(165deg, #ffffff 0%, #f5f7fa 100%);
+          box-shadow: inset 0 0 0 2px rgba(0,0,0,.06); }
+  .lens { position:absolute; left:210px; top:190px; width:460px; height:460px; border-radius:50%;
+          border:44px solid #d7263d;
+          background: linear-gradient(160deg, #ffe9ec 0%, #ffd6dc 100%);
+          box-shadow: 0 22px 60px rgba(215,38,61,.28); }
+  .handle { position:absolute; width:54px; height:260px; border-radius:27px; background:#d7263d;
+            transform: rotate(-45deg); left:635px; top:600px; box-shadow: 0 16px 34px rgba(215,38,61,.3); }
+  .candle { position:absolute; width:62px; border-radius:9px; }
+  .wick { position:absolute; left:50%; width:8px; transform:translateX(-50%); border-radius:4px; }
+  .c1 { left:322px; top:340px; height:115px; background:#e0313e; } .c1 .wick { top:-28px; height:171px; background:#e0313e; }
+  .c2 { left:432px; top:300px; height:155px; background:#ffffff; box-shadow:0 6px 16px rgba(0,0,0,.08); }
+  .c2 .wick { top:-32px; height:219px; background:#ffffff; }
+</style></head>
+<body>
+  <div class="icon">
+    <div class="lens"></div>
+    <div class="candle c1"><div class="wick"></div></div>
+    <div class="candle c2"><div class="wick"></div></div>
+    <div class="handle"></div>
+  </div>
+</body>
+</html>

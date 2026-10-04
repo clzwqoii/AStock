@@ -1,0 +1,32 @@
+<!DOCTYPE html>
+<html><head><meta charset="UTF-8">
+<style>
+  * { margin:0; padding:0; }
+  body { width:1024px; height:1024px; background:#ddd; overflow:hidden; display:flex; align-items:center; justify-content:center; }
+  .icon { width:1024px; height:1024px; border-radius:232px; background:#fafbfc; position:relative; overflow:hidden;
+          box-shadow: inset 0 0 0 2px rgba(0,0,0,.04); }
+  /* 底部淡网格 */
+  .grid { position:absolute; inset:180px 140px 160px;
+          background-image: linear-gradient(#eef1f5 1px, transparent 1px), linear-gradient(90deg, #eef1f5 1px, transparent 1px);
+          background-size: 124px 124px; }
+  /* 均线 */
+  .ma { position:absolute; left:150px; right:150px; bottom:200px; height:340px; }
+  .ma svg { width:100%; height:100%; }
+  .candle { position:absolute; width:74px; border-radius:10px; }
+  .wick { position:absolute; left:50%; width:8px; transform:translateX(-50%); border-radius:4px; }
+  .c1 { left:210px; bottom:250px; height:200px; background:#e0313e; } .c1 .wick { top:-52px; height:304px; background:#e0313e; }
+  .c2 { left:420px; bottom:300px; height:180px; background:#0ca678; } .c2 .wick { top:-40px; height:260px; background:#0ca678; }
+  .c3 { left:630px; bottom:380px; height:230px; background:#e0313e; } .c3 .wick { top:-56px; height:342px; background:#e0313e; }
+</style></head>
+<body>
+  <div class="icon">
+    <div class="grid"></div>
+    <svg class="ma" viewBox="0 0 724 340" preserveAspectRatio="none">
+      <polyline points="10,300 180,250 360,270 540,160 714,60" fill="none" stroke="#8d95a3" stroke-width="14" stroke-linecap="round" stroke-linejoin="round" opacity=".55"/>
+    </svg>
+    <div class="candle c1"><div class="wick"></div></div>
+    <div class="candle c2"><div class="wick"></div></div>
+    <div class="candle c3"><div class="wick"></div></div>
+  </div>
+</body>
+</html>

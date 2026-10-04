@@ -1,0 +1,29 @@
+<!DOCTYPE html>
+<html><head><meta charset="UTF-8">
+<style>
+  * { margin:0; padding:0; }
+  body { width:1024px; height:1024px; background:#ddd; overflow:hidden; display:flex; align-items:center; justify-content:center; }
+  .icon { width:1024px; height:1024px; border-radius:232px; overflow:hidden; position:relative;
+          background: linear-gradient(155deg, #1c3574 0%, #12255c 45%, #0b1a44 100%); }
+  .glow { position:absolute; left:-150px; top:-200px; width:800px; height:700px; border-radius:50%;
+          background:radial-gradient(closest-side, rgba(90,130,255,.35), transparent); }
+  .wm { position:absolute; right:-60px; bottom:-40px; opacity:.08; }
+  .candle { position:absolute; width:70px; border-radius:10px; background:#ffffff; }
+  .wick { position:absolute; left:50%; width:8px; transform:translateX(-50%); border-radius:4px; background:#ffffff; }
+  .c1 { right:120px; bottom:150px; height:220px; } .c1 .wick { top:-46px; height:312px; }
+  .c2 { right:260px; bottom:110px; height:160px; opacity:.7; } .c2 .wick { top:-36px; height:232px; }
+  .zi { position:absolute; left:110px; top:190px; font-family:'PingFang SC','Hiragino Sans GB',sans-serif;
+        font-size:560px; font-weight:800; line-height:1;
+        background:linear-gradient(170deg, #fbe7a8 8%, #f2c14e 45%, #c98f2b 90%);
+        -webkit-background-clip:text; background-clip:text; color:transparent;
+        text-shadow:0 30px 60px rgba(0,0,0,.35); }
+</style></head>
+<body>
+  <div class="icon">
+    <div class="glow"></div>
+    <div class="zi">股</div>
+    <div class="candle c1"><div class="wick"></div></div>
+    <div class="candle c2"><div class="wick"></div></div>
+  </div>
+</body>
+</html>

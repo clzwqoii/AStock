@@ -1,0 +1,97 @@
+<!DOCTYPE html>
+<html><head><meta charset="UTF-8">
+<style>
+  * { margin:0; padding:0; box-sizing:border-box; }
+  body { width:390px; height:844px; background:#F2F3F7; overflow:hidden; position:relative;
+         font-family:-apple-system,'PingFang SC',sans-serif; color:#20262F; }
+  .mono { font-family:'SF Mono',Menlo,monospace; font-variant-numeric:tabular-nums; }
+  .up { color:#D7263D; } .down { color:#0A8F62; }
+
+  /* 大标题头部 */
+  .hd { background:linear-gradient(160deg,#d7263d,#a01c33); color:#fff; padding:52px 18px 46px;
+        border-radius:0 0 26px 26px; }
+  .hd .row1 { display:flex; align-items:center; }
+  .hd h1 { font-size:22px; font-weight:800; flex:1; }
+  .sync { font-size:10px; background:rgba(255,255,255,.18); padding:4px 10px; border-radius:10px; }
+  .hd .sub { font-size:11px; opacity:.85; margin-top:4px; }
+
+  /* 统计卡（悬浮叠在头部上） */
+  .stats { display:flex; gap:10px; margin:-30px 14px 12px; }
+  .st { flex:1; background:#fff; border-radius:14px; padding:12px 14px; box-shadow:0 6px 18px rgba(30,40,70,.08); }
+  .st .v { font-size:20px; font-weight:800; }
+  .st .k { font-size:10px; color:#8D95A3; margin-top:2px; }
+
+  /* 规则折叠面板 */
+  .panel { background:#fff; border-radius:14px; margin:0 14px 12px; box-shadow:0 4px 14px rgba(30,40,70,.06); }
+  .panel-hd { display:flex; align-items:center; padding:14px 16px; font-size:13px; font-weight:700; }
+  .panel-hd .cnt { margin-left:auto; font-size:11px; color:#D7263D; font-weight:700; }
+  .panel-hd .chev { color:#B5BCC9; margin-left:8px; }
+  .rule { display:flex; align-items:center; padding:11px 16px; border-top:1px solid #F2F3F7; font-size:14px; }
+  .rule .nm { flex:1; }
+  .rule .cat { font-size:9px; color:#B5BCC9; border:1px solid #E5E8EF; border-radius:4px; padding:1px 6px; margin-right:10px; }
+  .sw { width:44px; height:26px; border-radius:13px; background:#D7263D; position:relative; flex-shrink:0; }
+  .sw::after { content:''; position:absolute; width:22px; height:22px; border-radius:50%; background:#fff; top:2px; right:2px;
+               box-shadow:0 1px 3px rgba(0,0,0,.25); }
+  .sw.off { background:#CDD3DC; } .sw.off::after { right:auto; left:2px; }
+
+  .bigbtn { margin:0 14px 12px; height:50px; border-radius:13px; background:#D7263D; color:#fff; font-size:16px;
+            font-weight:800; letter-spacing:6px; display:flex; align-items:center; justify-content:center;
+            box-shadow:0 8px 20px rgba(215,38,61,.3); }
+
+  /* 结果卡片 */
+  .res-hd { padding:4px 18px 8px; font-size:12px; color:#8D95A3; }
+  .res-hd b { color:#D7263D; }
+  .card { background:#fff; border-radius:14px; margin:0 14px 10px; padding:13px 16px;
+          display:flex; align-items:center; box-shadow:0 3px 10px rgba(30,40,70,.05); }
+  .card .l { flex:1; min-width:0; }
+  .card .nm { font-size:15px; font-weight:700; }
+  .card .cd { font-size:11px; color:#8D95A3; margin-top:2px; }
+  .card .r { text-align:right; }
+  .card .px { font-size:16px; font-weight:800; }
+  .card .pct { font-size:11px; margin-top:2px; }
+  .pct.on { color:#D7263D; font-weight:700; } .pct.off { color:#0A8F62; }
+
+  /* 底部导航 */
+  .tabbar { position:absolute; bottom:0; left:0; right:0; background:#fff; border-top:1px solid #E5E8EF;
+            display:flex; padding:8px 0 22px; }
+  .tab { flex:1; text-align:center; font-size:10px; color:#9AA2B5; }
+  .tab .ic { font-size:20px; display:block; margin-bottom:2px; }
+  .tab.on { color:#D7263D; font-weight:700; }
+</style></head>
+<body>
+  <div class="hd">
+    <div class="row1"><h1>A股选股</h1><div class="sync">已同步 09-30</div></div>
+    <div class="sub">收盘价站上MA20 ∧ MA5上穿MA10</div>
+  </div>
+
+  <div class="stats">
+    <div class="st"><div class="v mono">5586</div><div class="k">全市场</div></div>
+    <div class="st"><div class="v mono" style="color:#D7263D">56</div><div class="k">入选</div></div>
+    <div class="st"><div class="v mono">120</div><div class="k">交易日</div></div>
+  </div>
+
+  <div class="panel">
+    <div class="panel-hd">选股规则<span class="cnt">已选 2</span><span class="chev">▾</span></div>
+    <div class="rule"><div class="nm">收盘价站上MA20</div><div class="cat">趋势</div><div class="sw"></div></div>
+    <div class="rule"><div class="nm">MA5上穿MA10</div><div class="cat">趋势</div><div class="sw"></div></div>
+    <div class="rule"><div class="nm">MACD金叉</div><div class="cat">趋势</div><div class="sw off"></div></div>
+  </div>
+
+  <div class="bigbtn">开始选股</div>
+
+  <div class="res-hd">入选 <b>56</b> 只 · 点击查看详情</div>
+  <div class="card"><div class="l"><div class="nm">威孚高科</div><div class="cd mono">000581.SZ</div></div>
+    <div class="r"><div class="px mono">18.21</div><div class="pct mono on">+2.31%</div></div></div>
+  <div class="card"><div class="l"><div class="nm">惠天热电</div><div class="cd mono">000692.SZ</div></div>
+    <div class="r"><div class="px mono">4.59</div><div class="pct mono on">+5.02%</div></div></div>
+  <div class="card"><div class="l"><div class="nm">启明信息</div><div class="cd mono">002232.SZ</div></div>
+    <div class="r"><div class="px mono">16.48</div><div class="pct mono on">+3.51%</div></div></div>
+  <div class="card"><div class="l"><div class="nm">天融信</div><div class="cd mono">002212.SZ</div></div>
+    <div class="r"><div class="px mono">7.21</div><div class="pct mono off">−0.96%</div></div></div>
+
+  <div class="tabbar">
+    <div class="tab on"><span class="ic">📊</span>选股</div>
+    <div class="tab"><span class="ic">⚙️</span>设置</div>
+  </div>
+</body>
+</html>

@@ -1,0 +1,39 @@
+<!DOCTYPE html>
+<html><head><meta charset="UTF-8">
+<style>
+  * { margin:0; padding:0; }
+  body { width:1024px; height:1024px; background:#ddd; overflow:hidden; display:flex; align-items:center; justify-content:center; }
+  .icon { width:1024px; height:1024px; border-radius:232px; overflow:hidden; position:relative;
+          background: linear-gradient(165deg, #ffffff 0%, #f6f8fb 100%);
+          box-shadow: inset 0 0 0 2px rgba(0,0,0,.06); }
+  .grid { position:absolute; inset:170px 130px 170px;
+          background-image: linear-gradient(#eef1f6 1px, transparent 1px), linear-gradient(90deg, #eef1f6 1px, transparent 1px);
+          background-size: 126px 126px; }
+  .line { position:absolute; left:140px; right:140px; bottom:220px; height:330px; }
+  .candle { position:absolute; width:88px; border-radius:16px; }
+  .wick { position:absolute; left:50%; width:11px; transform:translateX(-50%); border-radius:6px; }
+  .c1 { left:175px; bottom:235px; height:230px;
+        background:linear-gradient(180deg,#ff7d89,#e0313e 60%,#c22740);
+        box-shadow: inset 0 8px 12px rgba(255,255,255,.45), inset 0 -10px 16px rgba(0,0,0,.16), 0 18px 36px rgba(224,49,62,.28); }
+  .c1 .wick { top:-50px; height:330px; background:#e0313e; }
+  .c2 { left:395px; bottom:300px; height:195px;
+        background:linear-gradient(180deg,#43d0b2,#0ca678 60%,#088a63);
+        box-shadow: inset 0 8px 12px rgba(255,255,255,.45), inset 0 -10px 16px rgba(0,0,0,.16), 0 18px 36px rgba(12,166,120,.25); }
+  .c2 .wick { top:-42px; height:279px; background:#0ca678; }
+  .c3 { left:615px; bottom:375px; height:255px;
+        background:linear-gradient(180deg,#ff7d89,#e0313e 60%,#c22740);
+        box-shadow: inset 0 8px 12px rgba(255,255,255,.45), inset 0 -10px 16px rgba(0,0,0,.16), 0 18px 36px rgba(224,49,62,.3); }
+  .c3 .wick { top:-54px; height:365px; background:#e0313e; }
+</style></head>
+<body>
+  <div class="icon">
+    <div class="grid"></div>
+    <svg class="line" viewBox="0 0 744 330" preserveAspectRatio="none">
+      <polyline points="10,300 190,240 380,262 570,140 734,50" fill="none" stroke="#c6ccd8" stroke-width="13" stroke-linecap="round" stroke-linejoin="round"/>
+    </svg>
+    <div class="candle c1"><div class="wick"></div></div>
+    <div class="candle c2"><div class="wick"></div></div>
+    <div class="candle c3"><div class="wick"></div></div>
+  </div>
+</body>
+</html>

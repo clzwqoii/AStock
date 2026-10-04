@@ -1,0 +1,113 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="UTF-8">
+<style>
+  * { margin:0; padding:0; box-sizing:border-box; }
+  body { width:1280px; height:800px; background:#f6f7fb; color:#1b2230;
+         font-family:-apple-system,'PingFang SC','Helvetica Neue',sans-serif; overflow:hidden; }
+  .mono { font-family:'SF Mono',Menlo,monospace; font-variant-numeric:tabular-nums; }
+  .up { color:#e0313e; } .down { color:#0ca678; }
+
+  .page { width:860px; margin:0 auto; padding:28px 0; }
+  header { display:flex; align-items:center; margin-bottom:22px; }
+  h1 { font-size:22px; font-weight:800; letter-spacing:.5px; }
+  .sub { font-size:13px; color:#8a92a6; margin-top:3px; }
+  .sync { margin-left:auto; display:flex; align-items:center; gap:8px; height:32px; padding:0 14px;
+          border-radius:16px; background:#fff; border:1px solid #e5e8f0; font-size:12px; color:#5a6478;
+          box-shadow:0 1px 3px rgba(20,30,60,.05); }
+  .dot { width:8px; height:8px; border-radius:50%; background:#0ca678; }
+
+  .card { background:#fff; border-radius:16px; border:1px solid #eceef4;
+          box-shadow:0 8px 24px rgba(25,35,65,.06); padding:20px 22px; margin-bottom:16px; }
+  .card h3 { font-size:13px; color:#8a92a6; font-weight:600; margin-bottom:14px; letter-spacing:1px; }
+  .chips { display:flex; flex-wrap:wrap; gap:10px; }
+  .chip { display:flex; align-items:center; gap:7px; height:38px; padding:0 16px; border-radius:19px;
+          border:1.5px solid #e3e6ee; font-size:14px; color:#414b60; cursor:pointer; background:#fbfcfe; }
+  .chip.on { background:#eef2ff; border-color:#4f6bf5; color:#3b55d9; font-weight:600; }
+  .chk { width:17px; height:17px; border-radius:50%; border:1.5px solid #d4d9e4; display:flex;
+         align-items:center; justify-content:center; font-size:10px; color:#fff; }
+  .chip.on .chk { background:#4f6bf5; border-color:#4f6bf5; }
+
+  .btnrow { display:flex; align-items:center; gap:14px; }
+  .btn { height:46px; padding:0 42px; border-radius:12px; background:#4f6bf5; color:#fff; font-size:15px;
+         font-weight:700; display:flex; align-items:center; box-shadow:0 6px 16px rgba(79,107,245,.3); }
+  .note { font-size:12px; color:#9aa2b5; }
+
+  .stats { display:flex; gap:12px; }
+  .stat { flex:1; background:#fff; border-radius:16px; border:1px solid #eceef4; padding:14px 20px;
+          box-shadow:0 8px 24px rgba(25,35,65,.06); }
+  .stat .v { font-size:22px; font-weight:800; }
+  .stat .k { font-size:12px; color:#8a92a6; margin-top:2px; }
+
+  table { width:100%; border-collapse:collapse; }
+  th { font-size:11px; color:#9aa2b5; text-align:right; padding:4px 10px 10px; font-weight:600; }
+  th:first-child, td:first-child { text-align:left; }
+  td { font-size:14px; text-align:right; padding:10px 10px; border-top:1px solid #f1f3f8; color:#2a3244; }
+  td.sym { display:flex; align-items:center; gap:12px; }
+  .avatar { width:34px; height:34px; border-radius:9px; background:#f1f3fa; color:#6b7690; font-size:11px;
+            font-weight:700; display:flex; align-items:center; justify-content:center; }
+  .nm { font-size:13px; color:#1b2230; font-weight:600; }
+  .cd { font-size:11px; color:#9aa2b5; }
+  .pillup { font-size:12px; font-weight:700; background:#fdecef; color:#e0313e; padding:3px 10px; border-radius:6px; }
+  .pilldown { font-size:12px; font-weight:700; background:#e6f6f0; color:#0ca678; padding:3px 10px; border-radius:6px; }
+</style>
+</head>
+<body>
+<div class="page">
+  <header>
+    <div><h1>A股选股</h1><div class="sub">按规则筛选 · 数据截至今日收盘</div></div>
+    <div class="sync"><div class="dot"></div>已同步 2026-09-30</div>
+  </header>
+
+  <div class="stats" style="margin-bottom:16px">
+    <div class="stat"><div class="v mono">5586</div><div class="k">全市场股票</div></div>
+    <div class="stat"><div class="v mono" style="color:#4f6bf5">56</div><div class="k">本次入选</div></div>
+    <div class="stat"><div class="v mono">120</div><div class="k">本地交易日</div></div>
+  </div>
+
+  <div class="card">
+    <h3>选择规则（可多选 = 组合，全部满足才入选）</h3>
+    <div class="chips">
+      <div class="chip on"><div class="chk">✓</div>收盘价站上MA20</div>
+      <div class="chip on"><div class="chk">✓</div>MA5上穿MA10</div>
+      <div class="chip"><div class="chk"></div>MACD金叉</div>
+      <div class="chip"><div class="chk"></div>RSI超卖</div>
+      <div class="chip"><div class="chk"></div>RSI超买</div>
+      <div class="chip"><div class="chk"></div>量比&gt;2</div>
+      <div class="chip"><div class="chk"></div>当日涨幅&gt;3%</div>
+    </div>
+  </div>
+
+  <div class="card" style="padding:16px 22px">
+    <div class="btnrow" style="margin-bottom:6px">
+      <div class="btn">开始选股</div>
+      <div class="note">组合条件：站上MA20 ∧ MA5上穿MA10</div>
+    </div>
+  </div>
+
+  <div class="card">
+    <h3>入选结果</h3>
+    <table>
+      <tr><th>股票</th><th>收盘</th><th>涨跌幅</th><th>量比</th></tr>
+      <tr><td><div class="sym"><div class="avatar">581</div><div><div class="nm">威孚高科</div><div class="cd mono">000581.SZ</div></div></div></td>
+          <td class="mono"><b>18.21</b></td><td><span class="pillup">+2.31%</span></td><td class="mono">1.8</td></tr>
+      <tr><td><div class="sym"><div class="avatar">692</div><div><div class="nm">惠天热电</div><div class="cd mono">000692.SZ</div></div></div></td>
+          <td class="mono"><b>4.59</b></td><td><span class="pillup">+5.02%</span></td><td class="mono">2.4</td></tr>
+      <tr><td><div class="sym"><div class="avatar">014</div><div><div class="nm">华新股份</div><div class="cd mono">002014.SZ</div></div></div></td>
+          <td class="mono"><b>11.21</b></td><td><span class="pillup">+1.08%</span></td><td class="mono">1.2</td></tr>
+      <tr><td><div class="sym"><div class="avatar">212</div><div><div class="nm">天融信</div><div class="cd mono">002212.SZ</div></div></div></td>
+          <td class="mono"><b>7.21</b></td><td><span class="pilldown">−0.96%</span></td><td class="mono">0.9</td></tr>
+      <tr><td><div class="sym"><div class="avatar">232</div><div><div class="nm">启明信息</div><div class="cd mono">002232.SZ</div></div></div></td>
+          <td class="mono"><b>16.48</b></td><td><span class="pillup">+3.51%</span></td><td class="mono">3.1</td></tr>
+      <tr><td><div class="sym"><div class="avatar">262</div><div><div class="nm">金冠电气</div><div class="cd mono">002262.SZ</div></div></div></td>
+          <td class="mono"><b>22.73</b></td><td><span class="pillup">+4.20%</span></td><td class="mono">2.2</td></tr>
+      <tr><td><div class="sym"><div class="avatar">419</div><div><div class="nm">天虹股份</div><div class="cd mono">002419.SZ</div></div></div></td>
+          <td class="mono"><b>5.09</b></td><td><span class="pillup">+0.59%</span></td><td class="mono">1.1</td></tr>
+      <tr><td><div class="sym"><div class="avatar">547</div><div><div class="nm">春兴精工</div><div class="cd mono">002547.SZ</div></div></div></td>
+          <td class="mono"><b>2.58</b></td><td><span class="pilldown">−1.15%</span></td><td class="mono">0.8</td></tr>
+    </table>
+  </div>
+</div>
+</body>
+</html>

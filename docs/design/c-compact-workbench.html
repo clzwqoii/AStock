@@ -1,0 +1,104 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="UTF-8">
+<style>
+  * { margin:0; padding:0; box-sizing:border-box; }
+  body { width:1280px; height:800px; background:#e9ebef; color:#20262f;
+         font-family:-apple-system,'PingFang SC','Helvetica Neue',sans-serif; overflow:hidden; display:flex; }
+  .mono { font-family:'SF Mono',Menlo,monospace; font-variant-numeric:tabular-nums; }
+  .up { color:#d7263d; } .down { color:#0a8f62; }
+
+  /* 侧栏 */
+  .nav { width:236px; background:#ffffff; border-right:1px solid #dcdfe5; display:flex; flex-direction:column; }
+  .brand { padding:18px 18px 14px; border-bottom:1px solid #e8eaef; }
+  .brand b { font-size:16px; font-weight:800; }
+  .brand div { font-size:11px; color:#8d95a3; margin-top:2px; }
+  .nav h4 { font-size:10px; letter-spacing:2px; color:#98a0ad; padding:16px 18px 8px; }
+  .srule { display:flex; align-items:center; gap:10px; padding:8px 18px; font-size:13px; color:#39414e; }
+  .srule .sw { margin-left:auto; width:30px; height:17px; border-radius:9px; background:#cdd3dc; position:relative; }
+  .srule .sw::after { content:''; position:absolute; width:13px; height:13px; border-radius:50%; background:#fff;
+                      top:2px; left:2px; box-shadow:0 1px 2px rgba(0,0,0,.2); }
+  .srule.on .sw { background:#d7263d; }
+  .srule.on .sw::after { left:15px; }
+  .srule.on { font-weight:600; }
+  .navfoot { margin-top:auto; padding:14px 18px; border-top:1px solid #e8eaef; font-size:11px; color:#98a0ad; }
+
+  /* 主区 */
+  .main { flex:1; display:flex; flex-direction:column; min-width:0; }
+  .toolbar { height:54px; background:#fff; border-bottom:1px solid #dcdfe5; display:flex; align-items:center;
+             padding:0 20px; gap:14px; }
+  .crumb { font-size:15px; font-weight:700; }
+  .crumb span { color:#98a0ad; font-weight:400; font-size:12px; margin-left:10px; }
+  .status { display:flex; align-items:center; gap:7px; margin-left:auto; font-size:12px; color:#5b6572;
+            background:#f2f4f7; height:30px; padding:0 12px; border-radius:6px; }
+  .dot { width:7px; height:7px; border-radius:50%; background:#0a8f62; }
+  .run { height:34px; padding:0 22px; border-radius:7px; background:#d7263d; color:#fff; font-size:13px;
+         font-weight:700; display:flex; align-items:center; letter-spacing:2px; }
+
+  .grid { flex:1; overflow:hidden; }
+  table { width:100%; border-collapse:collapse; }
+  thead th { position:sticky; top:0; background:#f7f8fa; font-size:10.5px; letter-spacing:1.5px; color:#7c8592;
+             text-align:right; padding:9px 18px; border-bottom:1px solid #dcdfe5; font-weight:700; }
+  thead th:first-child { text-align:left; padding-left:20px; }
+  tbody td { font-size:12.5px; text-align:right; padding:7px 18px; border-bottom:1px solid #eceef2; color:#39414e; background:#fff; }
+  tbody td:first-child { text-align:left; padding-left:20px; font-weight:600; color:#20262f; }
+  tbody tr:nth-child(even) td { background:#fbfcfd; }
+  tbody tr:hover td { background:#fff5f6; }
+  .nm { color:#8d95a3; font-size:12px; }
+
+  .statusbar { height:30px; background:#fff; border-top:1px solid #dcdfe5; display:flex; align-items:center;
+               gap:20px; padding:0 20px; font-size:11px; color:#8d95a3; }
+  .statusbar b { color:#39414e; font-weight:600; }
+</style>
+</head>
+<body>
+  <div class="nav">
+    <div class="brand"><b>A股选股台</b><div>Stock Screener v0.1</div></div>
+    <h4>趋势</h4>
+    <div class="srule on">收盘价站上MA20<div class="sw"></div></div>
+    <div class="srule on">MA5上穿MA10<div class="sw"></div></div>
+    <div class="srule">MACD金叉<div class="sw"></div></div>
+    <h4>超买超卖</h4>
+    <div class="srule">RSI超卖 &lt;30<div class="sw"></div></div>
+    <div class="srule">RSI超买 &gt;70<div class="sw"></div></div>
+    <h4>量能 / 动量</h4>
+    <div class="srule">量比 &gt; 2<div class="sw"></div></div>
+    <div class="srule">当日涨幅 &gt; 3%<div class="sw"></div></div>
+    <div class="navfoot">数据源：tushare pro<br>本地库 62.4 万行 · SQLite</div>
+  </div>
+
+  <div class="main">
+    <div class="toolbar">
+      <div class="crumb">选股结果<span>组合：站上MA20 ∧ MA5上穿MA10</span></div>
+      <div class="status"><div class="dot"></div>已同步 2026-09-30</div>
+      <div class="run">开始选股</div>
+    </div>
+    <div class="grid">
+      <table>
+        <thead><tr>
+          <th>代码</th><th>名称</th><th>收盘</th><th>涨跌</th><th>涨跌幅</th><th>量比</th><th>成交额(万)</th><th>MA20</th>
+        </tr></thead>
+        <tbody>
+          <tr><td class="mono">000581.SZ</td><td class="nm">威孚高科</td><td class="mono">18.21</td><td class="mono up">+0.41</td><td class="mono up">+2.31%</td><td class="mono">1.8</td><td class="mono">8,412</td><td class="mono">17.65</td></tr>
+          <tr><td class="mono">000692.SZ</td><td class="nm">惠天热电</td><td class="mono">4.59</td><td class="mono up">+0.22</td><td class="mono up">+5.02%</td><td class="mono">2.4</td><td class="mono">3,107</td><td class="mono">4.31</td></tr>
+          <tr><td class="mono">002014.SZ</td><td class="nm">华新股份</td><td class="mono">11.21</td><td class="mono up">+0.12</td><td class="mono up">+1.08%</td><td class="mono">1.2</td><td class="mono">2,254</td><td class="mono">10.98</td></tr>
+          <tr><td class="mono">002212.SZ</td><td class="nm">天融信</td><td class="mono">7.21</td><td class="mono down">−0.07</td><td class="mono down">−0.96%</td><td class="mono">0.9</td><td class="mono">1,883</td><td class="mono">7.02</td></tr>
+          <tr><td class="mono">002232.SZ</td><td class="nm">启明信息</td><td class="mono">16.48</td><td class="mono up">+0.56</td><td class="mono up">+3.51%</td><td class="mono">3.1</td><td class="mono">12,046</td><td class="mono">15.77</td></tr>
+          <tr><td class="mono">002262.SZ</td><td class="nm">金冠电气</td><td class="mono">22.73</td><td class="mono up">+0.92</td><td class="mono up">+4.20%</td><td class="mono">2.2</td><td class="mono">9,730</td><td class="mono">21.44</td></tr>
+          <tr><td class="mono">002419.SZ</td><td class="nm">天虹股份</td><td class="mono">5.09</td><td class="mono up">+0.03</td><td class="mono up">+0.59%</td><td class="mono">1.1</td><td class="mono">1,120</td><td class="mono">4.95</td></tr>
+          <tr><td class="mono">002547.SZ</td><td class="nm">春兴精工</td><td class="mono">2.58</td><td class="mono down">−0.03</td><td class="mono down">−1.15%</td><td class="mono">0.8</td><td class="mono">864</td><td class="mono">2.51</td></tr>
+          <tr><td class="mono">002550.SZ</td><td class="nm">千红制药</td><td class="mono">6.59</td><td class="mono up">+0.13</td><td class="mono up">+2.02%</td><td class="mono">1.6</td><td class="mono">2,981</td><td class="mono">6.41</td></tr>
+          <tr><td class="mono">002694.SZ</td><td class="nm">顾地科技</td><td class="mono">2.76</td><td class="mono up">+0.04</td><td class="mono up">+1.48%</td><td class="mono">1.3</td><td class="mono">1,058</td><td class="mono">2.69</td></tr>
+          <tr><td class="mono">002761.SZ</td><td class="nm">浙江建投</td><td class="mono">7.68</td><td class="mono up">+0.19</td><td class="mono up">+2.54%</td><td class="mono">1.9</td><td class="mono">4,336</td><td class="mono">7.41</td></tr>
+          <tr><td class="mono">003816.SZ</td><td class="nm">中国广核</td><td class="mono">3.94</td><td class="mono up">+0.05</td><td class="mono up">+1.29%</td><td class="mono">1.4</td><td class="mono">6,720</td><td class="mono">3.86</td></tr>
+        </tbody>
+      </table>
+    </div>
+    <div class="statusbar">
+      <span>全市场 <b>5586</b></span><span>入选 <b class="up">56</b></span><span>已选规则 <b>2</b></span>
+      <span style="margin-left:auto">数据截至 <b>2026-09-30</b> · 同步完成 · 新增 0 行</span>
+    </div>
+  </div>
+</body>
+</html>
