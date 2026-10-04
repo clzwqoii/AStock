@@ -101,7 +101,12 @@ const kUpdateCheckUrls = <String>[
 
 ### 下载安装包
 
-发行版统一挂在 GitHub Releases（`https://github.com/clzwqoii/AStock/releases/latest`，`update.json` 的下载链接即指向此处）。国内用户若打不开 GitHub，可在 Gitee 仓库的「发行版」页上传同一批安装包，并把 `update.json` 的 `url` 换成 Gitee 地址。
+两个平台都挂了发行版（版本说明 + 安装包附件）：
+
+- **Gitee**（`update.json` 的下载链接指向此处，国内优先）：https://gitee.com/clzwqoii/astock/releases
+- **GitHub**（镜像，境外访问快）：https://github.com/clzwqoii/AStock/releases
+
+附件命名统一为 `AStock-<版本>-macOS.dmg` / `AStock-<版本>-Android.apk`，由 `tool/release.sh` 自动上传两个平台。
 
 ## 开源协议
 

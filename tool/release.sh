@@ -83,7 +83,9 @@ import json, sys, urllib.request, uuid, mimetypes, pathlib
 version, tag, token = sys.argv[1], sys.argv[2], sys.argv[3]
 owner_repo = "clzwqoii/astock"
 notes_file = pathlib.Path("RELEASE_NOTES.md").read_text(encoding="utf-8")
-head = f"## {version}"
+head = f"## v{version}"
+if head not in notes_file:
+    head = f"## {version}"
 body = notes_file.split(head, 1)[1].split("\n## ", 1)[0].strip() if head in notes_file else f"v{version}"
 
 def post_json(url, data):
