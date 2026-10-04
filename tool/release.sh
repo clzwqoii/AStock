@@ -21,6 +21,8 @@ TAG="v$VERSION"
 export PUB_HOSTED_URL=https://pub.flutter-io.cn
 export FLUTTER_STORAGE_BASE_URL=https://storage.flutter-io.cn
 export DEVELOPER_DIR=/Applications/Xcode.app/Contents/Developer
+# 必须显式给 UTF-8 locale：默认 C locale 下 bash 会把中文字节并进变量名（$VERSION（… → unbound variable）
+export LANG=en_US.UTF-8 LC_ALL=en_US.UTF-8
 
 step() { echo; echo "=== $* ==="; }
 
