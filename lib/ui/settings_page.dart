@@ -7,6 +7,7 @@ import 'package:flutter/material.dart';
 
 import '../config.dart';
 import '../data/sync_service.dart';
+import '../net_diag.dart';
 import 'colors.dart';
 import 'onboarding.dart' show LaunchUrlFn, defaultLaunchUrl, kTushareRegisterUrl;
 
@@ -97,6 +98,15 @@ class SettingsPage extends StatelessWidget {
             ),
           ],
         ),
+        const SizedBox(height: 8),
+        Align(
+          alignment: Alignment.centerLeft,
+          child: TextButton.icon(
+            onPressed: () => _diagnose(context),
+            icon: const Icon(Icons.network_check, size: 16),
+            label: const Text('网络自检', style: TextStyle(fontSize: 12)),
+          ),
+        ),
         if (syncing) const Padding(
           padding: EdgeInsets.only(top: 8),
           child: LinearProgressIndicator(),
@@ -162,6 +172,18 @@ class SettingsPage extends StatelessWidget {
         ),
       ),
     );
+  }
+
+  /// 网络自检：DNS + HTTPS 连通性，结论直接弹给用户（真机排障用）。
+  Future<void> _diagnose(BuildContext context) async {
+    final messenger = ScaffoldMessenger.of(context);
+    messenger.showSnackBar(const SnackBar(
+      content: Text('正在检测网络…'),
+      duration: Duration(seconds: 10),
+    ));
+    final result = await diagnoseNetwork();
+    messenger.hideCurrentSnackBar();
+    messenger.showSnackBar(SnackBar(content: Text(result), duration: const Duration(seconds: 12)));
   }
 
   Future<void> _save(BuildContext context, TextEditingController token) async {

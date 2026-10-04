@@ -3,6 +3,7 @@
 library;
 
 import 'dart:io';
+import 'dart:math' as math;
 
 import 'package:flutter/material.dart';
 
@@ -133,8 +134,9 @@ class _ScreeningPageState extends State<ScreeningPage> {
       final main = Expanded(child: _main(wide));
       return ColoredBox(
         color: AppColors.bg,
+        // stretch：侧栏必须拉伸到窗口全高，否则规则区被压缩、底部设置块会盖住溢出的规则行
         child: wide
-            ? Row(children: [sidebar, main])
+            ? Row(crossAxisAlignment: CrossAxisAlignment.stretch, children: [sidebar, main])
             : Column(children: [_ruleChipBar(), main]),
       );
     });
@@ -289,7 +291,12 @@ class _ScreeningPageState extends State<ScreeningPage> {
           _toolbar(wide),
           if (_loading)
             LinearProgressIndicator(minHeight: 2, color: AccentScope.of(context)),
-          Expanded(child: _resultArea(wide)),
+          // 表格列多（含命中规则），窄窗口横向滚动而不是溢出
+          Expanded(
+            child: LayoutBuilder(
+              builder: (context, box) => _resultArea(wide, box.maxWidth),
+            ),
+          ),
           _statusBar(),
         ],
       );
@@ -385,7 +392,7 @@ class _ScreeningPageState extends State<ScreeningPage> {
     );
   }
 
-  Widget _resultArea(bool wide) {
+  Widget _resultArea(bool wide, double availableW) {
     if (_error != null) {
       return _centerHint('选股失败：$_error', color: Colors.red);
     }
@@ -399,16 +406,24 @@ class _ScreeningPageState extends State<ScreeningPage> {
     if (r.picked.isEmpty) {
       return _centerHint('没有股票满足所选规则');
     }
-    return Column(
-      children: [
-        _headerRow(wide),
-        Expanded(
-          child: ListView.builder(
-            itemCount: _rows().length,
-            itemBuilder: (_, i) => _row(_rows()[i], i, wide),
-          ),
+    // 内容最小宽度：列全展开不挤压，超出部分靠横向滚动（桌面窗口拖窄也不会溢出）
+    final tableW = math.max(availableW, wide ? 980.0 : 560.0);
+    return SingleChildScrollView(
+      scrollDirection: Axis.horizontal,
+      child: SizedBox(
+        width: tableW,
+        child: Column(
+          children: [
+            _headerRow(wide),
+            Expanded(
+              child: ListView.builder(
+                itemCount: _rows().length,
+                itemBuilder: (_, i) => _row(_rows()[i], i, wide),
+              ),
+            ),
+          ],
         ),
-      ],
+      ),
     );
   }
 
@@ -450,6 +465,7 @@ class _ScreeningPageState extends State<ScreeningPage> {
                   _headerCell('名称', null, left: true),
                   _sortableHeader('收盘', 56, SortField.close),
                   _sortableHeader('涨跌幅', 68, SortField.changePct),
+                  _headerCell('命中规则', 132, left: true),
                 ],
         ),
       );
@@ -540,12 +556,14 @@ class _ScreeningPageState extends State<ScreeningPage> {
                 cell(_f2(row.volumeRatio), 48, plain),
                 cell(row.amountWan.toStringAsFixed(0), 90, plain),
                 cell(_f2(row.ma20), 56, plain),
+                _hitCell(row.matchedRules),
               ]
             : [
                 cell(row.symbol, 104, plain.copyWith(fontWeight: FontWeight.w600), left: true),
                 nameCell,
                 cell(_f2(row.close), 56, plain.copyWith(fontWeight: FontWeight.w600)),
                 cell(_signed(row.changePct, suffix: '%'), 68, pctStyle),
+                _hitCell(row.matchedRules),
               ],
       ),
       ),
@@ -553,8 +571,30 @@ class _ScreeningPageState extends State<ScreeningPage> {
   }
 
   String _f2(double v) => v.toStringAsFixed(2);
+
   String _signed(double v, {String suffix = ''}) =>
       '${v >= 0 ? '+' : '-'}${v.abs().toStringAsFixed(2)}$suffix';
+
+  /// 命中规则单元格：多条用「＋」连接，超出宽度省略，悬停看全量。
+  Widget _hitCell(List<String> rules) {
+    final text = rules.join('＋'); // 空 = 引擎未回填；不显示「—」以免与名称缺失的占位符混淆
+    return SizedBox(
+      width: 132,
+      child: Padding(
+        padding: const EdgeInsets.only(right: 10),
+        child: Tooltip(
+          message: rules.isEmpty ? '' : text,
+          child: Text(text,
+              maxLines: 1,
+              overflow: TextOverflow.ellipsis,
+              style: TextStyle(
+                  fontSize: 11.5,
+                  color: rules.isEmpty ? AppColors.dim : AppColors.text,
+                  fontFeatures: const [FontFeature.tabularFigures()])),
+        ),
+      ),
+    );
+  }
 
   Widget _statusBar() {
     final r = _result;

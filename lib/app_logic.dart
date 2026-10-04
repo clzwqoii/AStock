@@ -113,6 +113,7 @@ class ScreenRow {
     required this.volumeRatio,
     required this.amountWan,
     required this.ma20,
+    this.matchedRules = const [],
   });
 
   final String symbol;
@@ -123,6 +124,9 @@ class ScreenRow {
   final double volumeRatio;
   final double amountWan;
   final double ma20;
+
+  /// 命中的规则名（可多条；组合选股时按勾选顺序展示）。CLI/旧调用方可能为空。
+  final List<String> matchedRules;
 }
 
 /// 结果表可排序列（与工作台表头一一对应；点表头切换升降序）。
@@ -160,7 +164,7 @@ String rowsToCsv(List<ScreenRow> rows, {String? dataDate, String? combo}) {
     ..writeln('# A股选股结果（不复权·手）'
         '${dataDate == null ? '' : '  数据截至 $dataDate'}'
         '${combo == null || combo.isEmpty ? '' : '  规则：$combo'}')
-    ..writeln('代码,名称,收盘,涨跌,涨跌幅%,量比,成交额(万),MA20,数据截至,规则组合');
+    ..writeln('代码,名称,收盘,涨跌,涨跌幅%,量比,成交额(万),MA20,命中规则,数据截至,规则组合');
   for (final r in rows) {
     buf.writeln([
       _csvCell(r.symbol),
@@ -171,6 +175,7 @@ String rowsToCsv(List<ScreenRow> rows, {String? dataDate, String? combo}) {
       r.volumeRatio.toStringAsFixed(2),
       r.amountWan.toStringAsFixed(2),
       r.ma20.toStringAsFixed(2),
+      _csvCell(r.matchedRules.join(' + ')),
       _csvCell(dataDate ?? ''),
       _csvCell(combo ?? ''),
     ].join(','));
@@ -221,7 +226,8 @@ Future<({int total, List<ScreenRow> picked, String? dataDate})> runScreening(
         final stocks = repo.loadAllStocks();
         final names = repo.stockNames();
         final picked = <ScreenRow>[];
-        for (final s in screen(stocks, rules)) {
+        for (final hit in screenWithHits(stocks, rules)) {
+          final s = hit.stock;
           final snap = IndicatorSnapshot.fromStock(s);
           final prevClose = s.bars[s.bars.length - 2].close;
           picked.add(ScreenRow(
@@ -233,6 +239,7 @@ Future<({int total, List<ScreenRow> picked, String? dataDate})> runScreening(
             volumeRatio: snap.volumeRatio,
             amountWan: s.last.amount / 10,
             ma20: snap.ma20,
+            matchedRules: [for (final id in hit.matchedRuleIds) ruleById(id).name],
           ));
         }
         return (total: stocks.length, picked: picked, dataDate: repo.maxTradeDate());

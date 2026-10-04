@@ -8,6 +8,7 @@ import 'dart:io' show Platform;
 
 import '../app_logic.dart';
 import '../config.dart';
+import '../net_diag.dart';
 import 'colors.dart';
 import 'mobile_home.dart';
 import 'onboarding.dart';
@@ -126,7 +127,7 @@ class _StockAppState extends State<StockApp> {
           _syncMsg = '同步完成：新增 ${r.dates} 个交易日、${r.rows} 行（数据齐全时为 0）');
     } catch (e) {
       if (!mounted) return;
-      setState(() => _syncMsg = '同步失败：$e');
+      setState(() => _syncMsg = '同步失败：${describeSyncError(e)}');
     } finally {
       if (mounted) setState(() => _syncing = false);
     }

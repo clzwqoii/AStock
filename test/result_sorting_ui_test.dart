@@ -39,6 +39,8 @@ List<ScreenRow> _rows() => [
     ];
 
 Future<void> _pump(WidgetTester tester, {ExportCsvFn? exportCsv}) async {
+  addTearDown(tester.view.resetPhysicalSize);
+  await tester.binding.setSurfaceSize(const Size(1400, 900)); // 窄窗口下表头会横向滚出视口
   await tester.pumpWidget(MaterialApp(
     home: AccentScope(
       color: AccentColor.red.color,

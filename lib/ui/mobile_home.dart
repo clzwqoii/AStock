@@ -410,6 +410,28 @@ class _MobileScreeningState extends State<MobileScreening> {
                   Text(row.name ?? '—', style: const TextStyle(fontSize: 15, fontWeight: FontWeight.w700)),
                   const SizedBox(height: 2),
                   Text(row.symbol, style: const TextStyle(fontSize: 11, color: AppColors.dim)),
+                  if (row.matchedRules.isNotEmpty) ...[
+                    const SizedBox(height: 6),
+                    Wrap(
+                      spacing: 6,
+                      runSpacing: 4,
+                      children: [
+                        for (final r in row.matchedRules)
+                          Container(
+                            padding: const EdgeInsets.symmetric(horizontal: 7, vertical: 2),
+                            decoration: BoxDecoration(
+                              color: AccentScope.of(context).withValues(alpha: 0.09),
+                              borderRadius: BorderRadius.circular(5),
+                            ),
+                            child: Text(r,
+                                style: TextStyle(
+                                    fontSize: 10,
+                                    fontWeight: FontWeight.w600,
+                                    color: AccentScope.of(context))),
+                          ),
+                      ],
+                    ),
+                  ],
                 ],
               ),
             ),

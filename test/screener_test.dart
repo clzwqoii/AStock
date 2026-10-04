@@ -34,4 +34,32 @@ void main() {
       expect(screen([tooShort], [volume]), isEmpty);
     });
   });
+
+  group('screenWithHits', () {
+    test('返回每只入选股票命中的规则 id（组合 = 全部命中）', () {
+      final hits = screenWithHits(stocks, [volume, pct]);
+      expect(hits.map((h) => h.stock.symbol), ['S1']);
+      expect(hits.single.matchedRuleIds, ['volume_surge', 'pct_change_up']);
+    });
+
+    test('规则顺序与传入一致，便于 UI 按勾选顺序展示', () {
+      final hits = screenWithHits(stocks, [pct, volume]);
+      expect(hits.single.matchedRuleIds, ['pct_change_up', 'volume_surge']);
+    });
+
+    test('单规则选股时命中列表就是那一条', () {
+      expect(screenWithHits(stocks, [pct]).map((h) => h.matchedRuleIds.single), [
+        'pct_change_up',
+        'pct_change_up',
+      ]);
+    });
+
+    test('空规则列表同样抛 ArgumentError（与 screen 一致）', () {
+      expect(() => screenWithHits(stocks, []), throwsArgumentError);
+    });
+
+    test('与 screen 同口径：结果集完全一致', () {
+      expect(screenWithHits(stocks, [volume, pct]).map((h) => h.stock), screen(stocks, [volume, pct]));
+    });
+  });
 }

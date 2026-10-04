@@ -14,6 +14,7 @@ ScreenRow row(
   double amountWan = 100,
   double ma20 = 9,
   String? name,
+  List<String> matchedRules = const [],
 }) =>
     ScreenRow(
       symbol: symbol,
@@ -24,6 +25,7 @@ ScreenRow row(
       volumeRatio: volumeRatio,
       amountWan: amountWan,
       ma20: ma20,
+      matchedRules: matchedRules,
     );
 
 void main() {
@@ -70,12 +72,14 @@ void main() {
     test('说明行 + 表头 + 行内容，涨跌带正负号，列序与表头一致', () {
       final csv = rowsToCsv([
         row('600000.SH', close: 12.5, changePct: 3.5, volumeRatio: 2.4, amountWan: 8888, ma20: 11.2,
-            name: '浦发银行'),
+            name: '浦发银行',
+            matchedRules: ['收盘价站上MA20', 'MA5上穿MA10']),
       ], dataDate: '20260930', combo: '收盘价站上MA20');
       final lines = csv.trim().split('\n');
       expect(lines[0], '# A股选股结果（不复权·手）  数据截至 20260930  规则：收盘价站上MA20');
-      expect(lines[1], '代码,名称,收盘,涨跌,涨跌幅%,量比,成交额(万),MA20,数据截至,规则组合');
-      expect(lines[2], '600000.SH,浦发银行,12.50,+0.42,+3.50,2.40,8888.00,11.20,20260930,收盘价站上MA20');
+      expect(lines[1], '代码,名称,收盘,涨跌,涨跌幅%,量比,成交额(万),MA20,命中规则,数据截至,规则组合');
+      expect(lines[2],
+          '600000.SH,浦发银行,12.50,+0.42,+3.50,2.40,8888.00,11.20,收盘价站上MA20 + MA5上穿MA10,20260930,收盘价站上MA20');
     });
 
     test('名称里的逗号与引号按 RFC4180 转义', () {

@@ -2,6 +2,8 @@
 /// token 为空时自动弹出；可「稍后再说」跳过（本次启动不再弹）。
 library;
 
+import 'dart:math' as math;
+
 import 'package:flutter/material.dart';
 import 'package:url_launcher/url_launcher.dart';
 
@@ -32,6 +34,7 @@ class OnboardingDialog extends StatefulWidget {
 class _OnboardingDialogState extends State<OnboardingDialog> {
   final _token = TextEditingController();
   bool _busy = false;
+  bool _obscure = true;
 
   @override
   void dispose() {
@@ -54,8 +57,15 @@ class _OnboardingDialogState extends State<OnboardingDialog> {
 
   @override
   Widget build(BuildContext context) {
+    // 键盘弹起时可用高度被压缩：dialog 可滚动 + 按视口限高 + insetPadding 底部加上键盘高度，
+    // 否则安卓上 TextField 被键盘顶出屏幕、按钮也点不到。
+    // 键盘高度：Dialog 自己会把 viewInsets 加进 insetPadding，这里只用于给内容限高，别重复加。
+    final insets = MediaQuery.viewInsetsOf(context).bottom;
+    final screenH = MediaQuery.sizeOf(context).height;
+    final maxH = math.max(160.0, screenH - insets - 48 - 120);
     return AlertDialog(
       shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(14)),
+      insetPadding: const EdgeInsets.symmetric(horizontal: 20, vertical: 24),
       title: const Column(
         crossAxisAlignment: CrossAxisAlignment.start,
         mainAxisSize: MainAxisSize.min,
@@ -65,25 +75,36 @@ class _OnboardingDialogState extends State<OnboardingDialog> {
           Text('三步开始你的规则选股', style: TextStyle(fontSize: 12, color: AppColors.dim)),
         ],
       ),
-      content: SizedBox(
-        width: 440,
-        child: Column(
-          mainAxisSize: MainAxisSize.min,
-          crossAxisAlignment: CrossAxisAlignment.start,
-          children: [
-            _step(1, '注册 tushare 账号', '免费注册并登录，即可获取数据权限', link: true),
-            _step(2, '粘贴你的 Token', '登录后复制 Token，粘贴到下方输入框'),
-            _step(3, '开始选股', '保存后自动增量同步全市场日线'),
-            const SizedBox(height: 6),
-            TextField(
-              controller: _token,
-              obscureText: true,
-              decoration: const InputDecoration(
-                labelText: 'tushare Token',
-                border: OutlineInputBorder(),
+      content: ConstrainedBox(
+        constraints: BoxConstraints(maxWidth: 440, maxHeight: maxH),
+        child: SingleChildScrollView(
+          child: Column(
+            mainAxisSize: MainAxisSize.min,
+            crossAxisAlignment: CrossAxisAlignment.start,
+            children: [
+              _step(1, '注册 tushare 账号', '免费注册并登录，即可获取数据权限', link: true),
+              _step(2, '粘贴你的 Token', '登录后复制 Token，粘贴到下方输入框'),
+              _step(3, '开始选股', '保存后自动增量同步全市场日线'),
+              const SizedBox(height: 6),
+              TextField(
+                controller: _token,
+                obscureText: _obscure,
+                autofocus: true,
+                textInputAction: TextInputAction.done,
+                onSubmitted: (_) => _submit(),
+                scrollPadding: const EdgeInsets.only(bottom: 120),
+                decoration: InputDecoration(
+                  labelText: 'tushare Token',
+                  border: const OutlineInputBorder(),
+                  suffixIcon: IconButton(
+                    tooltip: _obscure ? '显示 Token' : '隐藏 Token',
+                    icon: Icon(_obscure ? Icons.visibility_outlined : Icons.visibility_off_outlined, size: 18),
+                    onPressed: () => setState(() => _obscure = !_obscure),
+                  ),
+                ),
               ),
-            ),
-          ],
+            ],
+          ),
         ),
       ),
       actions: [
