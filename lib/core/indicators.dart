@@ -1,6 +1,8 @@
 /// 纯函数技术指标。所有函数只依赖传入数据，不持有状态。
 library;
 
+import 'dart:math' as math;
+
 import 'models.dart';
 
 /// 最近 n 个收盘价的简单移动平均。
@@ -86,5 +88,39 @@ double pctChange(List<Bar> bars) {
   final dea = emaSeries(dif, signal);
   final hist = [for (var i = 0; i < dif.length; i++) (dif[i] - dea[i]) * 2];
   return (dif: dif, dea: dea, hist: hist);
+}
+
+/// 随机指标 KDJ(n, m1, m2)，国内行情软件口径：
+/// RSV = (C − N日最低低) / (N日最高高 − N日最低低) × 100（窗口含当日，
+/// 高低相等的一字板取 50）；K = SMA(RSV, m1, 1)、D = SMA(K, m2, 1)
+/// （即 K = ((m1−1)·K' + RSV) / m1），J = 3K − 2D。
+/// 前 n−1 根无值；递推种子 50（窗口满后与主流软件差异收敛到可忽略）。
+({List<double?> k, List<double?> d, List<double?> j}) kdj(
+  List<Bar> bars, {
+  int n = 9,
+  int m1 = 3,
+  int m2 = 3,
+}) {
+  if (n <= 0 || m1 <= 0 || m2 <= 0 || bars.length < n) {
+    throw ArgumentError('KDJ 需要至少 $n 根 Bar，实际 ${bars.length}');
+  }
+  final kOut = List<double?>.filled(bars.length, null);
+  final dOut = List<double?>.filled(bars.length, null);
+  final jOut = List<double?>.filled(bars.length, null);
+  var k = 50.0, d = 50.0;
+  for (var i = n - 1; i < bars.length; i++) {
+    var hh = bars[i].high, ll = bars[i].low;
+    for (var w = i - n + 1; w <= i; w++) {
+      hh = math.max(hh, bars[w].high);
+      ll = math.min(ll, bars[w].low);
+    }
+    final rsv = hh <= ll ? 50.0 : (bars[i].close - ll) / (hh - ll) * 100.0;
+    k = ((m1 - 1) * k + rsv) / m1;
+    d = ((m2 - 1) * d + k) / m2;
+    kOut[i] = k;
+    dOut[i] = d;
+    jOut[i] = 3 * k - 2 * d;
+  }
+  return (k: kOut, d: dOut, j: jOut);
 }
 

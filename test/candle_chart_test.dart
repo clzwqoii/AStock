@@ -62,6 +62,27 @@ void main() {
       expect(geo.volRect.top, greaterThan(geo.priceRect.bottom));
       expect(geo.volRect.bottom, lessThanOrEqualTo(200));
     });
+
+    test('MACD 面板在成交量区下方，高度非负且不与日期标签重叠', () {
+      final geo = ChartGeometry(size: const Size(300, 400), count: 10, lo: 10, hi: 20);
+      expect(geo.macdRect.top, greaterThanOrEqualTo(geo.volRect.bottom));
+      expect(geo.macdRect.bottom, lessThanOrEqualTo(400));
+      expect(geo.macdRect.height, greaterThan(0));
+    });
+
+    test('KDJ 面板在 MACD 面板下方，高度非负且不与日期标签重叠', () {
+      final geo = ChartGeometry(size: const Size(300, 400), count: 10, lo: 10, hi: 20);
+      expect(geo.kdjRect.top, greaterThanOrEqualTo(geo.macdRect.bottom));
+      expect(geo.kdjRect.bottom, lessThanOrEqualTo(400));
+      expect(geo.kdjRect.height, greaterThan(0));
+    });
+
+    test('极矮画布：各面板高度夹为非负', () {
+      final geo = ChartGeometry(size: const Size(300, 120), count: 10, lo: 10, hi: 20);
+      expect(geo.volRect.height, greaterThanOrEqualTo(0));
+      expect(geo.macdRect.height, greaterThanOrEqualTo(0));
+      expect(geo.kdjRect.height, greaterThanOrEqualTo(0));
+    });
   });
 
   group('priceRange', () {

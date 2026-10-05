@@ -26,17 +26,38 @@ class ChartGeometry {
 
   static const labelW = 46.0;
   static const priceTop = 10.0;
-  static const priceHeightRatio = 0.62;
-  static const volGap = 18.0;
+  // 纵向四段：价格 / 成交量 / MACD / KDJ；比例为占画布高的份额，空间不足时靠下的面板先被夹为 0。
+  static const priceHeightRatio = 0.40;
+  static const volGap = 12.0;
+  static const volHeightRatio = 0.12;
+  static const macdGap = 12.0;
+  static const macdHeightRatio = 0.15;
+  static const kdjGap = 12.0;
   static const bottomPad = 22.0;
 
   /// 价格轴区域（蜡烛 + 均线）。
   Rect get priceRect =>
       Rect.fromLTWH(0, priceTop, size.width - labelW, size.height * priceHeightRatio);
 
-  /// 成交量柱区域，夹在价格轴与日期标签之间。
-  Rect get volRect {
-    final top = priceRect.bottom + volGap;
+  /// 成交量柱区域，夹在价格轴与 MACD 面板之间。
+  Rect get volRect => Rect.fromLTWH(
+        0,
+        priceRect.bottom + volGap,
+        priceRect.width,
+        math.max(0.0, size.height * volHeightRatio),
+      );
+
+  /// MACD 面板（DIF/DEA + 红绿柱）。
+  Rect get macdRect => Rect.fromLTWH(
+        0,
+        volRect.bottom + macdGap,
+        priceRect.width,
+        math.max(0.0, size.height * macdHeightRatio),
+      );
+
+  /// KDJ 面板，占 MACD 之下、日期标签之上的剩余高度。
+  Rect get kdjRect {
+    final top = macdRect.bottom + kdjGap;
     return Rect.fromLTWH(0, top, priceRect.width, math.max(0.0, size.height - top - bottomPad));
   }
 

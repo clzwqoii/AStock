@@ -17,7 +17,7 @@ stock/
 │   ├── app_logic.dart         # App/CLI 共用重活：runScreening（后台 isolate 选股）、runSync（增量同步，进度可回调）、checkForUpdate（版本比较）
 │   ├── core/                  # ── 规则引擎（纯 Dart，零 IO/UI 依赖，可独立测试）──
 │   │   ├── models.dart        #   Bar（一根日K：开高低收/量）与 StockData（一只股票的日线序列）
-│   │   ├── indicators.dart    #   指标纯函数：sma/smaSeries/emaSeries/macd/rsi/volumeRatio/pctChange
+│   │   ├── indicators.dart    #   指标纯函数：sma/smaSeries/emaSeries/macd/rsi/kdj/volumeRatio/pctChange
 │   │   ├── rules.dart         #   IndicatorSnapshot（末日指标快照）+ Rule + builtInRules（7 条内置规则）+ ruleById
 │   │   └── screener.dart      #   screen(stocks, rules)：筛选入口；单规则=传一条，组合=多条 AND；历史不足 20 根自动跳过
 │   └── data/                  # ── 数据层（网络与存储）──
@@ -95,7 +95,7 @@ tushare pro HTTP ──> TushareClient（翻页/错误码）
 
 ## 指标与规则的关系（选股按规则，不直接按指标）
 
-- **指标**（`indicators.dart`）是计算器：输入行情序列输出数值，不判断。当前 5 个：MA(5/10/20)、MACD(12,26,9)、RSI14(Wilder)、量比（当日量/前5日均量）、当日涨跌幅
+- **指标**（`indicators.dart`）是计算器：输入行情序列输出数值，不判断。当前 6 个：MA(5/10/20/30/60 序列)、MACD(12,26,9)、RSI14(Wilder)、KDJ(9,3,3，通达信口径)、量比（当日量/前5日均量）、当日涨跌幅
 - **规则**（`rules.dart`）是判断器：拿某只股票末日指标快照（`IndicatorSnapshot`，含前一日值用于金叉/上穿判断）做布尔运算
 - 内置 7 条规则 ↔ 指标对应：
 

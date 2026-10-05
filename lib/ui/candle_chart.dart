@@ -22,9 +22,11 @@ class CandleChart extends StatefulWidget {
 }
 
 class _CandleChartState extends State<CandleChart> {
-  /// 可见 K 线（超长时取末尾 maxBars 根）与均线。
+  /// 可见 K 线（超长时取末尾 maxBars 根）与均线、MACD、KDJ。
   late List<Bar> _visible;
   late List<List<double?>> _maSeries;
+  ({List<double> dif, List<double> dea, List<double> hist})? _macd;
+  ({List<double?> k, List<double?> d, List<double?> j})? _kdj;
   late double _lo;
   late double _hi;
 
@@ -55,7 +57,9 @@ class _CandleChartState extends State<CandleChart> {
     final visible = bars.length > widget.maxBars ? bars.sublist(bars.length - widget.maxBars) : bars;
     final closes = [for (final b in visible) b.close];
     _visible = visible;
-    _maSeries = [smaSeries(closes, 5), smaSeries(closes, 10), smaSeries(closes, 20)];
+    _maSeries = [for (final n in maPeriods) smaSeries(closes, n)];
+    _macd = closes.isEmpty ? null : macd(closes);
+    _kdj = visible.length >= 9 ? kdj(visible) : null;
     final range = priceRange(visible, _maSeries);
     _lo = range.lo;
     _hi = range.hi;
@@ -102,6 +106,8 @@ class _CandleChartState extends State<CandleChart> {
                       geo: geo,
                       bars: _visible,
                       maSeries: _maSeries,
+                      macdData: _macd,
+                      kdjData: _kdj,
                       activeIndex: _active,
                       pointerY: _pointer?.dy,
                     ),
@@ -184,6 +190,8 @@ class _CandlePainter extends CustomPainter {
     required this.geo,
     required this.bars,
     required this.maSeries,
+    this.macdData,
+    this.kdjData,
     this.activeIndex,
     this.pointerY,
   });
@@ -192,6 +200,12 @@ class _CandlePainter extends CustomPainter {
   final List<Bar> bars;
   final List<List<double?>> maSeries;
 
+  /// 可见窗口的 MACD 数据；null（无数据）不画面板内容。
+  final ({List<double> dif, List<double> dea, List<double> hist})? macdData;
+
+  /// 可见窗口的 KDJ 数据；null（不足 9 根）不画面板内容。
+  final ({List<double?> k, List<double?> d, List<double?> j})? kdjData;
+
   /// 十字光标指向的索引，null 不画。
   final int? activeIndex;
   /// 指针 y（横线位置），null 不画。
@@ -199,7 +213,12 @@ class _CandlePainter extends CustomPainter {
 
   static const _up = AppColors.red;
   static const _down = AppColors.down;
-  static const _maColors = [Color(0xFFF59E0B), Color(0xFF3B82F6), Color(0xFF8B5CF6)];
+  static const _maColors = maColors;
+  static const _difColor = AppColors.text; // DIF 深色实线
+  static const _deaColor = Color(0xFFF59E0B); // DEA 琥珀（与 MA5 同色系）
+  static const _kColor = AppColors.text; // K 深色
+  static const _dColor = Color(0xFFF59E0B); // D 琥珀
+  static const _jColor = Color(0xFF8B5CF6); // J 紫（与 MA20 同色系）
   static const _dim = AppColors.dim;
 
   @override
@@ -225,7 +244,6 @@ class _CandlePainter extends CustomPainter {
     for (final b in bars) {
       maxVol = math.max(maxVol, b.volume);
     }
-    final xPos = geo.centerX;
 
     // 成交量柱
     for (var i = 0; i < bars.length; i++) {
@@ -233,13 +251,14 @@ class _CandlePainter extends CustomPainter {
       final h = maxVol == 0 ? 0.0 : b.volume / maxVol * volRect.height;
       final color = (b.close >= b.open ? _up : _down).withValues(alpha: 0.55);
       canvas.drawRect(
-          Rect.fromLTWH(xPos(i) - bodyW / 2, volRect.bottom - h, bodyW, h), Paint()..color = color);
+          Rect.fromLTWH(geo.centerX(i) - bodyW / 2, volRect.bottom - h, bodyW, h), Paint()..color = color);
     }
+    if (volRect.height > 8) _text(canvas, tp, '成交量', Offset(4, volRect.top + 2));
 
     // 十字光标：选中列高亮 → 竖线 → 横线（画在蜡烛下面，避免盖住当日走势）
     final active = activeIndex;
     if (active != null && active >= 0 && active < bars.length) {
-      final cx = xPos(active);
+      final cx = geo.centerX(active);
       canvas.drawRect(
         Rect.fromLTWH(cx - slot / 2, priceRect.top - 4, slot, volRect.bottom - priceRect.top + 4),
         Paint()..color = AppColors.text.withValues(alpha: 0.05),
@@ -249,8 +268,8 @@ class _CandlePainter extends CustomPainter {
       ..color = _dim.withValues(alpha: 0.85)
       ..strokeWidth = 1;
     if (active != null && active >= 0 && active < bars.length) {
-      _dashed(canvas, Offset(xPos(active), priceRect.top - 4),
-          Offset(xPos(active), volRect.bottom), hair);
+      _dashed(canvas, Offset(geo.centerX(active), priceRect.top - 4),
+          Offset(geo.centerX(active), volRect.bottom), hair);
     }
     if (pointerY != null) {
       _dashed(canvas, Offset(0, pointerY!), Offset(priceRect.right, pointerY!), hair);
@@ -261,7 +280,7 @@ class _CandlePainter extends CustomPainter {
     for (var i = 0; i < bars.length; i++) {
       final b = bars[i];
       final paint = Paint()..color = b.close >= b.open ? _up : _down;
-      final cx = xPos(i);
+      final cx = geo.centerX(i);
       canvas.drawLine(Offset(cx, geo.yForPrice(b.high)), Offset(cx, geo.yForPrice(b.low)),
           paint..strokeWidth = 1.4);
       final top = geo.yForPrice(math.max(b.open, b.close));
@@ -277,7 +296,7 @@ class _CandlePainter extends CustomPainter {
       for (var i = 0; i < series.length; i++) {
         final v = series[i];
         if (v == null) continue;
-        final pt = Offset(xPos(i), geo.yForPrice(v));
+        final pt = Offset(geo.centerX(i), geo.yForPrice(v));
         if (started) {
           path.lineTo(pt.dx, pt.dy);
         } else {
@@ -293,12 +312,95 @@ class _CandlePainter extends CustomPainter {
             ..style = PaintingStyle.stroke);
     }
 
+    _paintMacd(canvas, tp, grid);
+    _paintKdj(canvas, tp);
+
     // 底部日期标签
     if (bars.length > 1) {
       _bottomDate(canvas, tp, bars.first.date, 2, size);
       _bottomDate(canvas, tp, bars[bars.length ~/ 2].date, size.width / 2 - 20, size);
       _bottomDate(canvas, tp, bars.last.date, size.width - 60, size);
     }
+  }
+
+  /// MACD 副面板：零轴线 + 红绿柱（国内惯例红正绿负）+ DIF/DEA 线。
+  void _paintMacd(Canvas canvas, TextPainter tp, Paint grid) {
+    final m = macdData;
+    final rect = geo.macdRect;
+    if (m == null || rect.height < 8) return;
+    var maxAbs = 0.0;
+    for (var i = 0; i < bars.length; i++) {
+      maxAbs = math.max(maxAbs, m.dif[i].abs());
+      maxAbs = math.max(maxAbs, m.dea[i].abs());
+      maxAbs = math.max(maxAbs, m.hist[i].abs());
+    }
+    if (maxAbs <= 0) return;
+    final mid = rect.center.dy;
+    final half = rect.height / 2 * 0.9;
+    double yFor(double v) => mid - v / maxAbs * half;
+    canvas.drawLine(Offset(0, mid), Offset(rect.right, mid), grid);
+
+    final barW = math.min(geo.slot * 0.45, 6.0);
+    final histPaint = Paint();
+    for (var i = 0; i < bars.length; i++) {
+      final v = m.hist[i];
+      final h = math.max(0.5, v.abs() / maxAbs * half);
+      histPaint.color = (v >= 0 ? _up : _down).withValues(alpha: 0.7);
+      canvas.drawRect(Rect.fromLTWH(geo.centerX(i) - barW / 2, v >= 0 ? mid - h : mid, barW, h), histPaint);
+    }
+    for (final (color, series) in [(_difColor, m.dif), (_deaColor, m.dea)]) {
+      _strokeSeries(canvas, series, (i) => yFor(series[i]), color, 1.2);
+    }
+    _text(canvas, tp, 'MACD', Offset(4, rect.top + 2));
+  }
+
+  /// 逐日折线：跳过 null（KDJ 前 n−1 根无值），与 MA 均线同款画法。
+  void _strokeSeries(
+      Canvas canvas, List<double?> series, double Function(int i) yAt, Color color, double width) {
+    final path = Path();
+    var started = false;
+    for (var i = 0; i < series.length; i++) {
+      if (series[i] == null) continue;
+      if (started) {
+        path.lineTo(geo.centerX(i), yAt(i));
+      } else {
+        path.moveTo(geo.centerX(i), yAt(i));
+        started = true;
+      }
+    }
+    canvas.drawPath(
+        path,
+        Paint()
+          ..color = color
+          ..strokeWidth = width
+          ..style = PaintingStyle.stroke);
+  }
+
+  /// KDJ 副面板：K/D/J 三线（纵轴按可见数据动态伸缩）。
+  void _paintKdj(Canvas canvas, TextPainter tp) {
+    final k = kdjData;
+    final rect = geo.kdjRect;
+    if (k == null || rect.height < 8) return;
+    var lo = double.infinity, hi = double.negativeInfinity;
+    for (final s in [k.k, k.d, k.j]) {
+      for (final v in s) {
+        if (v == null) continue;
+        lo = math.min(lo, v);
+        hi = math.max(hi, v);
+      }
+    }
+    if (hi <= lo) {
+      lo -= 5;
+      hi += 5;
+    }
+    final pad = (hi - lo) * 0.1;
+    lo -= pad;
+    hi += pad;
+    double yAt(List<double?> s, int i) => rect.bottom - (s[i]! - lo) / (hi - lo) * rect.height;
+    _strokeSeries(canvas, k.k, (i) => yAt(k.k, i), _kColor, 1.2);
+    _strokeSeries(canvas, k.d, (i) => yAt(k.d, i), _dColor, 1.2);
+    _strokeSeries(canvas, k.j, (i) => yAt(k.j, i), _jColor, 1.1);
+    _text(canvas, tp, 'KDJ', Offset(4, rect.top + 2));
   }
 
   /// 横线右侧的价格标签（白底，压在价格刻度左侧）。
@@ -351,6 +453,8 @@ class _CandlePainter extends CustomPainter {
       oldDelegate.bars != bars ||
       oldDelegate.activeIndex != activeIndex ||
       oldDelegate.pointerY != pointerY ||
+      oldDelegate.macdData != macdData ||
+      oldDelegate.kdjData != kdjData ||
       oldDelegate.geo.lo != geo.lo ||
       oldDelegate.geo.hi != geo.hi ||
       oldDelegate.geo.size != geo.size;

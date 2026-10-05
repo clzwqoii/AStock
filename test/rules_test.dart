@@ -87,6 +87,25 @@ void main() {
       expect(s.pctChange, closeTo(2.1008403361344534, 1e-9));
     });
 
+    test('KDJ 字段与独立基准一致（带宽序列），且不影响收盘类指标', () {
+      final s = IndicatorSnapshot.fromStock(StockData(symbol: '600000', bars: barsWithBand()));
+      expect(s.k, closeTo(93.42377663802921, 1e-9));
+      expect(s.d, closeTo(93.10701931551432, 1e-9));
+      expect(s.j, closeTo(94.05729128305899, 1e-9));
+      expect(s.prevK, closeTo(93.39653452226122, 1e-9));
+      expect(s.prevD, closeTo(92.94864065425686, 1e-9));
+      expect(s.ma20, closeTo(19.55, 1e-9)); // 带宽不改变收盘类指标
+    });
+
+    test('连续一字板（整段高低相等）KDJ 为中性 50', () {
+      final s = IndicatorSnapshot.fromStock(stockOf(List.filled(40, 10.0)));
+      expect(s.k, closeTo(50.0, 1e-9));
+      expect(s.d, closeTo(50.0, 1e-9));
+      expect(s.j, closeTo(50.0, 1e-9));
+      expect(s.prevK, closeTo(50.0, 1e-9));
+      expect(s.prevD, closeTo(50.0, 1e-9));
+    });
+
     test('历史不足 20 根抛 StateError', () {
       final short = StockData(
         symbol: '000001',

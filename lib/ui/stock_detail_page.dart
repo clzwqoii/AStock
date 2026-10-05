@@ -13,11 +13,15 @@ class StockDetailPage extends StatefulWidget {
     required this.dbPath,
     required this.symbol,
     this.name,
+    this.loadFn = loadStockDetail,
   });
 
   final String dbPath;
   final String symbol;
   final String? name;
+
+  /// 详情加载；测试注入假实现（widget 测试在 FakeAsync 区，真实 IO 完成事件等不到）。
+  final Future<StockDetail?> Function(String dbPath, String symbol) loadFn;
 
   @override
   State<StockDetailPage> createState() => _StockDetailPageState();
@@ -33,7 +37,7 @@ class _StockDetailPageState extends State<StockDetailPage> {
   }
 
   Future<void> _load() async {
-    final d = await loadStockDetail(widget.dbPath, widget.symbol);
+    final d = await widget.loadFn(widget.dbPath, widget.symbol);
     if (mounted) setState(() => _detail = d);
   }
 
@@ -67,13 +71,15 @@ class _StockDetailPageState extends State<StockDetailPage> {
                   ),
                   Padding(
                     padding: const EdgeInsets.only(top: 6, bottom: 14),
-                    child: Row(
-                      mainAxisAlignment: MainAxisAlignment.center,
+                    // 5 条均线图例在窄屏一行放不下，Wrap 自动换行
+                    child: Wrap(
+                      alignment: WrapAlignment.center,
+                      crossAxisAlignment: WrapCrossAlignment.center,
+                      spacing: 14,
+                      runSpacing: 4,
                       children: [
-                        for (var i = 0; i < 3; i++) ...[
-                          _legend('MA${i == 0 ? 5 : i == 1 ? 10 : 20}', _maColors[i]),
-                          const SizedBox(width: 16),
-                        ],
+                        for (var i = 0; i < maPeriods.length; i++)
+                          _legend('MA${maPeriods[i]}', maColors[i]),
                         const Text('· 不复权 · 手', style: TextStyle(fontSize: 10, color: AppColors.dim)),
                       ],
                     ),
@@ -157,5 +163,3 @@ class _StockDetailPageState extends State<StockDetailPage> {
         ],
       );
 }
-
-const _maColors = [Color(0xFFF59E0B), Color(0xFF3B82F6), Color(0xFF8B5CF6)];

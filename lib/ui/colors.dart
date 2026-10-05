@@ -42,6 +42,17 @@ class AccentScope extends InheritedWidget {
   bool updateShouldNotify(AccentScope oldWidget) => oldWidget.color != color;
 }
 
+/// 日K均线周期与色板（蜡烛图与详情页图例共用，改色/增周期只改这里；
+/// 两个列表按下标一一对应）。
+const maPeriods = [5, 10, 20, 30, 60];
+const maColors = [
+  Color(0xFFF59E0B), // MA5 琥珀
+  Color(0xFF3B82F6), // MA10 蓝
+  Color(0xFF8B5CF6), // MA20 紫
+  Color(0xFF06B6D4), // MA30 青
+  Color(0xFF334155), // MA60 石板深灰
+];
+
 class AppColors {
   AppColors._();
 

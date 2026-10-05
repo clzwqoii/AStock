@@ -17,6 +17,11 @@ class IndicatorSnapshot {
     required this.prevDif,
     required this.dea,
     required this.prevDea,
+    required this.k,
+    required this.prevK,
+    required this.d,
+    required this.prevD,
+    required this.j,
     required this.rsi14,
     required this.volumeRatio,
     required this.pctChange,
@@ -35,6 +40,13 @@ class IndicatorSnapshot {
   final double prevDif;
   final double dea;
   final double prevDea;
+
+  /// KDJ(9,3,3)：K/D 用于金叉死叉判断，J 用于超买超卖。
+  final double k;
+  final double prevK;
+  final double d;
+  final double prevD;
+  final double j;
   final double rsi14;
   final double volumeRatio;
   final double pctChange;
@@ -51,6 +63,7 @@ class IndicatorSnapshot {
     final m10 = ind.smaSeries(closes, 10);
     final m20 = ind.smaSeries(closes, 20);
     final m = ind.macd(closes);
+    final kd = ind.kdj(bars);
     return IndicatorSnapshot._(
       close: closes[last],
       ma5: m5[last]!,
@@ -62,6 +75,11 @@ class IndicatorSnapshot {
       prevDif: m.dif[prev],
       dea: m.dea[last],
       prevDea: m.dea[prev],
+      k: kd.k[last]!,
+      prevK: kd.k[prev]!,
+      d: kd.d[last]!,
+      prevD: kd.d[prev]!,
+      j: kd.j[last]!,
       rsi14: ind.rsi(closes, 14),
       volumeRatio: ind.volumeRatio(bars),
       pctChange: ind.pctChange(bars),
