@@ -15,6 +15,28 @@ import 'stock_detail_page.dart';
 typedef ScreenFn = Future<({int total, List<ScreenRow> picked, String? dataDate})> Function(
     String dbPath, List<Rule> rules);
 
+/// 长任务加载模态：选股/自检等操作期间挡住重复点击并给出进行中反馈。
+class LoadingDialog extends StatelessWidget {
+  const LoadingDialog({super.key, required this.text});
+
+  final String text;
+
+  @override
+  Widget build(BuildContext context) => AlertDialog(
+        content: Row(
+          mainAxisSize: MainAxisSize.min,
+          children: [
+            const SizedBox(
+                width: 22,
+                height: 22,
+                child: CircularProgressIndicator(strokeWidth: 2.6)),
+            const SizedBox(width: 14),
+            Text(text, style: const TextStyle(fontSize: 13)),
+          ],
+        ),
+      );
+}
+
 /// CSV 导出（默认写数据库同目录；测试注入假实现，避免真实 IO）。
 typedef ExportCsvFn = Future<String> Function(List<ScreenRow> rows,
     {String? dataDate, String? combo});
@@ -116,12 +138,19 @@ class _ScreeningPageState extends State<ScreeningPage> {
       _loading = true;
       _error = null;
     });
+    final navigator = Navigator.of(context, rootNavigator: true);
+    showDialog<void>(
+      context: context,
+      barrierDismissible: false,
+      builder: (_) => const LoadingDialog(text: '正在选股…'),
+    );
     try {
       final rules = [for (final id in _selected) ruleById(id)];
       _result = await widget.screenFn(widget.dbPath, rules);
     } catch (e) {
       _error = e.toString();
     } finally {
+      navigator.pop();
       if (mounted) setState(() => _loading = false);
     }
   }
@@ -452,20 +481,21 @@ class _ScreeningPageState extends State<ScreeningPage> {
           children: wide
               ? [
                   _headerCell('代码', 104, left: true),
-                  _headerCell('名称', null, left: true),
-                  _sortableHeader('收盘', 56, SortField.close),
-                  _sortableHeader('涨跌', 56, null),
-                  _sortableHeader('涨跌幅', 68, SortField.changePct),
-                  _sortableHeader('量比', 48, SortField.volumeRatio),
+                  _headerCell('名称', 96, left: true),
+                  _sortableHeader('收盘', 64, SortField.close),
+                  _sortableHeader('涨跌', 64, null),
+                  _sortableHeader('涨跌幅', 78, SortField.changePct),
+                  _sortableHeader('量比', 56, SortField.volumeRatio),
                   _sortableHeader('成交额(万)', 90, SortField.amount),
-                  _sortableHeader('MA20', 56, SortField.ma20),
+                  _sortableHeader('MA20', 64, SortField.ma20),
+                  _headerCell('命中规则', null, left: true),
                 ]
               : [
                   _headerCell('代码', 104, left: true),
-                  _headerCell('名称', null, left: true),
-                  _sortableHeader('收盘', 56, SortField.close),
-                  _sortableHeader('涨跌幅', 68, SortField.changePct),
-                  _headerCell('命中规则', 132, left: true),
+                  _headerCell('名称', 96, left: true),
+                  _sortableHeader('收盘', 64, SortField.close),
+                  _sortableHeader('涨跌幅', 78, SortField.changePct),
+                  _headerCell('命中规则', null, left: true),
                 ],
         ),
       );
@@ -532,13 +562,9 @@ class _ScreeningPageState extends State<ScreeningPage> {
           ),
         );
 
-    final nameCell = Expanded(
-      child: Padding(
-        padding: const EdgeInsets.only(right: 14),
-        child: Text(row.name ?? '—',
-            style: const TextStyle(fontSize: 12, color: AppColors.dim), overflow: TextOverflow.ellipsis),
-      ),
-    );
+    // 名称定宽，剩余宽度全给命中规则列（规则名长，更需要空间）
+    final nameCell = cell(row.name ?? '—', 96,
+        const TextStyle(fontSize: 12, color: AppColors.dim), left: true);
 
     return GestureDetector(
       onTap: () => _openDetail(row),
@@ -550,19 +576,19 @@ class _ScreeningPageState extends State<ScreeningPage> {
             ? [
                 cell(row.symbol, 104, plain.copyWith(fontWeight: FontWeight.w600), left: true),
                 nameCell,
-                cell(_f2(row.close), 56, plain.copyWith(fontWeight: FontWeight.w600)),
-                cell(_signed(row.change), 56, changeStyle),
-                cell(_signed(row.changePct, suffix: '%'), 68, pctStyle),
-                cell(_f2(row.volumeRatio), 48, plain),
+                cell(_f2(row.close), 64, plain.copyWith(fontWeight: FontWeight.w600)),
+                cell(_signed(row.change), 64, changeStyle),
+                cell(_signed(row.changePct, suffix: '%'), 78, pctStyle),
+                cell(_f2(row.volumeRatio), 56, plain),
                 cell(row.amountWan.toStringAsFixed(0), 90, plain),
-                cell(_f2(row.ma20), 56, plain),
+                cell(_f2(row.ma20), 64, plain),
                 _hitCell(row.matchedRules),
               ]
             : [
                 cell(row.symbol, 104, plain.copyWith(fontWeight: FontWeight.w600), left: true),
                 nameCell,
-                cell(_f2(row.close), 56, plain.copyWith(fontWeight: FontWeight.w600)),
-                cell(_signed(row.changePct, suffix: '%'), 68, pctStyle),
+                cell(_f2(row.close), 64, plain.copyWith(fontWeight: FontWeight.w600)),
+                cell(_signed(row.changePct, suffix: '%'), 78, pctStyle),
                 _hitCell(row.matchedRules),
               ],
       ),
@@ -576,12 +602,12 @@ class _ScreeningPageState extends State<ScreeningPage> {
       '${v >= 0 ? '+' : '-'}${v.abs().toStringAsFixed(2)}$suffix';
 
   /// 命中规则单元格：多条用「＋」连接，超出宽度省略，悬停看全量。
+  /// 吃掉行内剩余宽度（名称列定宽后腾出的空间都归它）；左缩进与表头一致。
   Widget _hitCell(List<String> rules) {
     final text = rules.join('＋'); // 空 = 引擎未回填；不显示「—」以免与名称缺失的占位符混淆
-    return SizedBox(
-      width: 132,
+    return Expanded(
       child: Padding(
-        padding: const EdgeInsets.only(right: 10),
+        padding: const EdgeInsets.only(left: 20, right: 14),
         child: Tooltip(
           message: rules.isEmpty ? '' : text,
           child: Text(text,
