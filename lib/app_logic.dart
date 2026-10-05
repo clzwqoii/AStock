@@ -177,7 +177,7 @@ String rowsToCsv(List<ScreenRow> rows, {String? dataDate, String? combo}) {
     ..writeln('# A股选股结果（不复权·手）'
         '${dataDate == null ? '' : '  数据截至 $dataDate'}'
         '${combo == null || combo.isEmpty ? '' : '  规则：$combo'}')
-    ..writeln('代码,名称,收盘,涨跌,涨跌幅%,量比,成交额(万),MA20,命中规则,数据截至,规则组合');
+    ..writeln('代码,名称,收盘,涨跌,涨跌幅%,量比,成交额(万),MA20,数据截至,规则组合');
   for (final r in rows) {
     buf.writeln([
       _csvCell(r.symbol),
@@ -188,7 +188,6 @@ String rowsToCsv(List<ScreenRow> rows, {String? dataDate, String? combo}) {
       r.volumeRatio.toStringAsFixed(2),
       r.amountWan.toStringAsFixed(2),
       r.ma20.toStringAsFixed(2),
-      _csvCell(r.matchedRules.join(' + ')),
       _csvCell(dataDate ?? ''),
       _csvCell(combo ?? ''),
     ].join(','));

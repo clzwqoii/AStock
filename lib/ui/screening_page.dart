@@ -337,7 +337,7 @@ class _ScreeningPageState extends State<ScreeningPage> {
           _toolbar(wide),
           if (_loading)
             LinearProgressIndicator(minHeight: 2, color: AccentScope.of(context)),
-          // 表格列多（含命中规则），窄窗口横向滚动而不是溢出
+          // 表格列多，窄窗口横向滚动而不是溢出
           Expanded(
             child: LayoutBuilder(
               builder: (context, box) => _resultArea(wide, box.maxWidth),
@@ -503,29 +503,28 @@ class _ScreeningPageState extends State<ScreeningPage> {
                   _sortableHeader('涨跌', 64, null),
                   _sortableHeader('涨跌幅', 78, SortField.changePct),
                   _sortableHeader('量比', 56, SortField.volumeRatio),
-                  _sortableHeader('成交额(万)', 90, SortField.amount),
+                  _sortableHeader('成交额(万)', null, SortField.amount), // 弹性列吃剩余宽度
                   _sortableHeader('MA20', 64, SortField.ma20),
-                  _headerCell('命中规则', null, left: true),
                 ]
               : [
                   _headerCell('代码', 104, left: true),
-                  _headerCell('名称', 96, left: true),
+                  _headerCell('名称', null, left: true), // 弹性列吃剩余宽度
                   _sortableHeader('收盘', 64, SortField.close),
                   _sortableHeader('涨跌幅', 78, SortField.changePct),
-                  _headerCell('命中规则', null, left: true),
                 ],
         ),
       );
 
   /// 可排序表头：点一下降序，再点升序；当前列名加粗并显示箭头。
-  Widget _sortableHeader(String text, double width, SortField? field) {
+  /// width 传 null 时用 Expanded 吃剩余宽度（成交额列）。
+  Widget _sortableHeader(String text, double? width, SortField? field) {
     final active = field != null && _sortField == field;
     final style = TextStyle(
         fontSize: 10,
         letterSpacing: 0.5,
         fontWeight: active ? FontWeight.w900 : FontWeight.w700,
         color: active ? AppColors.text : AppColors.dim);
-    return GestureDetector(
+    final inner = GestureDetector(
       behavior: HitTestBehavior.translucent,
       onTap: field == null ? null : () => _sortBy(field),
       child: Container(
@@ -546,6 +545,7 @@ class _ScreeningPageState extends State<ScreeningPage> {
         ),
       ),
     );
+    return width == null ? Expanded(child: inner) : inner;
   }
 
   void _openDetail(ScreenRow row) {
@@ -568,19 +568,19 @@ class _ScreeningPageState extends State<ScreeningPage> {
     final plain = TextStyle(
         fontSize: 12.5, color: AppColors.text, fontFeatures: const [FontFeature.tabularFigures()]);
 
-    Widget cell(String text, double? width, TextStyle style, {bool left = false}) => SizedBox(
-          width: width,
-          child: Padding(
-            padding: EdgeInsets.only(left: left ? 20 : 0, right: left ? 0 : 14),
-            child: Text(text,
-                textAlign: left ? TextAlign.left : TextAlign.right,
-                overflow: TextOverflow.ellipsis,
-                style: style),
-          ),
-        );
+    Widget cell(String text, double? width, TextStyle style, {bool left = false}) {
+      final padded = Padding(
+        padding: EdgeInsets.only(left: left ? 20 : 0, right: left ? 0 : 14),
+        child: Text(text,
+            textAlign: left ? TextAlign.left : TextAlign.right,
+            overflow: TextOverflow.ellipsis,
+            style: style),
+      );
+      return width == null ? Expanded(child: padded) : SizedBox(width: width, child: padded);
+    }
 
-    // 名称定宽，剩余宽度全给命中规则列（规则名长，更需要空间）
-    final nameCell = cell(row.name ?? '—', 96,
+    // 名称定宽（宽屏）；窄屏由表头/单元格的 null 宽度交给名称弹性伸展
+    final nameCell = cell(row.name ?? '—', wide ? 96 : null,
         const TextStyle(fontSize: 12, color: AppColors.dim), left: true);
 
     return GestureDetector(
@@ -597,16 +597,14 @@ class _ScreeningPageState extends State<ScreeningPage> {
                 cell(_signed(row.change), 64, changeStyle),
                 cell(_signed(row.changePct, suffix: '%'), 78, pctStyle),
                 cell(_f2(row.volumeRatio), 56, plain),
-                cell(row.amountWan.toStringAsFixed(0), 90, plain),
+                cell(row.amountWan.toStringAsFixed(0), null, plain), // 弹性列吃剩余宽度
                 cell(_f2(row.ma20), 64, plain),
-                _hitCell(row.matchedRules),
               ]
             : [
                 cell(row.symbol, 104, plain.copyWith(fontWeight: FontWeight.w600), left: true),
                 nameCell,
                 cell(_f2(row.close), 64, plain.copyWith(fontWeight: FontWeight.w600)),
                 cell(_signed(row.changePct, suffix: '%'), 78, pctStyle),
-                _hitCell(row.matchedRules),
               ],
       ),
       ),
@@ -617,27 +615,6 @@ class _ScreeningPageState extends State<ScreeningPage> {
 
   String _signed(double v, {String suffix = ''}) =>
       '${v >= 0 ? '+' : '-'}${v.abs().toStringAsFixed(2)}$suffix';
-
-  /// 命中规则单元格：多条用「＋」连接，超出宽度省略，悬停看全量。
-  /// 吃掉行内剩余宽度（名称列定宽后腾出的空间都归它）；左缩进与表头一致。
-  Widget _hitCell(List<String> rules) {
-    final text = rules.join('＋'); // 空 = 引擎未回填；不显示「—」以免与名称缺失的占位符混淆
-    return Expanded(
-      child: Padding(
-        padding: const EdgeInsets.only(left: 20, right: 14),
-        child: Tooltip(
-          message: rules.isEmpty ? '' : text,
-          child: Text(text,
-              maxLines: 1,
-              overflow: TextOverflow.ellipsis,
-              style: TextStyle(
-                  fontSize: 11.5,
-                  color: rules.isEmpty ? AppColors.dim : AppColors.text,
-                  fontFeatures: const [FontFeature.tabularFigures()])),
-        ),
-      ),
-    );
-  }
 
   Widget _statusBar() {
     final r = _result;

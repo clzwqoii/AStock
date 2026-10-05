@@ -1,5 +1,5 @@
-/// 结果表对齐与列宽：表头与数值列对齐、名称列定宽、命中规则列吃剩余宽度。
-/// 几何断言直接量 RenderBox 坐标，回归的是 2026-10-05 真机反馈的错位问题。
+/// 结果表对齐与列宽：表头与数值列对齐、名称列定宽（宽屏）、命中规则列已移除
+/// （AND 组合下每行命中 = 勾选全集，纯复读；引擎 matchedRules 字段保留给未来 OR 模式）。
 library;
 
 import 'package:flutter/material.dart';
@@ -17,7 +17,7 @@ ScreenRow _row() => ScreenRow(
       volumeRatio: 1.23,
       amountWan: 45678,
       ma20: 111.0,
-      matchedRules: ['测试规则甲'],
+      matchedRules: ['测试规则甲'], // 引擎数据仍在，UI 不再展示
     );
 
 Future<void> _pump(WidgetTester tester, {Size size = const Size(1400, 900)}) async {
@@ -38,12 +38,10 @@ Future<void> _pump(WidgetTester tester, {Size size = const Size(1400, 900)}) asy
 }
 
 void main() {
-  testWidgets('宽布局：表头含「命中规则」，数值列表头与值右缘对齐', (tester) async {
+  testWidgets('宽布局：无「命中规则」列，数值列表头与值右缘对齐', (tester) async {
     await _pump(tester);
 
-    expect(find.text('命中规则'), findsOneWidget);
-    // 宽布局表头行此前漏了命中规则一格， Expanded 的名称列把差额吃掉，
-    // 导致收盘往右所有表头整体右移一列宽（132px）。
+    expect(find.text('命中规则'), findsNothing); // AND 组合下纯复读，已移除
     const pairs = {
       '收盘': '123.45',
       '涨跌': '+0.45',
@@ -58,22 +56,22 @@ void main() {
     });
   });
 
-  testWidgets('宽布局：名称列定宽，不再 Expanded 吃满剩余空间', (tester) async {
+  testWidgets('宽布局：名称列定宽，成交额列吃剩余宽度', (tester) async {
     await _pump(tester);
 
     final nameHeader = tester.getRect(find.text('名称'));
     final nameValue = tester.getRect(find.text('名称很长很长的股票'));
     expect(nameHeader.left, closeTo(nameValue.left, 1)); // 表头与值左对齐
-    expect(nameValue.width, lessThanOrEqualTo(96)); // 定宽（Expanded 时约 700+）
+    expect(nameValue.width, lessThanOrEqualTo(96)); // 定宽
+    // 成交额成为唯一弹性列：数值单元格满宽（表头文本是收缩盒量不了列宽）
+    expect(tester.getRect(find.text('45678')).width, greaterThan(120));
   });
 
-  testWidgets('窄布局：命中规则表头与值左对齐，名称列同样定宽', (tester) async {
+  testWidgets('窄布局：无「命中规则」列，名称列弹性吃剩余宽度', (tester) async {
     await _pump(tester, size: const Size(600, 900));
 
-    expect(find.text('命中规则'), findsOneWidget);
-    final hitHeader = tester.getRect(find.text('命中规则')).left;
-    final hitValue = tester.getRect(find.text('测试规则甲')).left;
-    expect(hitHeader, closeTo(hitValue, 1));
-    expect(tester.getRect(find.text('名称很长很长的股票')).width, lessThanOrEqualTo(96));
+    expect(find.text('命中规则'), findsNothing);
+    final nameWidth = tester.getRect(find.text('名称很长很长的股票')).width;
+    expect(nameWidth, greaterThan(96)); // 弹性列（手机上名称宽一些可接受）
   });
 }

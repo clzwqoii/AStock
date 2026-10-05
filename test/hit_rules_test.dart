@@ -1,4 +1,5 @@
-/// 「命中规则」贯穿链路：引擎回填 → UI 列/标签 → CSV 列；顺带锁死宽屏侧栏布局。
+/// 引擎命中链路：screenWithHits/CSV 行数据仍带 matchedRules（未来 OR 模式复用）；
+/// UI 的「命中规则」列已在 AND 组合语义下移除（每行命中 = 勾选全集，纯复读）。
 library;
 
 import 'dart:io';
@@ -28,7 +29,7 @@ void main() {
     File(dbPath).deleteSync();
   });
 
-  testWidgets('引擎回填命中规则；组合选股多条都展示，CSV 也带这一列', (tester) async {
+  testWidgets('组合选股导出 CSV：行数据仍带引擎回填的 matchedRules', (tester) async {
     List<ScreenRow>? exported;
     addTearDown(tester.view.resetPhysicalSize);
     await tester.binding.setSurfaceSize(const Size(1400, 900)); // 默认 800x600 会把后几条规则挤到滚动区外
@@ -82,9 +83,8 @@ void main() {
     await tester.tap(find.text('开始选股'));
     await tester.pumpAndSettle();
 
-    // 组合选股：命中规则列展示全部勾选规则名（用 ＋ 连接），单条的那行只显示一条
-    expect(find.text('收盘价站上MA20＋当日涨幅>3%'), findsOneWidget);
-    expect(find.text('收盘价站上MA20'), findsWidgets); // 侧栏里也有同名规则行
+    // UI 不再展示命中规则（AND 语义下纯复读），但导出的行数据仍带引擎回填
+    expect(find.text('收盘价站上MA20＋当日涨幅>3%'), findsNothing);
 
     await tester.tap(find.byTooltip('导出 CSV'));
     await tester.pumpAndSettle();
