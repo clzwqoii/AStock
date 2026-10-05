@@ -77,6 +77,16 @@ void main() {
       expect(geo.kdjRect.height, greaterThan(0));
     });
 
+    test('价格区显著高于三个副面板（真机反馈：KDJ 过高压窄了 K 线区）', () {
+      final geo = ChartGeometry(size: const Size(390, 700), count: 10, lo: 10, hi: 20);
+      final sub = geo.volRect.height + geo.macdRect.height + geo.kdjRect.height;
+      expect(geo.priceRect.height, greaterThan(sub)); // 价格区 > 三个副面板之和
+      // 副面板互相紧凑：单个不超过价格区的一半
+      for (final h in [geo.volRect.height, geo.macdRect.height, geo.kdjRect.height]) {
+        expect(h, lessThan(geo.priceRect.height / 2));
+      }
+    });
+
     test('极矮画布：各面板高度夹为非负', () {
       final geo = ChartGeometry(size: const Size(300, 120), count: 10, lo: 10, hi: 20);
       expect(geo.volRect.height, greaterThanOrEqualTo(0));

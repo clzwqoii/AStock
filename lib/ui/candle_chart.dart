@@ -253,7 +253,10 @@ class _CandlePainter extends CustomPainter {
       canvas.drawRect(
           Rect.fromLTWH(geo.centerX(i) - bodyW / 2, volRect.bottom - h, bodyW, h), Paint()..color = color);
     }
-    if (volRect.height > 8) _text(canvas, tp, '成交量', Offset(4, volRect.top + 2));
+    if (volRect.height > 8) {
+      _panelHeader(canvas, tp, volRect, '成交量',
+          [(formatVolume(bars[_displayIndex].volume), _dim)]);
+    }
 
     // 十字光标：选中列高亮 → 竖线 → 横线（画在蜡烛下面，避免盖住当日走势）
     final active = activeIndex;
@@ -351,7 +354,12 @@ class _CandlePainter extends CustomPainter {
     for (final (color, series) in [(_difColor, m.dif), (_deaColor, m.dea)]) {
       _strokeSeries(canvas, series, (i) => yFor(series[i]), color, 1.2);
     }
-    _text(canvas, tp, 'MACD', Offset(4, rect.top + 2));
+    final di = _displayIndex;
+    _panelHeader(canvas, tp, rect, 'MACD', [
+      ('DIF ${m.dif[di].toStringAsFixed(2)}', _difColor),
+      ('DEA ${m.dea[di].toStringAsFixed(2)}', _deaColor),
+      ('MACD ${m.hist[di].toStringAsFixed(2)}', _dim),
+    ]);
   }
 
   /// 逐日折线：跳过 null（KDJ 前 n−1 根无值），与 MA 均线同款画法。
@@ -400,7 +408,33 @@ class _CandlePainter extends CustomPainter {
     _strokeSeries(canvas, k.k, (i) => yAt(k.k, i), _kColor, 1.2);
     _strokeSeries(canvas, k.d, (i) => yAt(k.d, i), _dColor, 1.2);
     _strokeSeries(canvas, k.j, (i) => yAt(k.j, i), _jColor, 1.1);
-    _text(canvas, tp, 'KDJ', Offset(4, rect.top + 2));
+    final di = _displayIndex;
+    final kv = k.k[di], dv = k.d[di], jv = k.j[di];
+    _panelHeader(canvas, tp, rect, 'KDJ', [
+      if (kv != null) ('K ${kv.toStringAsFixed(1)}', _kColor),
+      if (dv != null) ('D ${dv.toStringAsFixed(1)}', _dColor),
+      if (jv != null) ('J ${jv.toStringAsFixed(1)}', _jColor),
+    ]);
+  }
+
+  /// 数值行所指的 K 线：十字光标激活时跟随光标，否则显示最后一根。
+  int get _displayIndex {
+    final a = activeIndex;
+    return (a != null && a >= 0 && a < bars.length) ? a : bars.length - 1;
+  }
+
+  /// 面板顶部行：左侧标题 + 右侧数值段（从右往左排，各段独立着色，与系列同色）。
+  void _panelHeader(
+      Canvas canvas, TextPainter tp, Rect rect, String title, List<(String, Color)> values) {
+    _text(canvas, tp, title, Offset(4, rect.top + 2));
+    var x = rect.right - 4;
+    for (final (text, color) in values.reversed) {
+      tp.text = TextSpan(text: text, style: TextStyle(fontSize: 10, color: color));
+      tp.layout();
+      x -= tp.width;
+      tp.paint(canvas, Offset(x, rect.top + 2));
+      x -= 10;
+    }
   }
 
   /// 横线右侧的价格标签（白底，压在价格刻度左侧）。
@@ -442,8 +476,8 @@ class _CandlePainter extends CustomPainter {
     _text(canvas, tp, dateLabel(date), Offset(x, size.height - 16));
   }
 
-  void _text(Canvas canvas, TextPainter tp, String text, Offset offset) {
-    tp.text = TextSpan(text: text, style: const TextStyle(fontSize: 10, color: _dim));
+  void _text(Canvas canvas, TextPainter tp, String text, Offset offset, {Color? color}) {
+    tp.text = TextSpan(text: text, style: TextStyle(fontSize: 10, color: color ?? _dim));
     tp.layout();
     tp.paint(canvas, offset);
   }

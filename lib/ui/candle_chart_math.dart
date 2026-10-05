@@ -26,13 +26,15 @@ class ChartGeometry {
 
   static const labelW = 46.0;
   static const priceTop = 10.0;
-  // 纵向四段：价格 / 成交量 / MACD / KDJ；比例为占画布高的份额，空间不足时靠下的面板先被夹为 0。
-  static const priceHeightRatio = 0.40;
+  // 纵向四段：价格 / 成交量 / MACD / KDJ。价格区要显著大于副面板之和（真机反馈：
+  // KDJ 吃剩余高度会把 K 线压扁），三个副面板按份额定高，空间不足时靠下的先被夹为 0。
+  static const priceHeightRatio = 0.46;
   static const volGap = 12.0;
   static const volHeightRatio = 0.12;
   static const macdGap = 12.0;
-  static const macdHeightRatio = 0.15;
+  static const macdHeightRatio = 0.14;
   static const kdjGap = 12.0;
+  static const kdjHeightRatio = 0.14;
   static const bottomPad = 22.0;
 
   /// 价格轴区域（蜡烛 + 均线）。
@@ -55,11 +57,13 @@ class ChartGeometry {
         math.max(0.0, size.height * macdHeightRatio),
       );
 
-  /// KDJ 面板，占 MACD 之下、日期标签之上的剩余高度。
-  Rect get kdjRect {
-    final top = macdRect.bottom + kdjGap;
-    return Rect.fromLTWH(0, top, priceRect.width, math.max(0.0, size.height - top - bottomPad));
-  }
+  /// KDJ 面板（K/D/J 三线），高度定份额不再吃剩余空间。
+  Rect get kdjRect => Rect.fromLTWH(
+        0,
+        macdRect.bottom + kdjGap,
+        priceRect.width,
+        math.max(0.0, size.height * kdjHeightRatio),
+      );
 
   double get slot => count <= 0 ? 0.0 : priceRect.width / count;
 
