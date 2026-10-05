@@ -100,21 +100,24 @@ void main() {
 
     test('assetUrlFor 缺失平台直链时返回 null（走下载页兜底）', () {
       debugDefaultTargetPlatformOverride = TargetPlatform.macOS;
-      addTearDown(() => debugDefaultTargetPlatformOverride = null);
-      expect(
-        assetUrlFor(UpdateInfo(latestVersion: '9', downloadUrl: 'u', assets: const {'android': 'a'})),
-        isNull,
-      );
-      expect(assetUrlFor(UpdateInfo(latestVersion: '9', downloadUrl: 'u')), isNull);
-      expect(
-        assetUrlFor(UpdateInfo(latestVersion: '9', downloadUrl: 'u', assets: const {'macos': 'dmg'})),
-        'dmg',
-      );
-      debugDefaultTargetPlatformOverride = TargetPlatform.iOS;
-      expect(
-        assetUrlFor(UpdateInfo(latestVersion: '9', downloadUrl: 'u', assets: const {'macos': 'dmg'})),
-        isNull,
-      );
+      try {
+        expect(
+          assetUrlFor(UpdateInfo(latestVersion: '9', downloadUrl: 'u', assets: const {'android': 'a'})),
+          isNull,
+        );
+        expect(assetUrlFor(UpdateInfo(latestVersion: '9', downloadUrl: 'u')), isNull);
+        expect(
+          assetUrlFor(UpdateInfo(latestVersion: '9', downloadUrl: 'u', assets: const {'macos': 'dmg'})),
+          'dmg',
+        );
+        debugDefaultTargetPlatformOverride = TargetPlatform.iOS;
+        expect(
+          assetUrlFor(UpdateInfo(latestVersion: '9', downloadUrl: 'u', assets: const {'macos': 'dmg'})),
+          isNull,
+        );
+      } finally {
+        debugDefaultTargetPlatformOverride = null;
+      }
     });
   });
 }
