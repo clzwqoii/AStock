@@ -327,7 +327,13 @@ Future<void> scrollTo(WidgetTester tester, Finder finder) =>
             checkUpdate: () async => UpdateInfo(
               latestVersion: '9.9.9',
               downloadUrl: 'https://example.com/releases',
-              assets: const {'macos': 'https://example.com/AStock-9.9.9-macOS.dmg'},
+              // CI 在 Linux 上会取 windows 键、本机 macOS 取 macos 键：
+              // 桌面两端给同名 .dmg 直链，断言与宿主平台无关
+              assets: const {
+                'macos': 'https://example.com/AStock-9.9.9-macOS.dmg',
+                'windows': 'https://example.com/AStock-9.9.9-macOS.dmg',
+                'android': 'https://example.com/AStock-9.9.9-Android.apk',
+              },
             ),
             downloadPackage: (url, fileName, {onProgress, client, saveDir}) async {
               onProgress?.call(50, 100);
