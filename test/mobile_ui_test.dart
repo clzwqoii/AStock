@@ -5,6 +5,7 @@ import 'package:flutter_test/flutter_test.dart';
 import 'package:stock/app_logic.dart';
 import 'package:stock/config.dart';
 import 'package:stock/ui/candle_chart.dart';
+import 'package:stock/ui/colors.dart';
 import 'package:stock/ui/stock_app.dart';
 
 import 'fixtures.dart';
@@ -68,6 +69,12 @@ void main() {
     await tester.tap(find.text('开始选股'));
     await tester.pumpAndSettle();
 
+    // 结果区在首屏折叠线以下（sliver 懒构建），滚动到可见再断言
+    await tester.scrollUntilVisible(
+      find.textContaining('只 · 点击查看详情'),
+      80,
+      scrollable: find.byType(Scrollable).first,
+    );
     expect(find.textContaining('只 · 点击查看详情'), findsOneWidget);
     // 结果卡片为懒构建，先滚动进视口再断言
     await tester.scrollUntilVisible(
@@ -132,5 +139,48 @@ void main() {
     await tester.pump();
 
     expect(persisted, 'blue');
+  });
+
+  testWidgets('头部渐变随主题色（绿主题不再是红头部）', (tester) async {
+    _phone(tester);
+    // IndexedStack 只构建当前页签，直接以绿主题启动断言头部渐变
+    await tester.pumpWidget(StockApp(
+      config: AppConfig(tushareToken: '', dbPath: dbPath, themeAccent: 'green'),
+      showOnboarding: false,
+      persistAccent: (_) async {},
+    ));
+    await tester.pump();
+
+    final gradContainers = find
+        .ancestor(of: find.text('A股选股'), matching: find.byType(Container))
+        .evaluate()
+        .map((e) => e.widget as Container)
+        .where((c) => (c.decoration as BoxDecoration?)?.gradient is LinearGradient)
+        .toList();
+    expect(gradContainers, isNotEmpty); // 头部渐变容器存在
+    final grad =
+        (gradContainers.first.decoration! as BoxDecoration).gradient! as LinearGradient;
+    expect(grad.colors.first, AccentColor.green.color);
+    expect(grad.colors.last, isNot(AccentColor.green.color)); // 深端压暗
+  });
+
+  testWidgets('点开始选股出现模态加载框，完成后消失', (tester) async {
+    _phone(tester);
+    await tester.pumpWidget(StockApp(
+      config: AppConfig(tushareToken: '', dbPath: dbPath),
+      showOnboarding: false,
+      screenFn: (dbPath, rules) async {
+        await Future<void>.delayed(const Duration(milliseconds: 300));
+        return (total: 1, picked: const <ScreenRow>[], dataDate: '20260930');
+      },
+    ));
+    await tester.pump();
+    await tester.tap(find.text('收盘价站上MA20').last);
+    await tester.pump();
+    await tester.tap(find.text('开始选股'));
+    await tester.pump(); // 弹框出现（screenFn 还没返回）
+    expect(find.textContaining('正在选股'), findsOneWidget);
+    await tester.pumpAndSettle();
+    expect(find.textContaining('正在选股'), findsNothing);
   });
 }

@@ -9,7 +9,7 @@ import '../core/rules.dart';
 import 'colors.dart';
 import 'onboarding.dart' show LaunchUrlFn;
 import 'stock_detail_page.dart';
-import 'screening_page.dart' show ruleGroups, ScreenFn;
+import 'screening_page.dart' show LoadingDialog, ruleGroups, ScreenFn;
 import 'settings_page.dart';
 
 class MobileHome extends StatefulWidget {
@@ -129,12 +129,19 @@ class _MobileScreeningState extends State<MobileScreening> {
       _loading = true;
       _error = null;
     });
+    final navigator = Navigator.of(context, rootNavigator: true);
+    showDialog<void>(
+      context: context,
+      barrierDismissible: false,
+      builder: (_) => const LoadingDialog(text: '正在选股…'),
+    );
     try {
       final rules = [for (final id in _selected) ruleById(id)];
       _result = await (widget.screenFn ?? runScreening)(widget.dbPath, rules);
     } catch (e) {
       _error = e.toString();
     } finally {
+      navigator.pop();
       if (mounted) setState(() => _loading = false);
     }
   }
@@ -149,6 +156,8 @@ class _MobileScreeningState extends State<MobileScreening> {
         SliverToBoxAdapter(child: _stats()),
         const SliverToBoxAdapter(child: SizedBox(height: 12)),
         SliverToBoxAdapter(child: _rulesPanel(accent)),
+        // 规则面板与按钮之间留呼吸间距
+        const SliverToBoxAdapter(child: SizedBox(height: 12)),
         SliverToBoxAdapter(
           child: Padding(
             padding: const EdgeInsets.fromLTRB(14, 0, 14, 12),
@@ -182,16 +191,18 @@ class _MobileScreeningState extends State<MobileScreening> {
 
   Widget _header() {
     final top = MediaQuery.of(context).padding.top;
+    final accent = AccentScope.of(context);
     return Container(
       width: double.infinity,
       padding: EdgeInsets.fromLTRB(18, top + 14, 18, 22),
-      decoration: const BoxDecoration(
+      // 渐变随主题色：深端为主色压暗 28%
+      decoration: BoxDecoration(
         gradient: LinearGradient(
           begin: Alignment.topLeft,
           end: Alignment.bottomRight,
-          colors: [Color(0xFFD7263D), Color(0xFFA01C33)],
+          colors: [accent, Color.lerp(accent, Colors.black, 0.28)!],
         ),
-        borderRadius: BorderRadius.vertical(bottom: Radius.circular(26)),
+        borderRadius: const BorderRadius.vertical(bottom: Radius.circular(26)),
       ),
       child: Column(
         crossAxisAlignment: CrossAxisAlignment.start,

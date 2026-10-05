@@ -147,6 +147,20 @@ Future<void> scrollTo(WidgetTester tester, Finder finder) =>
       expect(find.textContaining('暂无数据'), findsOneWidget);
     });
 
+    testWidgets('开始选股期间显示模态加载框，完成后消失', (tester) async {
+      await pumpWith(tester, (dbPath, rules) async {
+        await Future<void>.delayed(const Duration(milliseconds: 200));
+        return (total: 1, picked: [fakeRow('S1.SH', name: '威孚高科')], dataDate: '20260930');
+      });
+      await tester.tap(find.text('收盘价站上MA20'));
+      await tester.pump();
+      await tester.tap(find.text('开始选股'));
+      await tester.pump(); // 弹框出现（screenFn 还没返回）
+      expect(find.textContaining('正在选股'), findsOneWidget);
+      await tester.pumpAndSettle();
+      expect(find.textContaining('正在选股'), findsNothing);
+    });
+
     testWidgets('名称缺失时降级显示占位符', (tester) async {
       await pumpWith(tester, (a, b) async =>
           (total: 1, picked: [fakeRow('600000.SH')], dataDate: '20260930'));
@@ -267,7 +281,43 @@ Future<void> scrollTo(WidgetTester tester, Finder finder) =>
       expect(pressed, 1);
     });
 
-    testWidgets('同步进行中按钮禁用并显示状态', (tester) async {
+    testWidgets('检查更新：无新版时弹「已是最新版本」', (tester) async {
+      await tester.pumpWidget(MaterialApp(
+        home: Scaffold(
+          body: SettingsPage(
+            configPath: '${tmp.path}/.env',
+            dbPath: dbPath,
+            checkUpdate: () async => null,
+          ),
+        ),
+      ));
+      await tester.pump();
+
+      await tester.tap(find.text('检查更新'));
+      await tester.pumpAndSettle();
+      expect(find.text('已是最新版本'), findsOneWidget);
+    });
+
+    testWidgets('检查更新：发现新版时展示版本与下载地址', (tester) async {
+      await tester.pumpWidget(MaterialApp(
+        home: Scaffold(
+          body: SettingsPage(
+            configPath: '${tmp.path}/.env',
+            dbPath: dbPath,
+            checkUpdate: () async =>
+                UpdateInfo(latestVersion: '9.9.9', downloadUrl: 'https://example.com/apk'),
+          ),
+        ),
+      ));
+      await tester.pump();
+
+      await tester.tap(find.text('检查更新'));
+      await tester.pumpAndSettle();
+      expect(find.text('发现新版本'), findsOneWidget);
+      expect(find.textContaining('9.9.9'), findsOneWidget);
+    });
+
+    testWidgets('同步进行中按钮禁用并显示转圈状态', (tester) async {
       await tester.pumpWidget(MaterialApp(
         home: Scaffold(
           body: SettingsPage(
@@ -281,10 +331,11 @@ Future<void> scrollTo(WidgetTester tester, Finder finder) =>
       await tester.pump();
 
       final button = tester.widget<FilledButton>(
-        find.widgetWithText(FilledButton, '同步数据'),
+        find.widgetWithText(FilledButton, '同步中…'),
       );
       expect(button.onPressed, isNull);
-      expect(find.textContaining('同步中'), findsOneWidget);
+      expect(find.byType(CircularProgressIndicator), findsOneWidget);
+      expect(find.textContaining('同步中'), findsWidgets);
     });
   });
 }

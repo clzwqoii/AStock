@@ -167,39 +167,8 @@ class _StockAppState extends State<StockApp> {
     );
   }
 
-  /// 检查更新：先显示加载弹框，完成后替换为结果。
-  Future<void> _checkUpdate(BuildContext context) async {
-    showDialog<void>(
-      context: context,
-      barrierDismissible: false,
-      builder: (_) => const AlertDialog(
-        content: SizedBox(width: 90, height: 80, child: Center(child: CircularProgressIndicator())),
-      ),
-    );
-    UpdateInfo? info;
-    Object? error;
-    try {
-      info = await checkForUpdate();
-    } catch (e) {
-      error = e;
-    }
-    if (!context.mounted) return;
-    Navigator.of(context, rootNavigator: true).pop();
-    await showDialog<void>(
-      context: context,
-      builder: (_) => AlertDialog(
-        title: Text(error != null ? '检查失败' : (info == null ? '已是最新版本' : '发现新版本')),
-        content: Text(error != null
-            ? '无法连接更新服务器：$error'
-            : (info == null
-                ? '当前版本 $kAppVersion 已是最新。'
-                : '最新版本 ${info.latestVersion}\n下载地址：\n${info.downloadUrl}')),
-        actions: [
-          TextButton(onPressed: () => Navigator.pop(context), child: const Text('好')),
-        ],
-      ),
-    );
-  }
+  /// 检查更新：弹框流程在 settings_page（设置页与 macOS 菜单共用）。
+  Future<void> _checkUpdate(BuildContext context) => showCheckUpdateDialog(context);
 
   @override
   Widget build(BuildContext context) {

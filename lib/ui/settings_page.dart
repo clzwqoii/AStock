@@ -5,11 +5,13 @@ import 'dart:io';
 
 import 'package:flutter/material.dart';
 
+import '../app_logic.dart' show UpdateInfo, checkForUpdate, kAppVersion;
 import '../config.dart';
 import '../data/sync_service.dart';
 import '../net_diag.dart';
 import 'colors.dart';
 import 'onboarding.dart' show LaunchUrlFn, defaultLaunchUrl, kTushareRegisterUrl;
+import 'screening_page.dart' show LoadingDialog;
 
 typedef RunSyncFn = Future<SyncResult> Function({
   required String dbPath,
@@ -19,6 +21,44 @@ typedef RunSyncFn = Future<SyncResult> Function({
 
 /// 写配置文件的端口；测试注入内存实现以避开真实 IO。
 typedef WriteConfigFn = Future<void> Function(String path, String content);
+
+/// 检查更新端口；测试注入假实现，生产用 [checkForUpdate]。
+typedef CheckUpdateFn = Future<UpdateInfo?> Function();
+
+/// 检查更新：先加载弹框，完成后替换为结果弹框（macOS 菜单与设置页共用）。
+Future<void> showCheckUpdateDialog(BuildContext context, {CheckUpdateFn? checkFn}) async {
+  final navigator = Navigator.of(context, rootNavigator: true);
+  showDialog<void>(
+    context: context,
+    barrierDismissible: false,
+    builder: (_) => const LoadingDialog(text: '正在检查更新…'),
+  );
+  UpdateInfo? info;
+  Object? error;
+  try {
+    info = await (checkFn ?? checkForUpdate)();
+  } catch (e) {
+    error = e;
+  }
+  navigator.pop();
+  if (!context.mounted) return;
+  await showDialog<void>(
+    context: context,
+    builder: (_) => AlertDialog(
+      title: Text(error != null ? '检查失败' : (info == null ? '已是最新版本' : '发现新版本')),
+      content: Text(
+          error != null
+              ? '无法连接更新服务器：$error'
+              : (info == null
+                  ? '当前版本 $kAppVersion 已是最新。'
+                  : '最新版本 ${info.latestVersion}\n下载地址：\n${info.downloadUrl}'),
+          style: const TextStyle(fontSize: 13)),
+      actions: [
+        TextButton(onPressed: () => Navigator.pop(context), child: const Text('好')),
+      ],
+    ),
+  );
+}
 
 Future<void> _defaultWriteConfig(String path, String content) async {
   final file = File(path);
@@ -39,6 +79,7 @@ class SettingsPage extends StatelessWidget {
     this.accent = AccentColor.red,
     this.onAccentChanged,
     this.launchUrl,
+    this.checkUpdate,
   });
 
   final String initialToken;
@@ -55,6 +96,9 @@ class SettingsPage extends StatelessWidget {
   final AccentColor accent;
   final ValueChanged<AccentColor>? onAccentChanged;
   final LaunchUrlFn? launchUrl;
+
+  /// 检查更新；测试注入假实现，null 用真实 checkForUpdate。
+  final CheckUpdateFn? checkUpdate;
 
   @override
   Widget build(BuildContext context) {
@@ -94,7 +138,17 @@ class SettingsPage extends StatelessWidget {
             const SizedBox(width: 12),
             FilledButton(
               onPressed: syncing ? null : onSyncPressed,
-              child: const Text('同步数据'),
+              child: syncing
+                  ? const Row(mainAxisSize: MainAxisSize.min, children: [
+                      SizedBox(
+                          width: 14,
+                          height: 14,
+                          child:
+                              CircularProgressIndicator(strokeWidth: 2, color: Colors.white)),
+                      SizedBox(width: 8),
+                      Text('同步中…'),
+                    ])
+                  : const Text('同步数据'),
             ),
           ],
         ),
@@ -105,6 +159,14 @@ class SettingsPage extends StatelessWidget {
             onPressed: () => _diagnose(context),
             icon: const Icon(Icons.network_check, size: 16),
             label: const Text('网络自检', style: TextStyle(fontSize: 12)),
+          ),
+        ),
+        Align(
+          alignment: Alignment.centerLeft,
+          child: TextButton.icon(
+            onPressed: () => showCheckUpdateDialog(context, checkFn: checkUpdate),
+            icon: const Icon(Icons.system_update_alt, size: 16),
+            label: const Text('检查更新', style: TextStyle(fontSize: 12)),
           ),
         ),
         if (syncing) const Padding(
@@ -174,16 +236,27 @@ class SettingsPage extends StatelessWidget {
     );
   }
 
-  /// 网络自检：DNS + HTTPS 连通性，结论直接弹给用户（真机排障用）。
+  /// 网络自检：DNS + HTTPS 连通性，加载动效 + 结果弹框（与其他长任务一致）。
   Future<void> _diagnose(BuildContext context) async {
-    final messenger = ScaffoldMessenger.of(context);
-    messenger.showSnackBar(const SnackBar(
-      content: Text('正在检测网络…'),
-      duration: Duration(seconds: 10),
-    ));
+    final navigator = Navigator.of(context, rootNavigator: true);
+    showDialog<void>(
+      context: context,
+      barrierDismissible: false,
+      builder: (_) => const LoadingDialog(text: '正在检测网络…'),
+    );
     final result = await diagnoseNetwork();
-    messenger.hideCurrentSnackBar();
-    messenger.showSnackBar(SnackBar(content: Text(result), duration: const Duration(seconds: 12)));
+    navigator.pop();
+    if (!context.mounted) return;
+    await showDialog<void>(
+      context: context,
+      builder: (_) => AlertDialog(
+        title: const Text('网络自检'),
+        content: Text(result, style: const TextStyle(fontSize: 13)),
+        actions: [
+          TextButton(onPressed: () => Navigator.pop(context), child: const Text('好')),
+        ],
+      ),
+    );
   }
 
   Future<void> _save(BuildContext context, TextEditingController token) async {
