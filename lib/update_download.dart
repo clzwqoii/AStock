@@ -4,6 +4,7 @@ library;
 
 import 'dart:io';
 
+import 'package:flutter/foundation.dart';
 import 'package:http/http.dart' as h;
 import 'package:open_filex/open_filex.dart';
 import 'package:path_provider/path_provider.dart';
@@ -68,12 +69,22 @@ Future<Directory> defaultSaveDir() async {
   return Directory('$home/Downloads');
 }
 
-/// 当前平台的安装包直链；null = 无应用内自更新条件（iOS / Windows 包未产出），走下载页兜底。
+/// 当前平台的安装包直链；null = 无应用内自更新条件（iOS / Linux / 未产出安装包的平台），
+/// 走下载页兜底。用 defaultTargetPlatform 而非 dart:io Platform：
+/// 测试可用 debugDefaultTargetPlatformOverride 与宿主机解耦。
 String? assetUrlFor(UpdateInfo info) {
-  if (Platform.isAndroid) return info.assets['android'];
-  if (Platform.isMacOS) return info.assets['macos'];
-  if (Platform.isWindows) return info.assets['windows'];
-  return null;
+  switch (defaultTargetPlatform) {
+    case TargetPlatform.android:
+      return info.assets['android'];
+    case TargetPlatform.macOS:
+      return info.assets['macos'];
+    case TargetPlatform.windows:
+      return info.assets['windows'];
+    case TargetPlatform.iOS:
+    case TargetPlatform.linux:
+    case TargetPlatform.fuchsia:
+      return null;
+  }
 }
 
 /// 下载完成后的安装触发：安卓拉起系统安装器（确认环节由系统提供），

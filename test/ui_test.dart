@@ -1,5 +1,6 @@
 import 'dart:io';
 
+import 'package:flutter/foundation.dart';
 import 'package:flutter/material.dart';
 import 'package:flutter_test/flutter_test.dart';
 import 'package:stock/app_logic.dart';
@@ -318,6 +319,9 @@ Future<void> scrollTo(WidgetTester tester, Finder finder) =>
     });
 
     testWidgets('检查更新：有直链时下载带进度并自动触发安装', (tester) async {
+      // 与宿主机解耦：强制按 macOS 取直链
+      debugDefaultTargetPlatformOverride = TargetPlatform.macOS;
+      addTearDown(() => debugDefaultTargetPlatformOverride = null);
       String? installedPath;
       await tester.pumpWidget(MaterialApp(
         home: Scaffold(
@@ -327,13 +331,7 @@ Future<void> scrollTo(WidgetTester tester, Finder finder) =>
             checkUpdate: () async => UpdateInfo(
               latestVersion: '9.9.9',
               downloadUrl: 'https://example.com/releases',
-              // CI 在 Linux 上会取 windows 键、本机 macOS 取 macos 键：
-              // 桌面两端给同名 .dmg 直链，断言与宿主平台无关
-              assets: const {
-                'macos': 'https://example.com/AStock-9.9.9-macOS.dmg',
-                'windows': 'https://example.com/AStock-9.9.9-macOS.dmg',
-                'android': 'https://example.com/AStock-9.9.9-Android.apk',
-              },
+              assets: const {'macos': 'https://example.com/AStock-9.9.9-macOS.dmg'},
             ),
             downloadPackage: (url, fileName, {onProgress, client, saveDir}) async {
               onProgress?.call(50, 100);
@@ -355,6 +353,8 @@ Future<void> scrollTo(WidgetTester tester, Finder finder) =>
     });
 
     testWidgets('检查更新：无本平台直链时提供「打开下载页」兜底', (tester) async {
+      debugDefaultTargetPlatformOverride = TargetPlatform.iOS; // iOS 无应用内自更新
+      addTearDown(() => debugDefaultTargetPlatformOverride = null);
       var opened = 0;
       await tester.pumpWidget(MaterialApp(
         home: Scaffold(
@@ -365,7 +365,7 @@ Future<void> scrollTo(WidgetTester tester, Finder finder) =>
             checkUpdate: () async => UpdateInfo(
               latestVersion: '9.9.9',
               downloadUrl: 'https://example.com/releases',
-              assets: const {'android': 'https://example.com/a.apk'}, // mac 测试机无 macos 直链
+              assets: const {'android': 'https://example.com/a.apk'}, // iOS 取不到本平台直链
             ),
           ),
         ),

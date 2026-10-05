@@ -4,6 +4,7 @@ library;
 import 'dart:convert';
 import 'dart:io';
 
+import 'package:flutter/foundation.dart';
 import 'package:flutter_test/flutter_test.dart';
 import 'package:http/http.dart' as h;
 import 'package:http/testing.dart';
@@ -98,16 +99,22 @@ void main() {
     });
 
     test('assetUrlFor 缺失平台直链时返回 null（走下载页兜底）', () {
-      // macOS 测试机上 isMacOS 为真
-      final info = UpdateInfo(
-          latestVersion: '9', downloadUrl: 'u', assets: const {'android': 'a'});
-      if (Platform.isMacOS) expect(assetUrlFor(info), isNull);
+      debugDefaultTargetPlatformOverride = TargetPlatform.macOS;
+      addTearDown(() => debugDefaultTargetPlatformOverride = null);
+      expect(
+        assetUrlFor(UpdateInfo(latestVersion: '9', downloadUrl: 'u', assets: const {'android': 'a'})),
+        isNull,
+      );
       expect(assetUrlFor(UpdateInfo(latestVersion: '9', downloadUrl: 'u')), isNull);
-      if (Platform.isMacOS) {
-        final mac = UpdateInfo(
-            latestVersion: '9', downloadUrl: 'u', assets: const {'macos': 'dmg'});
-        expect(assetUrlFor(mac), 'dmg');
-      }
+      expect(
+        assetUrlFor(UpdateInfo(latestVersion: '9', downloadUrl: 'u', assets: const {'macos': 'dmg'})),
+        'dmg',
+      );
+      debugDefaultTargetPlatformOverride = TargetPlatform.iOS;
+      expect(
+        assetUrlFor(UpdateInfo(latestVersion: '9', downloadUrl: 'u', assets: const {'macos': 'dmg'})),
+        isNull,
+      );
     });
   });
 }
