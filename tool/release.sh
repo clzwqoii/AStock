@@ -21,8 +21,8 @@ TAG="v$VERSION"
 export PUB_HOSTED_URL=https://pub.flutter-io.cn
 export FLUTTER_STORAGE_BASE_URL=https://storage.flutter-io.cn
 export DEVELOPER_DIR=/Applications/Xcode.app/Contents/Developer
-# 必须显式给 UTF-8 locale：默认 C locale 下 bash 会把中文字节并进变量名（$VERSION（… → unbound variable）
-export LANG=en_US.UTF-8 LC_ALL=en_US.UTF-8
+# 勿在字符串里让变量紧贴中文字符（如 "$VERSION（"）：bash 在 C locale 下按字节解析，
+# 会把中文并进变量名报 unbound variable。export LANG 对已运行的 bash 无效，用 printf 才是正解。
 
 step() { echo; echo "=== $* ==="; }
 
@@ -64,7 +64,7 @@ git push github "$TAG" -f || true
 step "5/7 GitHub 发行版"
 NOTES=$(mktemp)
 sed -n "/^## $VERSION/,/^## /p" RELEASE_NOTES.md | sed '$d' > "$NOTES"
-[[ -s "$NOTES" ]] || echo "A股规则选股 $VERSION（四端通用）。详见仓库 README。" > "$NOTES"
+[[ -s "$NOTES" ]] || printf 'A股规则选股 %s（四端通用）。详见仓库 README。\n' "$VERSION" > "$NOTES"
 gh release delete "$TAG" --repo "$GH_REPO" -y 2>/dev/null || true
 gh release create "$TAG" --repo "$GH_REPO" --title "$TAG · A股规则选股工具（四端）" \
   --notes-file "$NOTES" "/tmp/AStock-$VERSION-macOS.dmg" "/tmp/AStock-$VERSION-Android.apk"
