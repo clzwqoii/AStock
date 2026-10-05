@@ -317,6 +317,64 @@ Future<void> scrollTo(WidgetTester tester, Finder finder) =>
       expect(find.textContaining('9.9.9'), findsOneWidget);
     });
 
+    testWidgets('检查更新：有直链时下载带进度并自动触发安装', (tester) async {
+      String? installedPath;
+      await tester.pumpWidget(MaterialApp(
+        home: Scaffold(
+          body: SettingsPage(
+            configPath: '${tmp.path}/.env',
+            dbPath: dbPath,
+            checkUpdate: () async => UpdateInfo(
+              latestVersion: '9.9.9',
+              downloadUrl: 'https://example.com/releases',
+              assets: const {'macos': 'https://example.com/AStock-9.9.9-macOS.dmg'},
+            ),
+            downloadPackage: (url, fileName, {onProgress, client, saveDir}) async {
+              onProgress?.call(50, 100);
+              onProgress?.call(100, 100);
+              return File('${tmp.path}/$fileName')..writeAsStringSync('pkg');
+            },
+            installPackage: (path) async => installedPath = path,
+          ),
+        ),
+      ));
+      await tester.pump();
+      await tester.tap(find.text('检查更新'));
+      await tester.pumpAndSettle();
+      await tester.tap(find.text('下载并安装'));
+      await tester.pumpAndSettle();
+
+      expect(installedPath, endsWith('AStock-9.9.9-macOS.dmg'));
+      expect(find.text('下载完成'), findsOneWidget);
+    });
+
+    testWidgets('检查更新：无本平台直链时提供「打开下载页」兜底', (tester) async {
+      var opened = 0;
+      await tester.pumpWidget(MaterialApp(
+        home: Scaffold(
+          body: SettingsPage(
+            configPath: '${tmp.path}/.env',
+            dbPath: dbPath,
+            launchUrl: (uri) async => opened++,
+            checkUpdate: () async => UpdateInfo(
+              latestVersion: '9.9.9',
+              downloadUrl: 'https://example.com/releases',
+              assets: const {'android': 'https://example.com/a.apk'}, // mac 测试机无 macos 直链
+            ),
+          ),
+        ),
+      ));
+      await tester.pump();
+      await tester.tap(find.text('检查更新'));
+      await tester.pumpAndSettle();
+
+      expect(find.text('打开下载页'), findsOneWidget);
+      expect(find.text('下载并安装'), findsNothing);
+      await tester.tap(find.text('打开下载页'));
+      await tester.pumpAndSettle();
+      expect(opened, 1);
+    });
+
     testWidgets('同步进行中按钮禁用并显示转圈状态', (tester) async {
       await tester.pumpWidget(MaterialApp(
         home: Scaffold(

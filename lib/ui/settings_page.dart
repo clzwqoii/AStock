@@ -9,6 +9,13 @@ import '../app_logic.dart' show UpdateInfo, checkForUpdate, kAppVersion;
 import '../config.dart';
 import '../data/sync_service.dart';
 import '../net_diag.dart';
+import '../update_download.dart'
+    show
+        assetUrlFor,
+        downloadUpdatePackage,
+        installUpdatePackage,
+        DownloadPackageFn,
+        InstallPackageFn;
 import 'colors.dart';
 import 'onboarding.dart' show LaunchUrlFn, defaultLaunchUrl, kTushareRegisterUrl;
 import 'screening_page.dart' show LoadingDialog;
@@ -26,7 +33,14 @@ typedef WriteConfigFn = Future<void> Function(String path, String content);
 typedef CheckUpdateFn = Future<UpdateInfo?> Function();
 
 /// 检查更新：先加载弹框，完成后替换为结果弹框（macOS 菜单与设置页共用）。
-Future<void> showCheckUpdateDialog(BuildContext context, {CheckUpdateFn? checkFn}) async {
+/// 有本平台直链时支持应用内下载（进度条）并自动触发安装；否则「打开下载页」兜底。
+Future<void> showCheckUpdateDialog(
+  BuildContext context, {
+  CheckUpdateFn? checkFn,
+  DownloadPackageFn? downloadFn,
+  InstallPackageFn? installFn,
+  LaunchUrlFn? launchUrl,
+}) async {
   final navigator = Navigator.of(context, rootNavigator: true);
   showDialog<void>(
     context: context,
@@ -42,22 +56,138 @@ Future<void> showCheckUpdateDialog(BuildContext context, {CheckUpdateFn? checkFn
   }
   navigator.pop();
   if (!context.mounted) return;
+  if (error != null) {
+    await _resultDialog(context, '检查失败', '无法连接更新服务器：$error');
+    return;
+  }
+  if (info == null) {
+    await _resultDialog(context, '已是最新版本', '当前版本 $kAppVersion 已是最新。');
+    return;
+  }
+  final next = info; // 非空局部：闭包里要用，闭包不继承可空局部变量的提升
   await showDialog<void>(
     context: context,
     builder: (_) => AlertDialog(
-      title: Text(error != null ? '检查失败' : (info == null ? '已是最新版本' : '发现新版本')),
+      title: const Text('发现新版本'),
       content: Text(
-          error != null
-              ? '无法连接更新服务器：$error'
-              : (info == null
-                  ? '当前版本 $kAppVersion 已是最新。'
-                  : '最新版本 ${info.latestVersion}\n下载地址：\n${info.downloadUrl}'),
+          '最新版本 ${next.latestVersion}\n下载地址：\n${next.downloadUrl}',
           style: const TextStyle(fontSize: 13)),
+      actions: [
+        TextButton(onPressed: () => Navigator.pop(context), child: const Text('取消')),
+        if (assetUrlFor(next) != null)
+          FilledButton(
+            onPressed: () => _downloadAndInstall(
+              context,
+              next,
+              downloadFn: downloadFn,
+              installFn: installFn,
+            ),
+            child: const Text('下载并安装'),
+          )
+        else
+          FilledButton(
+            onPressed: () {
+              Navigator.pop(context);
+              (launchUrl ?? defaultLaunchUrl)(Uri.parse(next.downloadUrl));
+            },
+            child: const Text('打开下载页'),
+          ),
+      ],
+    ),
+  );
+}
+
+/// 单按钮结果弹框。
+Future<void> _resultDialog(BuildContext context, String title, String body) {
+  return showDialog<void>(
+    context: context,
+    builder: (_) => AlertDialog(
+      title: Text(title),
+      content: Text(body, style: const TextStyle(fontSize: 13)),
       actions: [
         TextButton(onPressed: () => Navigator.pop(context), child: const Text('好')),
       ],
     ),
   );
+}
+
+/// 应用内下载（进度弹框）→ 按平台触发安装。
+/// 安卓最后一步由系统安装器确认；macOS/Windows 打开安装包后由系统接管。
+Future<void> _downloadAndInstall(
+  BuildContext context,
+  UpdateInfo info, {
+  DownloadPackageFn? downloadFn,
+  InstallPackageFn? installFn,
+}) async {
+  final navigator = Navigator.of(context, rootNavigator: true);
+  final messenger = ScaffoldMessenger.of(context);
+  final url = assetUrlFor(info)!;
+  final fileName = Uri.parse(url).pathSegments.last;
+  var received = 0;
+  var lastPercent = -1;
+  int? total;
+  void Function()? refresh;
+  showDialog<void>(
+    context: context,
+    barrierDismissible: false,
+    builder: (_) => StatefulBuilder(
+      builder: (ctx, setD) {
+        refresh = () => setD(() {});
+        final t = total; // 闭包内取快照，避免可空字段提升失效
+        return AlertDialog(
+          title: Text('正在下载 ${info.latestVersion}'),
+          content: Column(
+            mainAxisSize: MainAxisSize.min,
+            crossAxisAlignment: CrossAxisAlignment.start,
+            children: [
+              LinearProgressIndicator(value: t == null || t == 0 ? null : received / t),
+              const SizedBox(height: 6),
+              Text(
+                t == null
+                    ? '已下载 ${(received / 1048576).toStringAsFixed(1)} MB'
+                    : '已下载 ${(received / 1048576).toStringAsFixed(1)} / ${(t / 1048576).toStringAsFixed(1)} MB'
+                        '（${lastPercent < 0 ? 0 : lastPercent}%）',
+                style: const TextStyle(fontSize: 12, color: AppColors.dim),
+              ),
+            ],
+          ),
+        );
+      },
+    ),
+  );
+  try {
+    final file = await (downloadFn ?? downloadUpdatePackage)(
+      url,
+      fileName,
+      onProgress: (r, t) {
+        received = r;
+        total = t;
+        final percent = t == null || t == 0 ? -1 : r * 100 ~/ t;
+        if (percent != lastPercent) {
+          lastPercent = percent;
+          refresh?.call();
+        }
+      },
+    );
+    navigator.pop(); // 关进度框
+    await (installFn ?? installUpdatePackage)(file.path);
+    if (!context.mounted) return;
+    if (Platform.isAndroid) {
+      // 系统安装器已盖在 App 上，用 SnackBar 即可，避免盖回弹框
+      messenger.showSnackBar(
+          const SnackBar(content: Text('已打开系统安装器，确认后即完成更新')));
+    } else {
+      await _resultDialog(
+        context,
+        '下载完成',
+        '安装包已在系统打开：${file.path}\n按提示完成安装（macOS 挂载 dmg 后拖入「应用程序」）。',
+      );
+    }
+  } catch (e) {
+    navigator.pop();
+    if (!context.mounted) return;
+    await _resultDialog(context, '下载失败', '$e');
+  }
 }
 
 Future<void> _defaultWriteConfig(String path, String content) async {
@@ -80,6 +210,8 @@ class SettingsPage extends StatelessWidget {
     this.onAccentChanged,
     this.launchUrl,
     this.checkUpdate,
+    this.downloadPackage,
+    this.installPackage,
   });
 
   final String initialToken;
@@ -99,6 +231,10 @@ class SettingsPage extends StatelessWidget {
 
   /// 检查更新；测试注入假实现，null 用真实 checkForUpdate。
   final CheckUpdateFn? checkUpdate;
+
+  /// 更新包下载/安装端口；测试注入假实现，生产用 update_download 默认值。
+  final DownloadPackageFn? downloadPackage;
+  final InstallPackageFn? installPackage;
 
   @override
   Widget build(BuildContext context) {
@@ -164,7 +300,13 @@ class SettingsPage extends StatelessWidget {
         Align(
           alignment: Alignment.centerLeft,
           child: TextButton.icon(
-            onPressed: () => showCheckUpdateDialog(context, checkFn: checkUpdate),
+            onPressed: () => showCheckUpdateDialog(
+              context,
+              checkFn: checkUpdate,
+              downloadFn: downloadPackage,
+              installFn: installPackage,
+              launchUrl: launchUrl,
+            ),
             icon: const Icon(Icons.system_update_alt, size: 16),
             label: const Text('检查更新', style: TextStyle(fontSize: 12)),
           ),

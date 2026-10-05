@@ -30,6 +30,9 @@ step "1/7 校验版本号"
 grep -q "^version: $VERSION+" pubspec.yaml || { echo "pubspec.yaml 版本号需为 $VERSION"; exit 1; }
 grep -q "kAppVersion = '$VERSION'" lib/app_logic.dart || { echo "lib/app_logic.dart 的 kAppVersion 需为 '$VERSION'"; exit 1; }
 grep -q "\"version\": \"$VERSION\"" update.json || { echo "update.json 版本号需为 $VERSION"; exit 1; }
+# 应用内下载需要安装包直链；Windows 包产出后同样补 windows 字段
+grep -q "download/v$VERSION/AStock-$VERSION-Android.apk" update.json || { echo "update.json 缺少 v$VERSION 的安卓包直链（assets 字段）"; exit 1; }
+grep -q "download/v$VERSION/AStock-$VERSION-macOS.dmg" update.json || { echo "update.json 缺少 v$VERSION 的 macOS 包直链（assets 字段）"; exit 1; }
 echo "版本号一致: $VERSION"
 
 step "2/7 清理临时副本并构建 Android"

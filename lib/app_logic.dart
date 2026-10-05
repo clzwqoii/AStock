@@ -28,10 +28,18 @@ const kUpdateCheckUrls = <String>[
 const kUpdateTimeout = Duration(seconds: 15);
 
 class UpdateInfo {
-  const UpdateInfo({required this.latestVersion, required this.downloadUrl});
+  const UpdateInfo({
+    required this.latestVersion,
+    required this.downloadUrl,
+    this.assets = const <String, String>{},
+  });
 
   final String latestVersion;
   final String downloadUrl;
+
+  /// 各平台安装包直链（键 android / macos / windows）；
+  /// 缺失的平台没有应用内自更新条件（iOS 系统限制 / Windows 包未产出），走 [downloadUrl] 页面兜底。
+  final Map<String, String> assets;
 }
 
 class _Attempt {
@@ -61,8 +69,13 @@ Future<UpdateInfo?> checkForUpdate({
       final res = await c.get(Uri.parse(url)).timeout(kUpdateTimeout);
       final data = jsonDecode(utf8.decode(res.bodyBytes)) as Map<String, dynamic>;
       final latest = data['version'] as String;
+      final assetsRaw = data['assets'] as Map<String, dynamic>?;
       return _Attempt(_isNewer(latest, cur)
-          ? UpdateInfo(latestVersion: latest, downloadUrl: (data['url'] ?? '') as String)
+          ? UpdateInfo(
+              latestVersion: latest,
+              downloadUrl: (data['url'] ?? '') as String,
+              assets: assetsRaw?.map((k, v) => MapEntry(k, v as String)) ?? const {},
+            )
           : null, null);
     } catch (e) {
       return _Attempt(null, e);

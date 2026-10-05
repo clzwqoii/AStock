@@ -168,7 +168,8 @@ class _StockAppState extends State<StockApp> {
   }
 
   /// 检查更新：弹框流程在 settings_page（设置页与 macOS 菜单共用）。
-  Future<void> _checkUpdate(BuildContext context) => showCheckUpdateDialog(context);
+  Future<void> _checkUpdate(BuildContext context) =>
+      showCheckUpdateDialog(context, launchUrl: widget.launchUrl);
 
   @override
   Widget build(BuildContext context) {

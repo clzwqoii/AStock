@@ -2,6 +2,8 @@
     <!-- release 包联网必需：Flutter 模板只给 debug/profile 清单配了此权限，
          主清单漏配会让 release 包所有域名 DNS 失败（浏览器不受影响） -->
     <uses-permission android:name="android.permission.INTERNET"/>
+    <!-- 应用内下载 APK 后拉起系统安装器（确认环节由系统提供） -->
+    <uses-permission android:name="android.permission.REQUEST_INSTALL_PACKAGES"/>
     <application
         android:label="stock"
         android:name="${applicationName}"
