@@ -133,7 +133,7 @@ class _MobileScreeningState extends State<MobileScreening> {
     showDialog<void>(
       context: context,
       barrierDismissible: false,
-      builder: (_) => const LoadingDialog(text: '正在选股…'),
+      builder: (_) => const LoadingDialog(title: '正在选股', subtitle: '全部满足所选规则的股票才会入选'),
     );
     try {
       final rules = [for (final id in _selected) ruleById(id)];

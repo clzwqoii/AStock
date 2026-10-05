@@ -45,7 +45,7 @@ Future<void> showCheckUpdateDialog(
   showDialog<void>(
     context: context,
     barrierDismissible: false,
-    builder: (_) => const LoadingDialog(text: '正在检查更新…'),
+    builder: (_) => const LoadingDialog(title: '正在检查更新', subtitle: 'Gitee / GitHub 多源自动分流'),
   );
   UpdateInfo? info;
   Object? error;
@@ -289,28 +289,6 @@ class SettingsPage extends StatelessWidget {
           ],
         ),
         const SizedBox(height: 8),
-        Align(
-          alignment: Alignment.centerLeft,
-          child: TextButton.icon(
-            onPressed: () => _diagnose(context),
-            icon: const Icon(Icons.network_check, size: 16),
-            label: const Text('网络自检', style: TextStyle(fontSize: 12)),
-          ),
-        ),
-        Align(
-          alignment: Alignment.centerLeft,
-          child: TextButton.icon(
-            onPressed: () => showCheckUpdateDialog(
-              context,
-              checkFn: checkUpdate,
-              downloadFn: downloadPackage,
-              installFn: installPackage,
-              launchUrl: launchUrl,
-            ),
-            icon: const Icon(Icons.system_update_alt, size: 16),
-            label: const Text('检查更新', style: TextStyle(fontSize: 12)),
-          ),
-        ),
         if (syncing) const Padding(
           padding: EdgeInsets.only(top: 8),
           child: LinearProgressIndicator(),
@@ -346,6 +324,30 @@ class SettingsPage extends StatelessWidget {
             style: const TextStyle(fontSize: 12, color: Colors.grey),
           ),
         ),
+        // 自检/更新属低频排障操作，沉底；结果弹框走根导航，不会被设置弹框遮挡
+        const SizedBox(height: 20),
+        Row(
+          children: [
+            TextButton.icon(
+              onPressed: () => _diagnose(context),
+              icon: const Icon(Icons.network_check, size: 16),
+              label: const Text('网络自检', style: TextStyle(fontSize: 12)),
+            ),
+            const SizedBox(width: 8),
+            TextButton.icon(
+              onPressed: () => showCheckUpdateDialog(
+                context,
+                checkFn: checkUpdate,
+                downloadFn: downloadPackage,
+                installFn: installPackage,
+                launchUrl: launchUrl,
+              ),
+              icon: const Icon(Icons.system_update_alt, size: 16),
+              label: const Text('检查更新', style: TextStyle(fontSize: 12)),
+            ),
+          ],
+        ),
+        const SizedBox(height: 8),
       ],
     );
   }
@@ -384,7 +386,7 @@ class SettingsPage extends StatelessWidget {
     showDialog<void>(
       context: context,
       barrierDismissible: false,
-      builder: (_) => const LoadingDialog(text: '正在检测网络…'),
+      builder: (_) => const LoadingDialog(title: '正在检测网络', subtitle: 'DNS 解析 + HTTPS 连通性'),
     );
     final result = await diagnoseNetwork();
     navigator.pop();

@@ -15,26 +15,43 @@ import 'stock_detail_page.dart';
 typedef ScreenFn = Future<({int total, List<ScreenRow> picked, String? dataDate})> Function(
     String dbPath, List<Rule> rules);
 
-/// 长任务加载模态：选股/自检等操作期间挡住重复点击并给出进行中反馈。
+/// 长任务加载模态（居中卡片）：大号强调色转圈 + 标题 + 可选副标题，
+/// 带遮罩挡住重复点击。选股/网络自检/检查更新共用。
 class LoadingDialog extends StatelessWidget {
-  const LoadingDialog({super.key, required this.text});
+  const LoadingDialog({super.key, required this.title, this.subtitle});
 
-  final String text;
+  final String title;
+  final String? subtitle;
 
   @override
-  Widget build(BuildContext context) => AlertDialog(
-        content: Row(
+  Widget build(BuildContext context) {
+    final accent = AccentScope.of(context);
+    return Dialog(
+      backgroundColor: Colors.white,
+      shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(18)),
+      child: Container(
+        width: 216,
+        padding: const EdgeInsets.symmetric(horizontal: 20, vertical: 24),
+        child: Column(
           mainAxisSize: MainAxisSize.min,
           children: [
-            const SizedBox(
-                width: 22,
-                height: 22,
-                child: CircularProgressIndicator(strokeWidth: 2.6)),
-            const SizedBox(width: 14),
-            Text(text, style: const TextStyle(fontSize: 13)),
+            SizedBox(
+                width: 38,
+                height: 38,
+                child: CircularProgressIndicator(strokeWidth: 3, color: accent)),
+            const SizedBox(height: 16),
+            Text(title, style: const TextStyle(fontSize: 15, fontWeight: FontWeight.w700)),
+            if (subtitle != null) ...[
+              const SizedBox(height: 4),
+              Text(subtitle!,
+                  textAlign: TextAlign.center,
+                  style: const TextStyle(fontSize: 11, color: AppColors.dim)),
+            ],
           ],
         ),
-      );
+      ),
+    );
+  }
 }
 
 /// CSV 导出（默认写数据库同目录；测试注入假实现，避免真实 IO）。
@@ -142,7 +159,7 @@ class _ScreeningPageState extends State<ScreeningPage> {
     showDialog<void>(
       context: context,
       barrierDismissible: false,
-      builder: (_) => const LoadingDialog(text: '正在选股…'),
+      builder: (_) => const LoadingDialog(title: '正在选股', subtitle: '全部满足所选规则的股票才会入选'),
     );
     try {
       final rules = [for (final id in _selected) ruleById(id)];
