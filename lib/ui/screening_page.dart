@@ -333,13 +333,14 @@ class _ScreeningPageState extends State<ScreeningPage> {
     if (report == null) return const SizedBox.shrink();
     final line = ruleStatLine(report, rule.id, 10);
     if (line == null) return const SizedBox.shrink();
+    final upDown = upDownColorsOf(context);
     return Padding(
       padding: const EdgeInsets.only(top: 1),
       child: Text(
         line.label,
         style: TextStyle(
           fontSize: 9,
-          color: line.excessPp >= 0 ? AppColors.dim : AppColors.down,
+          color: line.excessPp >= 0 ? upDown.up : upDown.down,
         ),
       ),
     );

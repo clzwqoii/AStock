@@ -626,12 +626,16 @@ Future<void> scrollTo(WidgetTester tester, Finder finder) =>
 
     testWidgets('回补历史：选档位后把年数回调给外壳', (tester) async {
       int? years;
+      var usedForce = true; // 默认路径必须是不带 force 的正常回补
       await tester.pumpWidget(MaterialApp(
         home: Scaffold(
           body: SettingsPage(
             configPath: '${tmp.path}/.env',
             dbPath: dbPath,
-            onBackfillPressed: (y) => years = y,
+            onBackfillPressed: (int y, {bool force = false}) {
+              years = y;
+              usedForce = force;
+            },
           ),
         ),
       ));
@@ -643,7 +647,37 @@ Future<void> scrollTo(WidgetTester tester, Finder finder) =>
       await tester.pump();
 
       expect(years, 2);
+      expect(usedForce, isFalse, reason: '不勾选完整重拉时 force 必须为 false');
       expect(find.text('近 2 年'), findsNothing, reason: '选择后弹窗应关闭');
+    });
+
+    testWidgets('回补历史：勾选完整重拉后回调 force=true', (tester) async {
+      int? years;
+      bool? usedForce;
+      await tester.pumpWidget(MaterialApp(
+        home: Scaffold(
+          body: SettingsPage(
+            configPath: '${tmp.path}/.env',
+            dbPath: dbPath,
+            onBackfillPressed: (int y, {bool force = false}) {
+              years = y;
+              usedForce = force;
+            },
+          ),
+        ),
+      ));
+      await tester.pump();
+
+      await tester.tap(find.text('回补历史'));
+      await tester.pump();
+      await tester.tap(find.text('完整重拉'));
+      await tester.pump();
+      await tester.tap(find.text('近 1 年'));
+      await tester.pump();
+
+      expect(years, 1);
+      expect(usedForce, isTrue, reason: '勾选后必须带 force 交给外壳');
+      expect(find.text('近 1 年'), findsNothing, reason: '选择后弹窗应关闭');
     });
 
     testWidgets('回补历史：同步进行中禁用入口', (tester) async {
@@ -703,7 +737,8 @@ Future<void> scrollTo(WidgetTester tester, Finder finder) =>
         persistAccent: (_) async {},
         runSyncFn: ({required dbPath, required token, onProgress}) async =>
             const SyncResult(dates: 0, rows: 0),
-        runBackfillFn: ({required dbPath, required token, required fromDate, onProgress}) async {
+        runBackfillFn: ({required dbPath, required token, required fromDate,
+            bool force = false, onProgress}) async {
           backfills++;
           usedFrom = fromDate;
           return const SyncResult(dates: 500, rows: 200000);
@@ -729,6 +764,39 @@ Future<void> scrollTo(WidgetTester tester, Finder finder) =>
       expect(expected, contains(usedFrom));
       // 消息同时出现在工作台状态行与设置弹窗里
       expect(find.textContaining('回补完成'), findsWidgets);
+    });
+
+    testWidgets('回补历史：勾选完整重拉时外壳把 force 传进回补入口', (tester) async {
+      bool? usedForce;
+      var backfills = 0;
+      await tester.pumpWidget(StockApp(
+        config: AppConfig(tushareToken: 'tok', dbPath: dbPath),
+        showOnboarding: false,
+        persistAccent: (_) async {},
+        runSyncFn: ({required dbPath, required token, onProgress}) async =>
+            const SyncResult(dates: 0, rows: 0),
+        runBackfillFn: ({required dbPath, required token, required fromDate,
+            bool force = false, onProgress}) async {
+          backfills++;
+          usedForce = force;
+          return const SyncResult(dates: 500, rows: 200000);
+        },
+        runBacktestFn: (_, {reportPath}) async => fakeReport(),
+      ));
+      await tester.pump();
+      await scrollTo(tester, find.text('设置'));
+      await tester.tap(find.text('设置'));
+      await tester.pumpAndSettle();
+      await tester.tap(find.text('回补历史'));
+      await tester.pump();
+      await tester.tap(find.text('完整重拉'));
+      await tester.pump();
+      await tester.tap(find.text('近 1 年'));
+      await tester.pump();
+      await tester.pumpAndSettle();
+
+      expect(backfills, 1);
+      expect(usedForce, isTrue, reason: '勾选完整重拉后外壳必须把 force 传下去');
     });
 
     testWidgets('同步失败时状态行以「同步失败」开头（不是「同步中失败」）', (tester) async {

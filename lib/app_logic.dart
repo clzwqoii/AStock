@@ -21,7 +21,7 @@ import 'package:stock/data/sync_service.dart';
 import 'package:stock/data/tushare_client.dart';
 
 /// 当前应用版本（发布新包时同步修改，与 pubspec.version 保持一致）。
-const kAppVersion = '2.5.2';
+const kAppVersion = '2.5.3';
 
 /// 更新清单候选源（并发竞速，第一个响应的胜出）。
 /// 国内网络优先命中 Gitee；jsDelivr 镜像可加速 GitHub raw。建仓库后替换为你的地址。
@@ -475,7 +475,7 @@ Future<StockDetail?> loadStockDetail(String dbPath, String symbol) async {
 /// [clientFactory] / [sinaFactory] / [eastmoneyFactory] 供测试注入假客户端；生产用默认值。
 /// 备源必须接上（AGENTS 行情口径第 6 条的降级链，东财 → 新浪）：不传时
 /// tushare 日线一故障就原样抛出，40203 限频还会空转 5 次 65 秒。
-/// [fromDate] / [rateDelay] 透传给 [SyncService.sync]：区间补拉用（见 [runBackfillSync]）。
+/// [fromDate] / [force] / [rateDelay] 透传给 [SyncService.sync]：区间补拉用（见 [runBackfillSync]）。
 Future<SyncResult> runSync({
   required String dbPath,
   required String token,
@@ -485,6 +485,7 @@ Future<SyncResult> runSync({
   EastmoneyClient Function()? eastmoneyFactory,
   void Function(String msg)? onProgress,
   String? fromDate,
+  bool force = false,
   Duration rateDelay = const Duration(milliseconds: 350),
 }) async {
   final repo = BarRepository(dbPath);
@@ -493,7 +494,11 @@ Future<SyncResult> runSync({
     return await SyncService(client, repo, now: now,
             eastmoney: eastmoneyFactory?.call() ?? EastmoneyClient(),
             sina: sinaFactory?.call() ?? SinaClient())
-        .sync(onProgress: onProgress, fromDate: fromDate, rateDelay: rateDelay);
+        .sync(
+            onProgress: onProgress,
+            fromDate: fromDate,
+            force: force,
+            rateDelay: rateDelay);
   } finally {
     repo.close();
   }
@@ -504,8 +509,11 @@ Future<SyncResult> runSync({
 /// 要近 1 小时且新浪只有 400 根深度——能不进就不进，慢而可控好过快而断。
 const kBackfillRateDelay = Duration(milliseconds: 1200);
 
-/// 回补历史的同步入口：绕过水位线，强制拉 [fromDate]（`YYYYMMDD`）起
-/// 全部已收盘交易日。手机端首次回填没跑成时，历史深度只能靠它补——
+/// 回补历史的同步入口：绕过水位线，拉 [fromDate]（`YYYYMMDD`）起
+/// 全部**库里缺失**的已收盘交易日（已有数据的日期跳过）。
+/// [force] 忽略该跳过、整段重拉：某天只入库了部分股票（备源逐股中断留下的
+/// 半截日）或数据源口径修正后用——没有它，这两种情况在 App 内永远修不回。
+/// 手机端首次回填没跑成时，历史深度只能靠它补——
 /// 水位线增量永远只拉「已同步最大交易日之后」，补不了早于水位的历史。
 Future<SyncResult> runBackfillSync({
   required String dbPath,
@@ -516,6 +524,7 @@ Future<SyncResult> runBackfillSync({
   SinaClient Function()? sinaFactory,
   EastmoneyClient Function()? eastmoneyFactory,
   void Function(String msg)? onProgress,
+  bool force = false,
   Duration rateDelay = kBackfillRateDelay,
 }) =>
     runSync(
@@ -527,6 +536,7 @@ Future<SyncResult> runBackfillSync({
         eastmoneyFactory: eastmoneyFactory,
         onProgress: onProgress,
         fromDate: fromDate,
+        force: force,
         rateDelay: rateDelay);
 
 /// 回补历史的注入端口（外壳字段用）；生产用 [runBackfillSync]。
@@ -534,5 +544,6 @@ typedef RunBackfillFn = Future<SyncResult> Function({
   required String dbPath,
   required String token,
   required String fromDate,
+  bool force,
   void Function(String msg)? onProgress,
 });

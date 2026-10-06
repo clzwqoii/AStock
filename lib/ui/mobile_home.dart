@@ -46,8 +46,9 @@ class MobileHome extends StatefulWidget {
   final ValueChanged<AccentColor> onAccentChanged;
   final VoidCallback onSyncPressed;
 
-  /// 回补历史入口（参数为年数）；编排在外壳，null 时设置页入口自动禁用。
-  final ValueChanged<int>? onBackfillPressed;
+  /// 回补历史入口（参数为年数与是否完整重拉）；编排在外壳，
+  /// null 时设置页入口自动禁用。
+  final void Function(int years, {bool force})? onBackfillPressed;
   final String configPath;
   final String initialToken;
   final LaunchUrlFn? launchUrl;
@@ -426,13 +427,14 @@ class _MobileScreeningState extends State<MobileScreening> {
     if (report == null) return const SizedBox.shrink();
     final line = ruleStatLine(report, rule.id, 10);
     if (line == null) return const SizedBox.shrink();
+    final upDown = upDownColorsOf(context);
     return Padding(
       padding: const EdgeInsets.only(top: 2),
       child: Text(
         line.label,
         style: TextStyle(
           fontSize: 10,
-          color: line.excessPp >= 0 ? AppColors.dim : AppColors.down,
+          color: line.excessPp >= 0 ? upDown.up : upDown.down,
         ),
       ),
     );

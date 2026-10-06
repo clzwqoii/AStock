@@ -1068,10 +1068,11 @@ void main() {
         final incremental = await svc(now).sync();
         expect(incremental.dates, 0);
   
-        // 显式 fromDate 绕过水位线，把更早的历史补回来
+        // 显式 fromDate 绕过水位线，把更早的历史补回来；
+        // 1/5、1/6 库里已有 → 不重复请求，只补缺的 1/1、1/2
         final backfilled = await svc(now).sync(fromDate: '20260101');
-        expect(backfilled.dates, 4);
-        expect(dailyRequested, ['20260101', '20260102', '20260105', '20260106']);
+        expect(backfilled.dates, 2);
+        expect(dailyRequested, ['20260101', '20260102']);
       });
   
       test('fromDate + toDate 闭区间补拉', () async {
@@ -1114,12 +1115,52 @@ void main() {
         );
       });
   
-      test('补拉是幂等的：重复拉同一区间不会因 upsert 报错', () async {
+      test('重复回补同一区间：已入库的日期不再重复请求', () async {
         final now = DateTime(2026, 1, 8, 18);
         await svc(now).sync(fromDate: '20260101', toDate: '20260102');
+        dailyRequested.clear();
         final again = await svc(now).sync(fromDate: '20260101', toDate: '20260102');
-        expect(again.dates, 2);
+        expect(again.dates, 0);
+        expect(again.rows, 0);
+        expect(dailyRequested, isEmpty, reason: '整段已有数据：一次 daily 都不该发');
         expect(repo.maxTradeDate(), '20260102');
+      });
+
+      test('区间回补只拉库里缺的日期', () async {
+        // 库里已有 1/1、1/5，区间里只有 1/2 缺 → 只请求 1/2
+        repo.upsertBars([
+          for (final d in ['20260101', '20260105'])
+            DailyRow(
+                tsCode: 'S1.SH',
+                tradeDate: d,
+                open: 10.0,
+                high: 10.0,
+                low: 10.0,
+                close: 10.0,
+                vol: 100.0,
+                amount: 1),
+        ]);
+        final r = await svc(DateTime(2026, 1, 8, 18))
+            .sync(fromDate: '20260101', toDate: '20260105');
+        expect(dailyRequested, ['20260102']);
+        expect(r.dates, 1);
+      });
+
+      test('force: true 时区间回补忽略已入库数据，整段重拉', () async {
+        final now = DateTime(2026, 1, 8, 18);
+        await svc(now).sync(fromDate: '20260101', toDate: '20260102');
+        dailyRequested.clear();
+        final again = await svc(now)
+            .sync(fromDate: '20260101', toDate: '20260102', force: true);
+        expect(again.dates, 2);
+        expect(dailyRequested, ['20260101', '20260102']);
+      });
+
+      test('force 只对区间模式有意义：无 from/to 时抛 ArgumentError', () async {
+        expect(
+          () => svc(DateTime(2026, 1, 8, 18)).sync(force: true),
+          throwsArgumentError,
+        );
       });
 
       test('backfillFromDate：回补 N 年的区间下界（YYYYMMDD）', () {

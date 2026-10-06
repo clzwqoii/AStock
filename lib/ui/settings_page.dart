@@ -331,8 +331,9 @@ class SettingsPage extends StatefulWidget {
   final String? syncMsg;
   final VoidCallback? onSyncPressed;
 
-  /// 回补历史：参数为用户选的年数（1/2/3），编排同样在外壳（[StockApp]）。
-  final ValueChanged<int>? onBackfillPressed;
+  /// 回补历史：参数为用户选的年数（1/2/3）与是否完整重拉（忽略已入库
+  /// 数据，修半截日/口径污染），编排同样在外壳（[StockApp]）。
+  final void Function(int years, {bool force})? onBackfillPressed;
   final WriteConfigFn writeConfig;
 
   /// 主题强调色（编排在外壳：切换即重建主题并持久化）。
@@ -544,31 +545,51 @@ class _SettingsPageState extends State<SettingsPage> {
     );
   }
 
-  /// 回补历史选档：三档对应约 5/10/15 分钟（1.2s/日的限频间隔是主要开销）。
-  /// 点档位即确认——弹窗文案已把「会拉多久、要保持前台」说清。
+  /// 回补历史选档：已入库的日期会跳过，耗时只取决于缺口大小（1.2s/日的限频
+  /// 间隔是主要开销）。点档位即确认——弹窗文案已把「会拉多久、要保持前台」说清。
+  /// 「完整重拉」勾选对应 force：忽略跳过、整段重拉，用于修半截日/口径污染。
   void _pickBackfill(BuildContext context) {
     final callback = widget.onBackfillPressed;
     if (callback == null) return;
+    var force = false;
     showDialog<void>(
       context: context,
-      builder: (dialogContext) => AlertDialog(
-        title: const Text('回补历史'),
-        content: const Text(
-          '首次同步若没拉全历史（回测数字明显偏少），从这里强制重拉。\n'
-          '与每日增量同一数据源，重复执行安全（幂等）。\n\n'
-          '近 1 年 / 2 年 / 3 年 ≈ 5 / 10 / 15 分钟，期间请保持 App 在前台、网络可用。',
-          style: TextStyle(fontSize: 13, height: 1.6),
+      builder: (dialogContext) => StatefulBuilder(
+        builder: (ctx, setDialogState) => AlertDialog(
+          title: const Text('回补历史'),
+          content: Column(
+            mainAxisSize: MainAxisSize.min,
+            crossAxisAlignment: CrossAxisAlignment.start,
+            children: [
+              const Text(
+                '首次同步若没拉全历史（回测数字明显偏少），从这里补拉。\n'
+                '与每日增量同一数据源；已入库的交易日自动跳过，重复点只补缺口。\n\n'
+                '缺口大时近 1/2/3 年 ≈ 5/10/15 分钟，期间请保持 App 在前台、网络可用。',
+                style: TextStyle(fontSize: 13, height: 1.6),
+              ),
+              CheckboxListTile(
+                value: force,
+                onChanged: (v) => setDialogState(() => force = v ?? false),
+                dense: true,
+                contentPadding: EdgeInsets.zero,
+                controlAffinity: ListTileControlAffinity.leading,
+                title: const Text('完整重拉', style: TextStyle(fontSize: 13)),
+                subtitle: const Text('忽略已入库数据（某天只入库了部分股票时用；更慢）',
+                    style: TextStyle(fontSize: 11, height: 1.4)),
+              ),
+            ],
+          ),
+          actions: [
+            for (final years in [1, 2, 3])
+              TextButton(
+                onPressed: () {
+                  Navigator.pop(ctx);
+                  callback(years, force: force);
+                },
+                child: Text('近 $years 年'),
+              ),
+          ],
         ),
-        actions: [
-          for (final years in [1, 2, 3])
-            TextButton(
-              onPressed: () {
-                Navigator.pop(dialogContext);
-                callback(years);
-              },
-              child: Text('近 $years 年'),
-            ),
-        ],
       ),
     );
   }

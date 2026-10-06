@@ -215,15 +215,18 @@ class _StockAppState extends State<StockApp> {
         ),
       );
 
-  /// 回补历史：绕过水位线从所选年数前强制重拉。手机首次回填没跑成时，
-  /// 历史深度只能靠这条路补（增量永远只拉水位线之后的日期）。
-  Future<void> _startBackfill(int years) => _runSync(
+  /// 回补历史：绕过水位线补齐所选年数以来库里缺失的交易日；
+  /// [force] 忽略已入库数据整段重拉（修半截日/口径污染）。
+  /// 手机首次回填没跑成时，历史深度只能靠这条路补
+  /// （增量永远只拉水位线之后的日期）。
+  Future<void> _startBackfill(int years, {bool force = false}) => _runSync(
         doneLabel: '回补完成',
         failLabel: '回补',
         task: () => widget.runBackfillFn(
           dbPath: _config.dbPath,
           token: _config.tushareToken,
           fromDate: backfillFromDate(DateTime.now(), years),
+          force: force,
           onProgress: (m) {
             if (mounted) setState(() => _syncMsg = '回补中：$m');
           },

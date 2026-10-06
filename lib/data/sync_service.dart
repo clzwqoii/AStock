@@ -119,16 +119,21 @@ class SyncService {
   /// - 当天盘中运行时当日数据不完整，始终跳过，等次日增量补上。
   ///
   /// [fromDate] / [toDate]（`YYYYMMDD`，闭区间）**任一传入即进入区间模式**：
-  /// 绕过水位线，强制拉这个区间（另一侧留空表示不设界）。
+  /// 绕过水位线，强制拉这个区间（另一侧留空表示不设界）；库里已有行数的日期
+  /// 直接跳过，所以重复回补只花缺口的配额。
   /// 水位线增量只会拉 `MAX(trade_date)` 之后的日期，补不了更早的历史——
   /// 想把库从 120 个交易日扩到 250 个，必须显式给区间。
   /// `upsertBars` 是 `INSERT OR REPLACE`，重复拉同一区间幂等。
+  ///
+  /// [force] 只在区间模式下有意义：关掉「已有行数就跳过」，整段无条件重拉
+  /// （数据源口径修正后覆盖旧数据用）。
   Future<SyncResult> sync({
     int backfillDays = 250,
     Duration rateDelay = const Duration(milliseconds: 350),
     Duration backupRateDelay = const Duration(milliseconds: 350),
     String? fromDate,
     String? toDate,
+    bool force = false,
     void Function(String msg)? onProgress,
   }) async {
     for (final d in [fromDate, toDate]) {
@@ -138,6 +143,9 @@ class SyncService {
     }
     if (fromDate != null && toDate != null && fromDate.compareTo(toDate) > 0) {
       throw ArgumentError('fromDate($fromDate) 晚于 toDate($toDate)');
+    }
+    if (force && fromDate == null && toDate == null) {
+      throw ArgumentError('force 只能配合区间模式（fromDate/toDate）使用');
     }
     String fmt(DateTime d) =>
         '${d.year.toString().padLeft(4, '0')}'
@@ -189,9 +197,13 @@ class SyncService {
                 : closedOpen.sublist(closedOpen.length - backfillDays))
             : [for (final d in closedOpen) if (d.compareTo(synced) > 0) d])
         : [
+            // 已有行数的日期视为已补：重复回补不再白拉。天花板：某天只入库了部分
+            // 股票（半截日）也整日跳过——新股/停牌使当日行数本就少于全市场，
+            // 按行数占比判定会把这些日子当缺口年年重拉。
             for (final d in closedOpen)
               if ((fromDate == null || d.compareTo(fromDate) >= 0) &&
-                  (toDate == null || d.compareTo(toDate) <= 0))
+                  (toDate == null || d.compareTo(toDate) <= 0) &&
+                  (force || _repo.rowCountOnDate(d) == 0))
                 d
           ];
 

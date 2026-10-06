@@ -252,7 +252,7 @@ stock/
 │   ├── main.dart              # 入口：读配置 → 挂载 StockApp
 │   ├── config.dart            # 配置加载：环境变量 → 配置文件 → 默认值；configPath 记录设置页写入位置
 │   ├── app_paths.dart         # 启动配置：桌面沿用 ~/.stock（与 CLI 共享），移动端用 path_provider 应用支持目录
-│   ├── app_logic.dart         # App/CLI 共用重活：runScreening（后台 isolate 选股）、runSync（增量同步，进度可回调）、runBackfillSync（回补历史，1.2s/日防限频）、checkForUpdate（版本比较）
+│   ├── app_logic.dart         # App/CLI 共用重活：runScreening（后台 isolate 选股）、runSync（增量同步，进度可回调）、runBackfillSync（回补历史，只补库内缺口、force 整段重拉，1.2s/日防限频）、checkForUpdate（版本比较）
 │   ├── core/                  # ── 规则引擎（纯 Dart，零 IO/UI 依赖，可独立测试）──
 │   │   ├── models.dart        #   Bar（一根日K：开高低收/量）与 StockData（一只股票的日线序列）
 │   │   ├── indicators.dart    #   指标纯函数：sma/smaSeries/emaSeries/macd/rsi/kdj/volumeRatio/pctChange
@@ -281,7 +281,8 @@ stock/
 │       ├── bar_repository.dart#   SQLite 读写：stocks / daily_bars 表，upsert 幂等，loadAllStocks 供引擎消费；
 │       │                      #     excludeSpecialStocks=true 时剔除 ST/*ST/S*ST/PT/退市/科创板(68*)——选股入口开、回测关
 │       └── sync_service.dart  #   增量同步编排：交易日历（失败退化为工作日候选）→ 待拉日期 → 逐日入库；40203 限频自动重试
-│       │                      #     + backfillFromDate（回补 N 年的区间下界）；区间模式（fromDate/toDate）绕过水位线强制补历史
+│       │                      #     + backfillFromDate（回补 N 年的区间下界）；区间模式（fromDate/toDate）绕过水位线补历史，
+│       │                      #       库内已有数据的日期跳过；force=true 关掉跳过、整段重拉（CLI --force / App「完整重拉」）
 │   ├── ui/                    # ── Flutter 界面 ──
 │       ├── candle_chart.dart  #   日K蜡烛图（CustomPainter 自绘：蜡烛+成交量+MA5/10/20）；十字光标（桌面悬停/移动拖动）与读数浮层
 │       ├── candle_chart_math.dart # K线图纯计算：ChartGeometry（像素↔索引/价格双向换算）、priceRange、CandleReadout、formatVolume；不依赖绘制，可独立单测
@@ -294,11 +295,12 @@ stock/
 │       ├── screening_page.dart#   选股页·方案C高密度工作台（docs/design/c-compact-workbench.html）：侧栏规则开关分组
 │       │                      #     + 工具栏（组合条件/同步徽章/开始按钮）+ 密集表格（涨跌/涨跌幅/量比/成交额/MA20）
 │       │                      #     + 底部状态栏；窄屏(<768)侧栏折叠为横向胶囊条；引擎调用可注入（screenFn）
-│       └── settings_page.dart #   设置页：token 保存 + 主题色色板（4 色即点即换）+ 手动同步按钮 + 回补历史（近1/2/3年，三档弹窗）；IO 可注入
+│       └── settings_page.dart #   设置页：token 保存 + 主题色色板（4 色即点即换）+ 手动同步按钮 + 回补历史（近1/2/3年三档 + 「完整重拉」勾选）；IO 可注入
 ├── bin/                       # ── 命令行工具（胶水层，无业务逻辑）──
 │   ├── sync.dart              #   dart run bin/sync.dart [回填天数=250] [--from YYYYMMDD] [--to YYYYMMDD]
-│   │                          #     [--db 路径]：拉数据入库。水位线增量只拉 MAX(trade_date) 之后的日期，
-│   │                          #     补更早的历史必须显式给 --from/--to（upsert 幂等，可重复拉）
+│   │                          #     [--force] [--db 路径]：拉数据入库。水位线增量只拉 MAX(trade_date) 之后的日期，
+│   │                          #     补更早的历史必须显式给 --from/--to（库内已有数据的日期跳过，重复拉只补缺口；
+│   │                          #     --force 忽略已有数据整段重拉，口径修正后覆盖用）
 │   └── screen.dart            #   dart run bin/screen.dart <规则id...>：用本地库选股；不带参数列出规则
 ├── test/                      # 测试（flutter test 全绿为交付门槛）
 │   ├── fixtures.dart          #   测试行情序列 + 独立 python oracle 基准值注释（含 60 日线有效突破两种形态）
@@ -517,7 +519,7 @@ ST 标记只在名称开头匹配——用 `LIKE '%ST%'` 子串搜索会误杀 `
 - ✅ Android 模拟器端到端验证（2026-10-04）：release APK 安装启动、debug 版沙盒路径注入 62 万行、自动同步（真实网络成功）、勾规则选股（5586→1800）、卡片进入 K 线详情（真实名称+均线+成交量）全通过；AVD 名 stock_test（无头启动 `-no-window -no-audio -no-snapshot -gpu swiftshader_indirect`）
 - ✅ iOS 模拟器验证（2026-10-04）：移动布局/主题/沙盒路径/本地数据/同步状态展示均正常；**模拟器内网络受宿主机代理 fake-ip（198.18.x）影响不可用（非代码问题，真机正常）**
 - ✅ 数据源备份：✅ 日线三源 **tushare(按日全市场) → 东财 push2his（逐股，fqt=0 不复权/手/元，一次全历史，2026-10-06 接入）→ 新浪（逐股，不复权/手，无成交额、最近 400 根）**；✅ 股票名单/名称三级链 **tushare stock_basic → 东财 clist → 腾讯/东财逐股名称回填**（东财 push2 域名在部分网络被拦时自动走逐股，一次性约 10 分钟，只补缺失名称）；交易日历 tushare → 工作日候选自愈
-- ✅ 回补历史入口（2026-10-06）：设置页「回补历史」按钮 → 近 1/2/3 年三档 → 外壳走 `runBackfillSync` 区间模式强制重拉（1.2s/日防 40203，约 5/10/15 分钟）；完成后自动重算回测报告。背景：手机首次回填没跑成时，水位线增量永远补不回历史，两端回测数字会因此差一个量级
+- ✅ 回补历史入口（2026-10-06）：设置页「回补历史」按钮 → 近 1/2/3 年三档 → 外壳走 `runBackfillSync` 区间模式补拉（2026-10-07 起只拉库内缺失的日期，已有数据的日期跳过；同日增「完整重拉」勾选 → force 忽略跳过整段重拉，修某天只入库了部分股票的半截日；1.2s/日防 40203，缺口大时约 5/10/15 分钟）；完成后自动重算回测报告。背景：手机首次回填没跑成时，水位线增量永远补不回历史，两端回测数字会因此差一个量级
 - ✅ 备源链路容错（2026-10-06，回补实测卡顿修复）：有备源时 tushare daily 的 40203 先等 65s 重试（最多 3 次）、网络层抖动短重试（2 次 × 2s）再降级，不再一次失败就把剩余区间整段甩给新浪；备源逐股用独立限速 350ms（不继承回补的 1.2s，5675 只全程从 3 小时级压到 50 分钟级）；进度每 50 只刷新（原 200 只一条消息会静默 5 分钟像卡死）；备源补完后仍缺行的日期（新浪只有最近 400 根深度，长区间早段补不到）回头用 tushare 逐日补齐——仅交易日历来自真实 trade_cal 时做，降级候选里的节假日永远无行、重试纯烧配额
 - ⏳ macOS/iOS 桌面构建需先完成 Xcode 许可初始化（三条 sudo 命令，须分行执行）
 

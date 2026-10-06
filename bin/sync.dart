@@ -5,9 +5,11 @@
 ///   dart run bin/sync.dart 250                   # 首次回填 250 个交易日
 ///   dart run bin/sync.dart --from 20250901       # 补拉 2025-09-01 至今（含）的已收盘交易日
 ///   dart run bin/sync.dart --from 20250901 --to 20260101
+///   dart run bin/sync.dart --from 20250901 --to 20260101 --force  # 忽略已有数据整段重拉
 ///   dart run bin/sync.dart --db /path/to/stock.db
 ///
 /// 水位线增量补不了「已入库最大交易日」之前的历史；要把库扩到更长区间必须用 --from。
+/// --from/--to 区间模式下，库里已有数据的日期自动跳过（重复执行只补缺口）。
 library;
 
 // ignore_for_file: avoid_print
@@ -33,6 +35,7 @@ Future<void> main(List<String> args) async {
   String? dbPath;
   String? fromDate;
   String? toDate;
+  var force = false;
 
   for (var i = 0; i < args.length; i++) {
     final a = args[i];
@@ -47,6 +50,8 @@ Future<void> main(List<String> args) async {
       toDate = args[++i];
     } else if (a.startsWith('--to=')) {
       toDate = a.substring('--to='.length);
+    } else if (a == '--force') {
+      force = true;
     } else if (a == '--db' && i + 1 < args.length) {
       dbPath = args[++i];
     } else if (a.startsWith('--db=')) {
@@ -75,7 +80,11 @@ Future<void> main(List<String> args) async {
   try {
     final r = await SyncService(TushareClient(token: config.tushareToken), repo,
             sina: SinaClient(), eastmoney: EastmoneyClient())
-        .sync(backfillDays: backfillDays, fromDate: fromDate, toDate: toDate);
+        .sync(
+            backfillDays: backfillDays,
+            fromDate: fromDate,
+            toDate: toDate,
+            force: force);
     print('数据库: $dbPath');
     print('上次同步至: ${syncedBefore ?? '（空库）'}（$barsBefore 行）');
     print('本次拉取: ${r.dates} 个交易日, ${r.rows} 行, 耗时 ${sw.elapsed}');
@@ -92,12 +101,13 @@ Future<void> main(List<String> args) async {
 }
 
 void _usage() {
-  print('''用法: dart run bin/sync.dart [回填交易日数=250] [--from YYYYMMDD] [--to YYYYMMDD] [--db 路径]
+  print('''用法: dart run bin/sync.dart [回填交易日数=250] [--from YYYYMMDD] [--to YYYYMMDD] [--force] [--db 路径]
 
   （无参数）              增量同步，只拉已同步最大交易日之后的已收盘交易日
   <N>                    首次回填最近 N 个交易日（默认 250）
-  --from YYYYMMDD        从此日起补拉（绕过水位线，可补更早的历史）
+  --from YYYYMMDD        从此日起补拉（绕过水位线，可补更早的历史；已有数据的日期跳过）
   --to YYYYMMDD          补拉到此日止（闭区间，默认到今天）
+  --force                配合 --from/--to：忽略库内已有数据整段重拉（数据源口径修正后覆盖用）
   --db 路径              指定数据库（默认 ~/.stock/stock.db）
 
   例：库已入库 120 个交易日，想扩到 250 个：

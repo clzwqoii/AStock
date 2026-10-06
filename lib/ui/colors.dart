@@ -42,6 +42,14 @@ class AccentScope extends InheritedWidget {
   bool updateShouldNotify(AccentScope oldWidget) => oldWidget.color != color;
 }
 
+/// 规则列表统计行的涨跌语义色：绿色主题下绿涨红跌，其余主题红涨绿跌。
+///
+/// 只用于统计行；结果表 / K 线是另一套（固定红涨绿跌），别顺手混用。
+({Color up, Color down}) upDownColorsOf(BuildContext context) =>
+    AccentScope.of(context) == AccentColor.green.color
+        ? (up: AppColors.down, down: AppColors.red)
+        : (up: AppColors.red, down: AppColors.down);
+
 /// 日K均线周期与色板（蜡烛图与详情页图例共用，改色/增周期只改这里；
 /// 两个列表按下标一一对应）。
 const maPeriods = [5, 10, 20, 30, 60];

@@ -183,11 +183,24 @@ void main() {
     expect(repo.maxTradeDate(), '20261005');
     repo.close();
   });
-  test('runBackfillSync 强制区间补拉：fromDate 早于水位线的日期也能补上', () async {
-    // 库内水位 20261002；增量模式只会拉它之后的日期。
-    // 区间模式必须把 fromDate(20260926) 起的水位线之前日期也拉回来——
+  test('runBackfillSync 区间补拉：水位线之前缺的日期能补上，已有的不重拉', () async {
+    // 库内 9/30~10/2 有数据（水位 20261002），9/25 有、9/28 与 9/29 缺。
+    // 增量模式只拉水位线之后的日期，永远补不回 9/28、9/29——
     // 这正是手机端「首轮回填没跑成、之后永远补不回历史」的解药。
-    seedStocks(dbPath);
+    final seed = BarRepository(dbPath);
+    seed.upsertBars([
+      for (final d in ['20260925', '20260930', '20261001', '20261002'])
+        DailyRow(
+            tsCode: 'S1.SH',
+            tradeDate: d,
+            open: 10.0,
+            high: 10.0,
+            low: 10.0,
+            close: 10.0,
+            vol: 100.0,
+            amount: 1),
+    ]);
+    seed.close();
     dailySeen.clear();
     http.Response resp(List<String> fields, List<List<dynamic>> items) =>
         http.Response.bytes(
@@ -224,15 +237,84 @@ void main() {
     final r = await runBackfillSync(
       dbPath: dbPath,
       token: 'tok',
-      fromDate: '20260926',
+      fromDate: '20260925',
       now: () => DateTime(2026, 10, 8, 18),
       clientFactory: (_) => client,
       rateDelay: Duration.zero,
     );
-    // 9/28、9/29 都 ≤ 水位线 20261002：增量永远给不了，区间模式必须补上
+    // 9/28、9/29 都 ≤ 水位线 20261002：增量永远给不了，区间模式必须补上；
+    // 库内已有的 9/25 不重复请求
     expect(r.dates, 4);
-    expect(dailySeen, contains('20260928'));
-    expect([for (final d in dailySeen) if (d.compareTo('20260926') < 0) d], isEmpty);
+    expect(dailySeen, ['20260928', '20260929', '20261007', '20261008']);
+    expect([for (final d in dailySeen) if (d.compareTo('20260925') < 0) d], isEmpty);
+  });
+
+  test('runBackfillSync force：重拉库内已有的半截日，补齐缺失股票', () async {
+    // 备源逐股中断的残留：20261001 只入库了 S1.SH，当天全市场还有 S2.SZ。
+    // 默认区间回补会整日跳过它（见上一条测试），force 是给用户的修复通路。
+    final seed = BarRepository(dbPath);
+    seed.upsertBars([
+      DailyRow(
+          tsCode: 'S1.SH',
+          tradeDate: '20261001',
+          open: 10.0,
+          high: 10.0,
+          low: 10.0,
+          close: 10.0,
+          vol: 100.0,
+          amount: 1),
+    ]);
+    seed.close();
+    dailySeen.clear();
+    http.Response resp(List<String> fields, List<List<dynamic>> items) =>
+        http.Response.bytes(
+          utf8.encode(jsonEncode({
+            'code': 0,
+            'data': {'fields': fields, 'items': items},
+          })),
+          200,
+        );
+    final client = TushareClient(
+      token: 'tok',
+      http: MockClient((req) async {
+        final api =
+            (jsonDecode(req.body) as Map<String, dynamic>)['api_name'] as String;
+        switch (api) {
+          case 'trade_cal':
+            return resp(['cal_date', 'is_open'], [
+              ['20261001', '1'],
+            ]);
+          case 'daily':
+            final td = ((jsonDecode(req.body)
+                as Map<String, dynamic>)['params'] as Map)['trade_date'] as String;
+            dailySeen.add(td);
+            return resp(
+              ['ts_code', 'trade_date', 'open', 'high', 'low', 'close', 'vol', 'amount'],
+              [
+                ['S1.SH', td, 1.0, 1.0, 1.0, 1.0, 100.0, 10.0],
+                ['S2.SZ', td, 2.0, 2.0, 2.0, 2.0, 100.0, 10.0],
+              ],
+            );
+          default:
+            return resp(['ts_code', 'name'], []);
+        }
+      }),
+    );
+    final r = await runBackfillSync(
+      dbPath: dbPath,
+      token: 'tok',
+      fromDate: '20261001',
+      force: true,
+      now: () => DateTime(2026, 10, 2, 18),
+      clientFactory: (_) => client,
+      rateDelay: Duration.zero,
+    );
+
+    expect(dailySeen, ['20261001'], reason: 'force 时已有数据的日期也要重拉');
+    expect(r.dates, 1);
+    final repo = BarRepository(dbPath);
+    expect(repo.rowCountOnDate('20261001'), 2, reason: '重拉后半截日补齐为两只');
+    repo.close();
   });
 
   test('runBackfillSync 透传东财备源：tushare daily 故障时用注入的东财补上区间', () async {
