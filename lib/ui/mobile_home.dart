@@ -21,6 +21,7 @@ class MobileHome extends StatefulWidget {
     required this.dbPath,
     required this.syncing,
     required this.syncMsg,
+    required this.syncedDate,
     required this.accent,
     required this.onAccentChanged,
     required this.onSyncPressed,
@@ -37,6 +38,9 @@ class MobileHome extends StatefulWidget {
   final ScreenFn? screenFn;
   final bool syncing;
   final String? syncMsg;
+
+  /// 同步完成后库内最新交易日（`YYYYMMDD`）；没跑过选股时徽标用它。
+  final String? syncedDate;
   final AccentColor accent;
   final ValueChanged<AccentColor> onAccentChanged;
   final VoidCallback onSyncPressed;
@@ -74,6 +78,7 @@ class _MobileHomeState extends State<MobileHome> {
             screenFn: widget.screenFn,
             syncing: widget.syncing,
             syncMsg: widget.syncMsg,
+            syncedDate: widget.syncedDate,
             backtestReport: widget.backtestReport,
           ),
           BacktestPage(
@@ -132,6 +137,7 @@ class MobileScreening extends StatefulWidget {
     required this.dbPath,
     required this.syncing,
     required this.syncMsg,
+    required this.syncedDate,
     this.screenFn,
     this.backtestReport,
   });
@@ -140,6 +146,9 @@ class MobileScreening extends StatefulWidget {
   final ScreenFn? screenFn;
   final bool syncing;
   final String? syncMsg;
+
+  /// 同步完成后库内最新交易日（`YYYYMMDD`）；没跑过选股时徽标用它。
+  final String? syncedDate;
 
   /// 回测报告缓存；非 null 时规则面板显示各规则的 10 日胜率/PF/信号数。
   final BacktestReport? backtestReport;
@@ -275,7 +284,8 @@ class _MobileScreeningState extends State<MobileScreening> {
   }
 
   String _syncChipText() {
-    final d = _result?.dataDate;
+    // 优先显示本次选股结果的数据日；没跑过选股时回退到同步完成的库内最新交易日。
+    final d = _result?.dataDate ?? widget.syncedDate;
     if (d != null && d.length >= 8) {
       return '已同步 ${d.substring(4, 6)}-${d.substring(6)}';
     }
@@ -367,7 +377,8 @@ class _MobileScreeningState extends State<MobileScreening> {
                       for (final e in ruleGroupsSortedByWinRate(
                           ruleGroups, widget.backtestReport))
                         for (final id in ruleIdsSortedByWinRate(
-                            e.value, widget.backtestReport))
+                            e.value, widget.backtestReport,
+                            pinFirst: kMainRuleId))
                           _ruleRow(ruleById(id), e.key, accent),
                     ],
                   ),

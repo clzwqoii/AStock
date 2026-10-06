@@ -68,11 +68,14 @@ const ruleGroups = <String, List<String>>{
     'kdj_golden_cross',
   ],
   '超买超卖': ['rsi_oversold', 'rsi_overbought'],
+  // 组内顺序即默认展示顺序。宽松版 RSI超卖·放量 放最前：按 tool/rule_by_month.dart
+  // 的分档结果，它是当前主力（三种市况下都有足够样本量的正超额），
+  // 且这个组按胜率排本就是侧栏第一组，于是它就是列表第一个开关。
   '量能 / 动量': [
+    'rsi_oversold_volume_loose',
+    'rsi_oversold_volume',
     'volume_surge',
     'pct_change_up',
-    'rsi_oversold_volume',
-    'rsi_oversold_volume_loose',
   ],
   '年线过滤': ['ma250_up', 'near_ma250'],
   '有效突破': [
@@ -266,7 +269,8 @@ class _ScreeningPageState extends State<ScreeningPage> {
                                 fontSize: 10, letterSpacing: 2, color: AppColors.dim, fontWeight: FontWeight.w700)),
                       ),
                       // 组内按 10 日胜率降序（无报告时保持声明顺序）
-                      for (final id in ruleIdsSortedByWinRate(e.value, widget.backtestReport))
+                      for (final id in ruleIdsSortedByWinRate(e.value, widget.backtestReport,
+                              pinFirst: kMainRuleId))
                         _switchRow(ruleById(id)),
                     ],
                   ],
@@ -582,12 +586,12 @@ class _ScreeningPageState extends State<ScreeningPage> {
           children: wide
               ? [
                   _headerCell('代码', 104, left: true),
-                  _headerCell('名称', 96, left: true),
+                  _headerCell('名称', null, left: true), // 弹性列吃剩余宽度（左对齐，宽了不空洞）
                   _sortableHeader('收盘', 64, SortField.close),
                   _sortableHeader('涨跌', 64, null),
                   _sortableHeader('涨跌幅', 78, SortField.changePct),
                   _sortableHeader('量比', 56, SortField.volumeRatio),
-                  _sortableHeader('成交额(万)', null, SortField.amount), // 弹性列吃剩余宽度
+                  _sortableHeader('成交额(万)', 84, SortField.amount), // 定宽：右对齐数字列被拉宽会留大片空白
                   _sortableHeader('MA20', 64, SortField.ma20),
                   _sortableHeader('评分', 52, SortField.score),
                   _sortableHeader('目标', 60, null),

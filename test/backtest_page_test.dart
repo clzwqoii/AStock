@@ -236,6 +236,61 @@ void main() {
     });
   });
   
+
+/// 取某行文字的视觉纵坐标（表格是 Row + 横向滚动，纵向 y 即行序）。
+double rowTop(WidgetTester tester, String text) =>
+    tester.getTopLeft(find.text(text)).dy;
+
+/// [target] 在所有规则行里的纵向排名（0 = 最上一行）。
+/// 不数 widget 个数——渲染实现会变，纵坐标才是"用户看到的顺序"。
+int rowRankOf(WidgetTester tester, String target) {
+  final names = <String>[
+    for (final r in builtInRules) r.name,
+    '（无条件基准）',
+  ];
+  final byTop = names.map((n) => (n: n, y: rowTop(tester, n))).toList()
+    ..sort((a, b) => a.y.compareTo(b.y));
+  return byTop.indexWhere((e) => e.n == target);
+}
+
+  group('主力规则与信号集中度列', () {
+    testWidgets('主力规则排在表格第一行，基准行垫底', (tester) async {
+      await pump(tester, BacktestPage(
+        dbPath: dbPath,
+        reportPath: reportPath,
+        initialReport: _fakeReport(generated),
+        runFn: (_, {reportPath}) async => fail('不应触发'),
+      ));
+
+      // 未点任何列头时：主力第一、基准最后。
+      // 这不是美观问题——按胜率排会把严格版排到宽松版前面，两个页面
+      // 给出相反的"第一"，kMainRuleId 的决定就失效了。
+      final mainName = ruleById(kMainRuleId).name;
+      final mainIdx = rowRankOf(tester, mainName);
+      final strictIdx = rowRankOf(tester, 'RSI超卖·放量');
+      final baseIdx = rowRankOf(tester, '（无条件基准）');
+      expect(mainIdx, 0, reason: '主力规则必须第一行');
+      expect(mainIdx, lessThan(strictIdx));
+      expect(baseIdx, greaterThan(strictIdx), reason: '基准行垫底');
+    });
+
+    testWidgets('出现「主力月」表头，主力规则显示其占比', (tester) async {
+      await pump(tester, BacktestPage(
+        dbPath: dbPath,
+        reportPath: reportPath,
+        initialReport: _fakeReport(generated),
+        runFn: (_, {reportPath}) async => fail('不应触发'),
+      ));
+      expect(find.text('主力月'), findsOneWidget);
+      // _fakeReport 给了 100% 集中在单月，应显示 100%
+      final prof = _fakeReport(generated).profileOf(kMainRuleId, 10);
+      if (prof.signalCount > 0) {
+        expect(find.text('${(prof.topMonthShare * 100).toStringAsFixed(0)}%'),
+            findsWidgets);
+      }
+    });
+  });
+
   group('分年胜率列', () {
     testWidgets('有分年数据时表头与数据行都出现 YYYY年 列', (tester) async {
       // 手工造一份带分年数据的报告（不依赖真库）

@@ -192,6 +192,8 @@ class _BacktestPageState extends State<BacktestPage> {
           win: {for (final h in hs) h: r.result(rule.id, h)?.winRate ?? 0},
           avg: {for (final h in hs) h: r.result(rule.id, h)?.avgReturn ?? 0},
           pf: r.result(rule.id, pfH)?.profitFactor ?? 0,
+          profile: r.profileOf(rule.id, pfH),
+          isMain: rule.id == kMainRuleId,
           isBaseline: false,
         ),
       _Row(
@@ -206,15 +208,26 @@ class _BacktestPageState extends State<BacktestPage> {
         win: {for (final h in hs) h: r.baseline[h]?.winRate ?? 0},
         avg: {for (final h in hs) h: r.baseline[h]?.avgReturn ?? 0},
         pf: 0,
+        profile: RuleProfile.empty,
+        isMain: false,
         isBaseline: true,
       ),
     ];
 
-    // 排序：每列一个 _SortKey，值就从行数据里取；默认按中间持有期的胜率降序。
+    // 排序：用户点过列头就听用户的；否则默认按中间持有期胜率降序。
     final midH = hs[hs.length >= 2 ? 1 : hs.length - 1];
     final sortKey =
         _sort ?? _SortKey('win$midH', (row) => row.win[midH] ?? 0);
     rows.sort((a, b) {
+      // 主力规则恒在首位（基准行除外）。不这么做的话，按胜率排会把
+      // 严格版（全样本 86.4%）排到宽松版（79.9%）前面，与选股侧栏的
+      // kMainRuleId 直接矛盾——两个页面给出相反的"第一"会让主力决定失效。
+      if (_sort == null && a.isBaseline != b.isBaseline) {
+        // b 是基准 → a 该在它前面 → 返回负；a 是基准 → a 该垫底 → 返回正。
+        // 这两处符号写反过一次，基准行直接跑到表格第一行。
+        return b.isBaseline ? -1 : 1;
+      }
+      if (_sort == null && a.isMain != b.isMain) return a.isMain ? -1 : 1;
       final c = sortKey.num == null
           ? a.name.compareTo(b.name)
           : sortKey.num!(a).compareTo(sortKey.num!(b));
@@ -228,7 +241,7 @@ class _BacktestPageState extends State<BacktestPage> {
     final years = r.yearly.keys.toList()..sort();
     // +20 是行内左右各 10 的水平内边距，不加会让 Row 溢出。
     final tableW =
-        nameW + cellW * (hs.length * 3 + 1 + years.length) + 20;
+        nameW + cellW * (hs.length * 3 + 2 + years.length) + 20;
 
     return ListView(
       padding: const EdgeInsets.all(14),
@@ -344,6 +357,10 @@ class _BacktestPageState extends State<BacktestPage> {
                   _SortKey('avg${hs[i]}', (row) => row.avg[hs[i]] ?? 0), cellW, sortKey),
             ],
             _headCell('$pfH日PF', _SortKey('pf', (row) => row.pf), cellW, sortKey),
+            // 主力月占比：最大单月信号数 / 总信号数。超过
+            // kRuleTopMonthShareCeiling 标警示色——那不是"更好"，是"更可疑"。
+            _headCell('主力月', _SortKey('share', (row) => row.profile.topMonthShare),
+                cellW, sortKey),
             for (final y in years)
               _headCell('$y年',
                   _SortKey('year$y', (row) => row.yearlyWin[y] ?? -1), cellW, sortKey),
@@ -392,6 +409,9 @@ class _BacktestPageState extends State<BacktestPage> {
             _cell(row.pf.toStringAsFixed(2), cellW,
                 weight: row.isBaseline ? FontWeight.w800 : FontWeight.w400,
                 tone: row.isBaseline ? accent : AppColors.text),
+            _cell(_topMonthShare(row), cellW,
+                weight: row.isBaseline ? FontWeight.w800 : FontWeight.w400,
+                tone: _shareTone(row)),
             for (final y in years)
               _cell(
                 // -1 表示该年没有可用数据（如 MA250 需要 250 根，早年算不出来）
@@ -402,6 +422,21 @@ class _BacktestPageState extends State<BacktestPage> {
           ],
         ),
       );
+
+  /// 主力月占比。空统计显示 —。
+  String _topMonthShare(_Row row) {
+    if (row.profile.signalCount == 0) return '—';
+    return '${(row.profile.topMonthShare * 100).toStringAsFixed(0)}%';
+  }
+
+  /// 超过 [kRuleTopMonthShareCeiling] 用警示色——那不是"更好"，是"更可疑"。
+  Color _shareTone(_Row row) {
+    if (row.profile.signalCount == 0) return AppColors.dim;
+    if (row.profile.topMonthShare > kRuleTopMonthShareCeiling) {
+      return AppColors.down;
+    }
+    return AppColors.text;
+  }
 
   /// 规则名 + 一句话说明（说明是"规则介绍"的一半，胜率是另一半）。
   Widget _nameCell(_Row row, Color accent, double w) {
@@ -472,6 +507,8 @@ class _Row {
     required this.pf,
     required this.isBaseline,
     this.yearlyWin = const {},
+    this.profile = RuleProfile.empty,
+    this.isMain = false,
   });
 
   final String name;
@@ -484,4 +521,11 @@ class _Row {
   final Map<int, double> avg;
   final double pf;
   final bool isBaseline;
+
+  /// 信号集中度（主力月占比 / 有信号月数）。用来在表格里直接看出
+  /// "这条规则的胜率是不是靠一两个月撑起来的"。
+  final RuleProfile profile;
+
+  /// 是否 [kMainRuleId] 指定的主力规则。
+  final bool isMain;
 }

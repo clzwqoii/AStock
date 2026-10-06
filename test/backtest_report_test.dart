@@ -413,6 +413,179 @@ void main() {
     });
   });
 
+  group('信号集中度（防"名声建立在单个月上"）', () {
+    // 直接构造报告太啰嗦，用 backtestAll 跑一条恒真规则，再看 profile。
+    test('backtestAll 产出 monthsWithSignals 与 topMonthShare', () {
+      final alwaysTrue = Rule(
+        id: 'always_true',
+        name: '恒真',
+        desc: '测试用',
+        test: (_) => true,
+      );
+      final report = backtestAll([up, flat], [alwaysTrue],
+          horizons: const [10]);
+      final prof = report.signalProfile['always_true']![10]!;
+      // up/flat 跨越多个月，profile 必须非空且数值合理
+      expect(prof.signalCount, greaterThan(0));
+      expect(prof.monthsWithSignals, greaterThan(0));
+      expect(prof.topMonthShare, greaterThan(0));
+      expect(prof.topMonthShare, lessThanOrEqualTo(1.0000001));
+    });
+
+    test('只有一个月有信号时 topMonthShare = 1', () {
+      // 用一条"只在特定日期命中"的规则，逼出单月信号
+      final onlyFirstMonth = Rule(
+        id: 'only_first_month',
+        name: '仅首月',
+        desc: '测试用',
+        test: (s) => s.close < 10.5,
+      );
+      // up 序列前 40 根是 10.0，之后涨到 14；flat 全程 10.0。
+      // close<10.5 只在最初几十根命中 —— 那几十根横跨 2024-01/02。
+      final report = backtestAll([up, flat], [onlyFirstMonth],
+          horizons: const [10]);
+      final prof = report.signalProfile['only_first_month']![10]!;
+      expect(prof.signalCount, greaterThan(0));
+      // 信号应集中在少数月份，topMonthShare 明显高于 1/monthsWithSignals
+      expect(prof.topMonthShare * prof.monthsWithSignals, greaterThan(1));
+    });
+
+    test('无信号的规则 profile 为空对象，不抛异常', () {
+      final never = Rule(
+        id: 'never',
+        name: '恒假',
+        desc: '测试用',
+        test: (_) => false,
+      );
+      final report = backtestAll([up, flat], [never], horizons: const [10]);
+      final prof = report.signalProfile['never']![10]!;
+      expect(prof.signalCount, 0);
+      expect(prof.monthsWithSignals, 0);
+      expect(prof.topMonthShare, 0);
+    });
+
+    test('profile 随 JSON 往返一致', () {
+      final alwaysTrue = Rule(
+        id: 'always_true',
+        name: '恒真',
+        desc: '测试用',
+        test: (_) => true,
+      );
+      final report = backtestAll([up, flat], [alwaysTrue],
+          horizons: const [10]);
+      final back = BacktestReport.fromJson(report.toJson());
+      final a = report.signalProfile['always_true']![10]!;
+      final b = back.signalProfile['always_true']![10]!;
+      expect(b.signalCount, a.signalCount);
+      expect(b.monthsWithSignals, a.monthsWithSignals);
+      expect(b.topMonthShare, closeTo(a.topMonthShare, 1e-12));
+    });
+  });
+
+  group('可信判定：稳健 + 不集中，两个条件都要', () {
+    /// 造一份带集中度的报告。
+    BacktestReport repWith(String ruleId, double topShare, int signals,
+        {double win = 0.9, int months = 20}) {
+      return BacktestReport(
+        generatedAt: 'x',
+        horizons: const [10],
+        stockCount: 1,
+        baseline: {
+          10: Baseline(forwardDays: 10, returns: const [])
+        },
+        results: {
+          ruleId: {
+            10: BacktestStats(
+              count: signals,
+              winRate: win,
+              avgReturn: 0,
+              medianReturn: 0,
+              bestReturn: 0,
+              worstReturn: 0,
+              profitFactor: 1,
+            ),
+          },
+        },
+        yearly: {
+          2024: {
+            ruleId: {
+              10: BacktestStats(
+                count: signals,
+                winRate: win,
+                avgReturn: 0,
+                medianReturn: 0,
+                bestReturn: 0,
+                worstReturn: 0,
+                profitFactor: 1,
+              ),
+            },
+          },
+        },
+        yearlyBaseline: {
+          2024: {
+            10: BacktestStats(
+              count: 100000,
+              winRate: 0.4,
+              avgReturn: 0,
+              medianReturn: 0,
+              bestReturn: 0,
+              worstReturn: 0,
+              profitFactor: 1,
+            ),
+          },
+        },
+        signalProfile: {
+          ruleId: {
+            10: RuleProfile(
+              signalCount: signals,
+              monthsWithSignals: months,
+              topMonthShare: topShare,
+            ),
+          },
+        },
+      );
+    }
+
+    test('占比超限 → 即便每年都赢基准也不算可信', () {
+      final r = repWith('x', 0.70, 5000);
+      expect(isRuleYearlyRobust(r, 'x'), isTrue,
+          reason: '按年胜率它是过的——这正是问题所在');
+      expect(isRuleSignalConcentrated(r, 'x'), isTrue);
+      expect(isRuleTrustworthy(r, 'x'), isFalse,
+          reason: '集中度要能把"每年都赢"但靠单月的规则拦下来');
+    });
+
+    test('占比未超限 → 可信', () {
+      final r = repWith('x', 0.45, 5000);
+      expect(isRuleYearlyRobust(r, 'x'), isTrue);
+      expect(isRuleSignalConcentrated(r, 'x'), isFalse);
+      expect(isRuleTrustworthy(r, 'x'), isTrue);
+    });
+
+    test('信号量太小 → 占比不参与判定（1 个信号不是"集中"是"没数据"）', () {
+      final r = repWith('x', 1.0, 5);
+      expect(isRuleSignalConcentrated(r, 'x'), isFalse);
+      // 但按年胜率仍然判，因为 count=5 也能算胜率
+      expect(isRuleTrustworthy(r, 'x'), isTrue);
+    });
+
+    test('旧报告没有 signalProfile → 集中度不拦（缺数据不默认有罪）', () {
+      final r = repWith('x', 0.70, 5000);
+      final legacy = BacktestReport.fromJson({
+        ...r.toJson(),
+      }..remove('signalProfile'));
+      expect(isRuleSignalConcentrated(legacy, 'x'), isFalse,
+          reason: '读不到集中度时不该把所有规则都判成可疑');
+      expect(isRuleTrustworthy(legacy, 'x'), isTrue);
+    });
+
+    test('按年不稳的规则，占比再低也不可信', () {
+      final r = repWith('x', 0.10, 5000, win: 0.30);
+      expect(isRuleYearlyRobust(r, 'x'), isFalse);
+      expect(isRuleTrustworthy(r, 'x'), isFalse);
+    });
+  });
+
   group('月度跟踪台账', () {
     BacktestSnapshot snap(String dataDate, Map<String, double> win) =>
         BacktestSnapshot(
@@ -530,6 +703,34 @@ void main() {
       expect(ruleIdsSortedByWinRate(ids, null), ids);
     });
   
+    test('pinFirst 把主力规则钉到首位，胜率不为它让路', () {
+      // 宽松版全样本胜率(79.9%)低于严格版(86.4%)，但它是主力——
+      // 依据是跨市况稳健而非全样本胜率。所以必须能覆盖胜率排序。
+      final r = reportWith({'strict': 0.864, 'loose': 0.799, 'third': 0.60});
+      expect(ruleIdsSortedByWinRate(['strict', 'loose', 'third'], r),
+          ['strict', 'loose', 'third'], reason: '默认仍按胜率');
+      expect(
+          ruleIdsSortedByWinRate(['strict', 'loose', 'third'], r,
+              pinFirst: 'loose'),
+          ['loose', 'strict', 'third']);
+    });
+
+    test('pinFirst 的 id 不在列表里时静默忽略，不打乱排序', () {
+      final r = reportWith({'a': 0.5, 'b': 0.9});
+      expect(ruleIdsSortedByWinRate(['a', 'b'], r, pinFirst: '不存在'), ['b', 'a']);
+    });
+
+    test('pinFirst 在 report 为 null 时也生效（无报告是降级态）', () {
+      expect(ruleIdsSortedByWinRate(['x', 'y', 'z'], null, pinFirst: 'z'),
+          ['z', 'x', 'y']);
+    });
+
+    test('kMainRuleId 是真实存在且跨年稳健的主力规则', () {
+      final rule = builtInRules.firstWhere((r) => r.id == kMainRuleId,
+          orElse: () => throw StateError('kMainRuleId 不是内置规则'));
+      expect(rule.id, 'rsi_oversold_volume_loose');
+    });
+
     test('不修改入参列表', () {
       final ids = ['a', 'b', 'c'];
       final r = reportWith({'a': 0.1, 'b': 0.9, 'c': 0.5});

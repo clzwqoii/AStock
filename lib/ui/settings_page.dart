@@ -35,6 +35,32 @@ typedef WriteConfigFn = Future<void> Function(String path, String content);
 /// 检查更新端口；测试注入假实现，生产用 [checkForUpdate]。
 typedef CheckUpdateFn = Future<UpdateInfo?> Function();
 
+/// 检查更新流程的全部可注入依赖，**两处入口共用同一份**。
+///
+/// 为什么要有这个类型：macOS 菜单栏（⌘U）与设置页按钮是两处入口，历史上
+/// 参数集不同——设置页传了 `selfUpdateFn`，菜单栏没传，只靠
+/// `_downloadAndInstall` 内部的兜底 `selfUpdate ?? selfUpdateRunnerFor()`
+/// 才碰巧没出问题。兜底是脆弱的：默认实现一变，两处就静默分叉，且没有
+/// 任何测试会失败。收敛到单一构造点后，漏传字段会在编译期暴露。
+class UpdateDeps {
+  const UpdateDeps({
+    this.checkFn,
+    this.downloadFn,
+    this.installFn,
+    this.selfUpdateFn,
+    this.launchUrl,
+  });
+
+  /// 自更新安装器。**默认为空是有意的**——必须在构造时显式给出，
+  /// 否则「漏传」与「故意不用」无法区分，入口分叉的防线就没了。
+  final SelfUpdateRunner? selfUpdateFn;
+
+  final CheckUpdateFn? checkFn;
+  final DownloadPackageFn? downloadFn;
+  final InstallPackageFn? installFn;
+  final LaunchUrlFn? launchUrl;
+}
+
 /// 检查更新：先加载弹框，完成后替换为结果弹框（macOS 菜单与设置页共用）。
 /// 有本平台直链时支持应用内下载（进度条）并自动触发安装；否则「打开下载页」兜底。
 Future<void> showCheckUpdateDialog(
@@ -45,6 +71,24 @@ Future<void> showCheckUpdateDialog(
   SelfUpdateRunner? selfUpdateFn,
   LaunchUrlFn? launchUrl,
 }) async {
+  // 入口收敛点：两处入口都构造 [UpdateDeps] 再走这里，参数集不可能分叉。
+  return showCheckUpdate(context,
+      deps: UpdateDeps(
+        checkFn: checkFn,
+        downloadFn: downloadFn,
+        installFn: installFn,
+        selfUpdateFn: selfUpdateFn,
+        launchUrl: launchUrl,
+      ));
+}
+
+/// 检查更新的唯一实现。[deps] 携带全部可注入依赖。
+Future<void> showCheckUpdate(BuildContext context, {required UpdateDeps deps}) async {
+  final checkFn = deps.checkFn;
+  final downloadFn = deps.downloadFn;
+  final installFn = deps.installFn;
+  final selfUpdateFn = deps.selfUpdateFn;
+  final launchUrl = deps.launchUrl;
   final navigator = Navigator.of(context, rootNavigator: true);
   showDialog<void>(
     context: context,
@@ -402,13 +446,16 @@ class SettingsPage extends StatelessWidget {
             ),
             const SizedBox(width: 8),
             TextButton.icon(
-              onPressed: () => showCheckUpdateDialog(
+              onPressed: () => showCheckUpdate(
                 context,
-                checkFn: checkUpdate,
-                downloadFn: downloadPackage,
-                installFn: installPackage,
-                selfUpdateFn: selfUpdate,
-                launchUrl: launchUrl,
+                // 与 macOS 菜单 ⌘U 入口构造同一套依赖，杜绝两处分叉
+                deps: UpdateDeps(
+                  checkFn: checkUpdate,
+                  downloadFn: downloadPackage,
+                  installFn: installPackage,
+                  selfUpdateFn: selfUpdate,
+                  launchUrl: launchUrl,
+                ),
               ),
               icon: const Icon(Icons.system_update_alt, size: 16),
               label: const Text('检查更新', style: TextStyle(fontSize: 12)),

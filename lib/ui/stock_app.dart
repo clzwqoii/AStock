@@ -10,6 +10,7 @@ import '../app_logic.dart';
 import '../core/backtest.dart';
 import '../config.dart';
 import '../net_diag.dart';
+import '../update_download.dart';
 import '../update_notice.dart';
 import 'backtest_page.dart';
 import 'colors.dart';
@@ -71,6 +72,9 @@ class _StockAppState extends State<StockApp> {
   late AppConfig _config = widget.config;
   bool _syncing = false;
   String? _syncMsg;
+
+  /// 同步完成后库内最新交易日（头部同步徽标用）。
+  String? _syncedDate;
   late AccentColor _accent = AccentColor.fromName(widget.config.themeAccent);
 
   /// 设置页保存配置的目标文件：移动端由 path_provider 解析（沙盒内），桌面为 ~/.stock/.env。
@@ -178,8 +182,10 @@ class _StockAppState extends State<StockApp> {
         },
       );
       if (!mounted) return;
-      setState(() =>
-          _syncMsg = '同步完成：新增 ${r.dates} 个交易日、${r.rows} 行（数据齐全时为 0）');
+      setState(() {
+        _syncMsg = '同步完成：新增 ${r.dates} 个交易日、${r.rows} 行（数据齐全时为 0）';
+        _syncedDate = r.latestDate ?? _syncedDate;
+      });
       // 有新增数据就重算回测报告，否则选股页规则列表上的胜率还是上周的。
       if (r.rows > 0) _refreshReport();
     } catch (e) {
@@ -240,9 +246,17 @@ class _StockAppState extends State<StockApp> {
     );
   }
 
-  /// 检查更新：弹框流程在 settings_page（设置页与 macOS 菜单共用）。
-  Future<void> _checkUpdate(BuildContext context) =>
-      showCheckUpdateDialog(context, launchUrl: widget.launchUrl);
+  /// 检查更新（macOS 菜单 ⌘U 入口）。
+  ///
+  /// 与设置页按钮**共用同一套依赖**（[UpdateDeps]）——两处入口以前参数集不同，
+  /// 菜单栏漏传 selfUpdateFn 只靠下游兜底才碰巧没出事。现在漏传会在编译期暴露。
+  Future<void> _checkUpdate(BuildContext context) => showCheckUpdate(
+        context,
+        deps: UpdateDeps(
+          selfUpdateFn: selfUpdateRunnerFor(),
+          launchUrl: widget.launchUrl,
+        ),
+      );
 
   @override
   Widget build(BuildContext context) {
@@ -284,6 +298,7 @@ class _StockAppState extends State<StockApp> {
                 screenFn: widget.screenFn,
                 syncing: _syncing,
                 syncMsg: _refreshingReport ? '正在重算回测报告…' : _syncMsg,
+                syncedDate: _syncedDate,
                 accent: _accent,
                 onAccentChanged: _setAccent,
                 onSyncPressed: _startSync,

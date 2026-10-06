@@ -10,13 +10,16 @@ import 'tencent_client.dart';
 import 'tushare_client.dart';
 
 class SyncResult {
-  const SyncResult({required this.dates, required this.rows});
+  const SyncResult({required this.dates, required this.rows, this.latestDate});
 
   /// 本次实际拉取的交易日数。
   final int dates;
 
   /// 本次入库的日线行数。
   final int rows;
+
+  /// 同步完成后库内最大交易日（`YYYYMMDD`）；空库为 null。
+  final String? latestDate;
 }
 
 /// 同步规则：
@@ -181,7 +184,8 @@ class SyncService {
       stderr.writeln('名单源均不可用，改用逐股行情回填名称（一次性，约 10 分钟）');
       await _backfillNames(onProgress);
     }
-    return SyncResult(dates: targets.length, rows: rows);
+    return SyncResult(
+        dates: targets.length, rows: rows, latestDate: _repo.maxTradeDate());
   }
 
   bool get _hasPerStockSources => sina != null;

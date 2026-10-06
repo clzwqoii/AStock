@@ -40,6 +40,61 @@ class SignalOutcome {
 
 /// 一组前瞻收益的统计量。可序列化——报告落盘只需要它，
 /// 不需要保留每一个信号（全量信号有上百万个，JSON 会到 GB 级）。
+/// 一条规则的信号在月份上的分布。
+///
+/// ## 为什么需要这一项
+///
+/// 现有的 count / winRate / 盈亏比都答不上一个问题：
+/// **这条规则的胜率是均匀赚来的，还是靠一两个月爆发撑起来的？**
+///
+/// 实测 `rsi_oversold_volume` 三年 7496 个信号里有 **73.7% 集中在
+/// 2024-02 单月**（那个月全市场基准胜率 80.3%，规则胜率 98.4%）。
+/// 按全样本胜率排它是第一名，但剔除那个月后只剩 1875 个信号散布在 35 个月。
+/// 没有这个字段，任何人重新看这份报告都会得出"严格版更强"的结论——
+/// 而这正是发生过的事。
+///
+/// [topMonthShare] 越接近 1 越可疑。[monthsWithSignals] 越接近样本期内的
+/// 总月数越可信。两者要一起看：单月占比高但月份多，可能只是信号多。
+class RuleProfile {
+  const RuleProfile({
+    required this.signalCount,
+    required this.monthsWithSignals,
+    required this.topMonthShare,
+  });
+
+  final int signalCount;
+  final int monthsWithSignals;
+
+  /// 最大单月信号数 / 总信号数，取值 (0, 1]。
+  final double topMonthShare;
+
+  static const empty =
+      RuleProfile(signalCount: 0, monthsWithSignals: 0, topMonthShare: 0);
+
+  Map<String, dynamic> toJson() => {
+        'signalCount': signalCount,
+        'monthsWithSignals': monthsWithSignals,
+        'topMonthShare': topMonthShare,
+      };
+
+  factory RuleProfile.fromJson(Map<String, dynamic> json) {
+    final raw = json['topMonthShare'];
+    return RuleProfile(
+      signalCount: json['signalCount'] as int,
+      monthsWithSignals: json['monthsWithSignals'] as int,
+      // 旧报告没有这个字段：读成 0（= 未知），避免把 null 当"不集中"
+      topMonthShare: (raw as num?)?.toDouble() ?? 0,
+    );
+  }
+}
+
+/// 单月信号占比超过此值即视为"集中"，跨年稳健的判定要因此打折。
+const kRuleTopMonthShareCeiling = 0.6;
+
+/// 主力月占比判定所需的最小信号量。低于此值时占比没有意义
+/// （1 个信号 → 100%，但不是"集中"而是"没有数据"）。
+const kRuleTopMonthShareMinSignals = 100;
+
 class BacktestStats {
   const BacktestStats({
     required this.count,
@@ -384,6 +439,7 @@ class BacktestReport {
     required this.results,
     this.yearly = const {},
     this.yearlyBaseline = const {},
+    this.signalProfile = const {},
   });
 
   /// 报告生成时间（ISO8601 字符串）。
@@ -407,6 +463,14 @@ class BacktestReport {
 
   /// 按自然年的无条件基准：年 → 持有期 → 统计。
   final Map<int, Map<int, BacktestStats>> yearlyBaseline;
+
+  /// 信号集中度：规则 id → 持有期 → [RuleProfile]。
+  /// 缺失键（某持有期无信号）表示 profile 为空，用 [RuleProfile.empty]。
+  final Map<String, Map<int, RuleProfile>> signalProfile;
+
+  /// 某规则某持有期的集中度；无信号时返回 [RuleProfile.empty]。
+  RuleProfile profileOf(String ruleId, int horizon) =>
+      signalProfile[ruleId]?[horizon] ?? RuleProfile.empty;
 
   /// 取某规则在某持有期的结果；无则为 null。
   BacktestResult? result(String ruleId, int horizon) =>
@@ -440,6 +504,12 @@ class BacktestReport {
               for (final e in y.value.entries) '${e.key}': e.value.toJson(),
             },
         },
+        'signalProfile': {
+          for (final r in signalProfile.entries)
+            r.key: {
+              for (final e in r.value.entries) '${e.key}': e.value.toJson(),
+            },
+        },
       };
 
   factory BacktestReport.fromJson(Map<String, dynamic> json) {
@@ -458,6 +528,15 @@ class BacktestReport {
       },
       yearly: _intKeyedStats3(json['yearly']),
       yearlyBaseline: _intKeyedStats2(json['yearlyBaseline']),
+      signalProfile: {
+        for (final r in
+            (json['signalProfile'] as Map<String, dynamic>?)?.entries ??
+                const <String, dynamic>{}.entries)
+          r.key: {
+            for (final e in (r.value as Map<String, dynamic>).entries)
+              int.parse(e.key): RuleProfile.fromJson(e.value),
+          },
+      },
     );
   }
 }
@@ -512,10 +591,11 @@ BacktestReport backtestAll(
     for (var t = IndicatorSnapshot.minBars; t <= lastEval; t++) {
       final from = bars[t].close;
       final year = bars[t].date.year;
+      final mk = '${bars[t].date.year}-${bars[t].date.month.toString().padLeft(2, '0')}';
       // 前瞻收益每个持有期只算一次：原来基准桶与信号桶各算一遍。
       final fwdByH = [for (final h in hs) (bars[t + h].close / from - 1) * 100];
       for (var i = 0; i < baseFlat.length; i++) {
-        baseFlat[i].add(fwdByH[i], year);
+        baseFlat[i].add(fwdByH[i], year, monthKey: mk);
       }
       // 逐条规则判定：绝大多数规则在标量条件就返回 false，不碰 Tape。
       final snap = series.at(t);
@@ -523,7 +603,7 @@ BacktestReport backtestAll(
       for (final r in rules) {
         if (r.test(snap)) {
           for (var i = 0; i < hs.length; i++) {
-            sigFlat[k + i].add(fwdByH[i], year);
+            sigFlat[k + i].add(fwdByH[i], year, monthKey: mk);
           }
         }
         k += hs.length;
@@ -576,6 +656,12 @@ BacktestReport backtestAll(
       for (final y in years)
         y: {for (final h in hs) h: baseTapes[h]!.statsOfYear(y)},
     },
+    // 信号集中度。没有它，"全样本胜率最高"会被误读成"最可靠"——
+    // 而实测严格版 73.7% 的信号集中在 2024-02 单月。
+    signalProfile: {
+      for (final r in rules)
+        r.id: {for (final h in hs) h: sigTapes[r.id]![h]!.profile()},
+    },
   );
 }
 
@@ -595,14 +681,18 @@ BacktestReport backtestAll(
 /// 统计量逐位不变，与逐规则 [backtestRule] 路径的一致性测试靠这一点锁死。
 class Tape {
   final _byYear = <int, List<double>>{};
+  /// 按月计信号数。只存计数不存收益：集中度统计只需要"哪个月有几个信号"，
+  /// 存收益会让常驻内存翻一倍。
+  final _byMonth = <String, int>{};
 
   int _count = 0;
   double _sum = 0, _gain = 0, _loss = 0;
   int _wins = 0;
   double? _best, _worst;
 
-  void add(double value, int year) {
+  void add(double value, int year, {String? monthKey}) {
     (_byYear[year] ??= []).add(value);
+    if (monthKey != null) _byMonth[monthKey] = (_byMonth[monthKey] ?? 0) + 1;
     // 顺序敏感的统计量按插入序累积，与旧实现的收尾单遍统计逐位一致。
     _count++;
     _sum += value;
@@ -635,6 +725,23 @@ class Tape {
     if (bucket == null) return BacktestStats.empty;
     bucket.sort(); // 已被 _sortedYears 排过时是 O(n) 已序扫描
     return _statsOfSorted(bucket);
+  }
+
+  /// 信号集中度。见 [RuleProfile] 的说明——这一项是为了抓
+  /// "规则的声誉建立在少数几个月上"这类结构性问题。
+  RuleProfile profile() {
+    if (_count == 0 || _byMonth.isEmpty) {
+      return const RuleProfile(signalCount: 0, monthsWithSignals: 0, topMonthShare: 0);
+    }
+    var top = 0;
+    for (final v in _byMonth.values) {
+      if (v > top) top = v;
+    }
+    return RuleProfile(
+      signalCount: _count,
+      monthsWithSignals: _byMonth.length,
+      topMonthShare: top / _count,
+    );
   }
 
   BacktestStats overall() {
@@ -767,14 +874,24 @@ class Tape {
 /// 刻意在**显示时**算而不是把顺序硬编码进 `builtInRules`：胜率是数据相关的，
 /// 写进源码后一刷新报告就过期。无报告、或某规则没有回测数据（胜率按 −1 处理）时，
 /// 该规则排在后面并保持 [ids] 里的原始顺序，避免每次刷新排序抖动。
-List<String> ruleIdsSortedByWinRate(List<String> ids, BacktestReport? report) {
-  if (report == null) return ids;
-  double winOf(String id) => report.result(id, 10)?.winRate ?? -1;
+List<String> ruleIdsSortedByWinRate(List<String> ids, BacktestReport? report,
+    {String? pinFirst}) {
   final ordered = [...ids];
-  ordered.sort((a, b) {
-    final byWin = winOf(b).compareTo(winOf(a));
-    return byWin != 0 ? byWin : ids.indexOf(a).compareTo(ids.indexOf(b));
-  });
+  if (report != null) {
+    double winOf(String id) => report.result(id, 10)?.winRate ?? -1;
+    ordered.sort((a, b) {
+      final byWin = winOf(b).compareTo(winOf(a));
+      return byWin != 0 ? byWin : ids.indexOf(a).compareTo(ids.indexOf(b));
+    });
+  }
+  // 钉住首位：胜率排序会把"全样本胜率最高"的规则排第一，但那不等于最该用。
+  // 宽松版 RSI超卖·放量 全样本胜率（79.9%）低于严格版（86.4%），可它在
+  // 下行 / 中性 / 上行三种市况下都有足够样本量的正超额，严格版的胜率
+  // 却有 73.7% 的信号来自 2024-02 单月。所以这里显式指定主力，而不是
+  // 让一个会被单月绑架的指标替我们决定。
+  if (pinFirst != null && ordered.remove(pinFirst)) {
+    ordered.insert(0, pinFirst);
+  }
   return ordered;
 }
 
@@ -813,6 +930,32 @@ bool isRuleYearlyRobust(BacktestReport report, String ruleId, {int horizon = 10}
   }
   return true;
 }
+
+/// 信号是否过度集中在少数几个月。
+///
+/// 单独看某条规则每年的胜率会漏掉一种情况：**它每年都赢基准，但赢的原因
+/// 是一两个月的爆发**。实测 `rsi_oversold_volume` 三年 7496 个信号里
+/// 70.0% 来自 2024-02 单月（那个月全市场基准 80.3%，规则 98.4%），
+/// 剔除后只剩 1875 个信号散布在 35 个月。按年胜率它"稳健"，按结构它不可信。
+///
+/// [kRuleTopMonthShareMinSignals] 以下不判：1 个信号的占比是 100%，
+/// 那不是"集中"而是"没有数据"。旧报告没有 [BacktestReport.signalProfile] 时
+/// 一律返回 false——**缺数据不默认有罪**，否则升级报告格式会让所有规则一起消失。
+bool isRuleSignalConcentrated(BacktestReport report, String ruleId,
+    {int horizon = 10}) {
+  final p = report.profileOf(ruleId, horizon);
+  if (p.signalCount < kRuleTopMonthShareMinSignals) return false;
+  return p.topMonthShare > kRuleTopMonthShareCeiling;
+}
+
+/// 规则是否**可信** = 跨年稳健 **且** 信号不集中。两个条件都必须满足。
+///
+/// 之所以要把它们 AND 起来：`isRuleYearlyRobust` 只看胜率，
+/// 而胜率是会被单个月绑架的指标。UI 的"只看稳健规则"开关要的是
+/// "这条规则的记录我能参考"，那就必须同时满足两者。
+bool isRuleTrustworthy(BacktestReport report, String ruleId, {int horizon = 10}) =>
+    isRuleYearlyRobust(report, ruleId, horizon: horizon) &&
+    !isRuleSignalConcentrated(report, ruleId, horizon: horizon);
 
 /// 跨年稳健的规则 id 列表（保持 [rules] 的声明顺序）。
 List<String> robustRuleIds(BacktestReport? report, List<Rule> rules) {

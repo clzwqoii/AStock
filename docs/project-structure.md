@@ -1300,3 +1300,106 @@ sklearn 1.8.0 只做 oracle，`test/logreg_test.dart` 里固化了期望值。
   几十个，那是"没有送分月"，不等于规则失效。`tool/rule_by_month.dart`
   已经把信号数按月打出来了，可以直接当月度巡检用。
 - 中枢突破彻底出局，不必再 revisit。
+
+## 主力规则改为宽松版，并钉在列表首位（2026-10-06）
+
+`kMainRuleId = 'rsi_oversold_volume_loose'`（`lib/core/rules.dart`）。
+
+### 为什么是宽松版
+
+依据是上一节 `tool/rule_by_month.dart` 的分档结果，不是全样本胜率：
+
+| | 下行月 | 中性月 | 上行月 | 下行样本 | 中性样本 |
+|---|---|---|---|---|---|
+| 严格 RSI<20 | +11.2pp | +4.5pp | +31.3pp | 1064 | **85** |
+| 宽松 RSI<25 | +14.0pp | +14.1pp | +29.0pp | 3887 | 398 |
+
+宽松版在三种市况下都有**足够样本量**的正超额且方差小；严格版的中坚表现
+依赖全样本胜率第一（86.4% vs 79.9%），而那 86.4% 有 73.7% 的信号来自
+2024-02 单月，中性月只剩 85 个信号（置信区间宽到能横跨 −20~+30pp，
+不可用）。**按"离当前越近越可信 + 样本量优先"选宽松版。**
+
+### 排序怎么改的：加 pinFirst，不是把声明顺序当前门
+
+侧栏组内本来是纯按 10 日胜率降序（`ruleIdsSortedByWinRate`）。只改
+`ruleGroups` 的声明顺序**没用**——有报告时排序会把它覆盖掉（这次先踩了一遍，
+测试因此红了一次）。所以给 `ruleIdsSortedByWinRate` 加了可选
+`pinFirst` 参数：
+
+- 有报告：先按胜率排，再把 `pinFirst` 挪到最前
+- 无报告（降级态）：pinFirst 同样生效
+- id 不在列表里：静默忽略，不打乱排序
+- 默认 null，其它调用方行为不变
+
+桌面 `screening_page.dart` 与移动端 `mobile_home.dart` 两处都传了。
+`builtInRules` 的声明顺序也把宽松版放到了第一条，让"无报告"与
+`robustRuleIds` / 命中规则展示的兜底顺序一致。
+
+### 顺手把两个脆弱测试改成按名字点
+
+`ui_test.dart` 原来用 `find.byType(Switch).at(6)` 定位"量比>2"，
+下标依赖侧栏顺序，**调一次顺序就红一次**（本次已红过一次）。
+`_switchRow` 本身是 `InkWell` 且渲染 `rule.name`，所以改成
+`scrollTo(find.text('量比>2'))` + `tester.tap(...)`。
+侧栏顺序是会随报告变化的东西，测试不该依赖它的具体值。
+
+### 现状
+
+`flutter test` **489 全绿**、`flutter analyze` **0 issue**。
+
+## 报告新增「主力月」集中度 + 回测页认主力规则（2026-10-06）
+
+起因：`tool/rule_by_month.dart` 发现严格版 73.7% 的信号集中在 2024-02 单月，
+但这个事实**只存在于那个工具的输出里**，没进报告。换个人来看报告，
+按全样本胜率排还是会得出"严格版更强"——而这件事已经发生过一次。
+
+### 1. `RuleProfile` 进了报告
+
+`BacktestReport.signalProfile[ruleId][horizon]`，两个字段：
+
+- `monthsWithSignals` —— 样本期内有几个月出信号
+- `topMonthShare` —— 最大单月信号数 / 总信号数
+
+阈值 `kRuleTopMonthShareCeiling = 0.6`，超过即在表格里用警示色。
+真实数据（10 日，2026-10-06 报告）：
+
+| 规则 | 信号数 | 有信号月数 | 最大单月占比 |
+|---|---|---|---|
+| rsi_oversold_volume | 7496 | 29 | **70.0%** |
+| rsi_oversold_volume_loose | 14181 | 31 | **44.7%** |
+| rsi_oversold | 146366 | 33 | 15.6% |
+| pivot_breakout | 44271 | 32 | 10.1% |
+
+（占比与 `rule_by_month.dart` 的 73.7% 略有差异是因为口径不同：
+报告按最大持有期 20 定可评估范围共 7496 个信号，工具按 10 日定共 7119 个。
+以报告为准。）
+
+**70.0% 是全表真实规则里最高的**（除 `ma60_breakout_now` 只有 1 个信号）。
+这个数字让"严格版的胜率不可信"从推理变成了表格里一眼可见的事实。
+
+### 2. 回测对比页认 `kMainRuleId`
+
+改之前：`backtest_page.dart` 默认按中间持有期胜率降序 → 严格版（86.4%）
+排第一；而选股侧栏按 `kMainRuleId` 把宽松版钉第一。**两个页面给出相反的
+"第一"**，主力决定形同虚设。
+
+现在：用户没点过列头时，主力规则恒在首位、基准行恒垫底；点过列头就听用户的。
+
+踩坑：基准行那条比较的**符号写反了**（`return b.isBaseline ? 1 : -1`），
+基准直接跑到表格第一行。测试按纵坐标排名次才抓到——这也是为什么测试用
+`rowTop()` 取视觉纵坐标而不是数 widget 个数：渲染实现会变，
+"用户看到的顺序"才是契约。
+
+### 3. 顺带修了两个脆弱测试
+
+- `ui_test.dart` 的 `find.byType(Switch).at(6)` 改成按规则名点
+- 新增 `test/backtest_page_test.dart` 的两个测试：主力第一 + 基准垫底、
+  「主力月」表头与数值出现
+
+### 现状
+
+`flutter test` **500 全绿**。`flutter analyze` 剩余 7 个 info 全部来自
+另一个会话正在重构的 `test/update_deps_test.dart`（18:15 创建，
+其 `UpdateDeps.selfUpdateFn` 默认为空是"有意设计"，但测试断言非空，
+属该会话未完成的自相矛盾）与一处既有的 `mobile_ui_test.dart` 未用 import。
+**不是本次改动引入**，未代为修改以免覆盖对方进行中的工作。

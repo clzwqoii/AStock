@@ -245,17 +245,14 @@ Future<void> scrollTo(WidgetTester tester, Finder finder) =>
         return (total: 2, picked: [fakeRow('S1.SH')], dataDate: '20260930');
       });
 
-      // 量比>2 是第 7 个开关，当日涨幅>3% 是第 8 个（趋势组加了 KDJ金叉，下标后移一位；
-      // 测试视口高度有限，需滚动到底）。
-      await scrollTo(tester, find.byType(Switch).at(6));
-      await tester.tap(find.byType(Switch).at(6));
+      // 按规则名点，不按 Switch 下标：侧栏顺序由 ruleIdsSortedByWinRate 决定，
+      // 会随 backtestReport 有无 / 主力规则的钉住位置变化，用下标写死等于
+      // 每次调顺序都要改测试（已经因此红过两次）。
+      await scrollTo(tester, find.text('量比>2'));
+      await tester.tap(find.text('量比>2'));
       await tester.pump();
-      await tester.scrollUntilVisible(
-        find.byType(Switch).at(7),
-        60,
-        scrollable: find.byType(Scrollable).first,
-      );
-      await tester.tap(find.byType(Switch).at(7));
+      await scrollTo(tester, find.text('当日涨幅>3%'));
+      await tester.tap(find.text('当日涨幅>3%'));
       await tester.pump();
       await tester.tap(find.text('开始选股'));
       await tester.pumpAndSettle();

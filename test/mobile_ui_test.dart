@@ -7,6 +7,7 @@ import 'package:stock/config.dart';
 import 'package:stock/core/backtest.dart';
 import 'package:stock/core/models.dart';
 import 'package:stock/core/rules.dart';
+import 'package:stock/data/sync_service.dart';
 import 'package:stock/ui/candle_chart.dart';
 import 'package:stock/ui/colors.dart';
 import 'package:stock/ui/mobile_home.dart';
@@ -178,6 +179,7 @@ void main() {
               dbPath: dbPath,
               syncing: false,
               syncMsg: null,
+              syncedDate: null,
               accent: AccentColor.red,
               onAccentChanged: (_) {},
               onSyncPressed: () {},
@@ -234,8 +236,7 @@ void main() {
     expect(grad.colors.last, isNot(AccentColor.green.color)); // 深端压暗
   });
 
-  testWidgets('点开始选股出现模态加载框，完成后消失', (tester) async {
-    _phone(tester);
+  testWidgets('点开始选股出现模态加载框，完成后消失', (tester) async {    _phone(tester);
     await tester.pumpWidget(StockApp(
       config: AppConfig(tushareToken: '', dbPath: dbPath),
       showOnboarding: false,
@@ -252,5 +253,21 @@ void main() {
     expect(find.textContaining('正在选股'), findsOneWidget);
     await tester.pumpAndSettle();
     expect(find.textContaining('正在选股'), findsNothing);
+  });
+
+  testWidgets('同步完成后头部徽标显示库里最新交易日，不再停留「未同步」', (tester) async {
+    _phone(tester);
+    await tester.pumpWidget(StockApp(
+      config: AppConfig(tushareToken: 'tok', dbPath: dbPath),
+      showOnboarding: false,
+      runSyncFn: ({required dbPath, required token, onProgress}) async =>
+          const SyncResult(dates: 0, rows: 0, latestDate: '20261006'),
+    ));
+    await tester.pump();
+    await tester.pump(const Duration(seconds: 1));
+
+    expect(find.textContaining('同步完成'), findsOneWidget);
+    expect(find.textContaining('未同步'), findsNothing);
+    expect(find.text('已同步 10-06'), findsOneWidget);
   });
 }

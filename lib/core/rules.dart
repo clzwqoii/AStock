@@ -862,7 +862,30 @@ final Rule ma60BreakoutBullRule = ma60BreakoutWith(const {
 });
 
 /// 内置规则目录。UI 从这里列出可选规则；单规则选股传一条，组合选股传多条（AND）。
+/// 当前主力规则 id。侧栏与结果列表把它钉在首位，胜率排序不为它让路。
+///
+/// 选中它的依据是**跨市况稳健**而不是全样本胜率：宽松版全样本胜率 79.9%
+/// 低于严格版 86.4%，但按 tool/rule_by_month.dart 的分档结果，它在下行 /
+/// 中性 / 上行三种市况下的超额是 +14.0 / +14.1 / +29.0pp（样本 3887 / 398 /
+/// 9321），而严格版 73.7% 的信号集中在 2024-02 单月、中性月只剩 85 个信号。
+/// 这个判断随月度台账更新，改它要同步改文档。
+const kMainRuleId = 'rsi_oversold_volume_loose';
+
 final List<Rule> builtInRules = [
+  // 顺序即“主力顺序”：宽松版 RSI超卖·放量 排在首位。
+  // 依据见 tool/rule_by_month.dart 的分档结果——它在下行 / 中性 / 上行
+  // 三种市况下都有足够样本量的正超额（+14.0 / +14.1 / +29.0pp），
+  // 而严格版 73.7% 的信号集中在 2024-02 单月。
+  // 顺序影响侧栏默认排布与命中规则的展示次序。
+  Rule(
+    id: 'rsi_oversold_volume_loose',
+    name: 'RSI超卖·放量(宽松)',
+    // 与 rsi_oversold_volume 同策略、RSI 阈值更松；见 [kRsiOversoldVolumeLooseThreshold]。
+    desc: 'RSI14<25 且量比>1.5：宽松版，信号更多但单笔质量略低',
+    test: (s) =>
+        s.rsi14 < kRsiOversoldVolumeLooseThreshold &&
+        s.volumeRatio > kRsiOversoldVolumeVolumeRatio,
+  ),
   Rule(
     id: 'close_above_ma20',
     name: '收盘价站上MA20',
@@ -955,15 +978,6 @@ final List<Rule> builtInRules = [
     desc: 'RSI14<20 深跌且量比>1.5：有量的超卖反弹，三年样本唯一跨年稳健',
     test: (s) =>
         s.rsi14 < kRsiOversoldVolumeThreshold &&
-        s.volumeRatio > kRsiOversoldVolumeVolumeRatio,
-  ),
-  Rule(
-    id: 'rsi_oversold_volume_loose',
-    name: 'RSI超卖·放量(宽松)',
-    // 与 rsi_oversold_volume 同策略、RSI 阈值更松；见 [kRsiOversoldVolumeLooseThreshold]。
-    desc: 'RSI14<25 且量比>1.5：宽松版，信号更多但单笔质量略低',
-    test: (s) =>
-        s.rsi14 < kRsiOversoldVolumeLooseThreshold &&
         s.volumeRatio > kRsiOversoldVolumeVolumeRatio,
   ),
   Rule(
