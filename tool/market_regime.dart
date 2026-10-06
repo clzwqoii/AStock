@@ -23,12 +23,19 @@ import 'dart:io';
 import 'dart:math' as math;
 
 import 'package:stock/config.dart';
+import 'package:stock/core/backtest.dart';
 import 'package:stock/core/rules.dart';
 import 'package:stock/data/bar_repository.dart';
 import 'package:stock/data/report_store.dart';
 
-/// 与回测报告同一持有期。
+/// 统计的持有期。
 const _horizon = 10;
+
+/// 可评估范围按**最大持有期**取，与 [backtestAll] 一致。
+/// 早先按 _horizon(10) 取，多算了每只股票末尾 10 天——而那 10 天
+/// 全落在 2026-09，导致 2026 年比报告多 5.6 万个样本、胜率差 0.3pp。
+/// 口径不一致的诊断工具比没有更糟：它会把"我的 bug"讲成"市场现象"。
+final _maxHorizon = kDefaultHorizons.reduce((a, b) => a > b ? a : b);
 
 Future<void> main(List<String> args) async {
   final repo = BarRepository(args.isNotEmpty ? args[0] : AppConfig.load().dbPath);
@@ -42,8 +49,8 @@ Future<void> main(List<String> args) async {
 
   for (final stock in stocks) {
     final bars = stock.bars;
-    if (bars.length < IndicatorSnapshot.minBars + _horizon) continue;
-    final last = bars.length - 1 - _horizon;
+    if (bars.length < IndicatorSnapshot.minBars + _maxHorizon) continue;
+    final last = bars.length - 1 - _maxHorizon;
     for (var t = IndicatorSnapshot.minBars; t <= last; t++) {
       final r = (bars[t + _horizon].close / bars[t].close - 1) * 100;
       final d = bars[t].date;
@@ -76,13 +83,21 @@ Future<void> main(List<String> args) async {
   print('══ 逐月（看崩塌是全年均匀还是集中在某几月）══');
   print('  ${'月份'.padRight(9)}${'样本'.padLeft(9)}${'胜率'.padLeft(8)}'
       '${'平均%'.padLeft(9)}${'中位%'.padLeft(9)}');
-  for (final m in months) {
+  for (var i = 0; i < months.length; i++) {
+    final m = months[i];
     final b = byMonth[m]!;
     final bar = _bar(b.winRate);
+    // 最后一个月天然被截断：t 最多到 数据末 − 最大持有期，所以末月只剩
+    // 月初几个信号日。把它当"月度观察"读会得出灾难性错误结论
+    // （本例 2026-09 只有 5501 样本、胜率 16.8%，实际是 1~2 天的样本）。
+    // 阈值取邻月的 1/5，远低于此即标记，不进任何年度汇总的解读。
+    final prev = i > 0 ? byMonth[months[i - 1]]!.count : b.count;
+    final truncated = b.count < prev / 5;
     print('  ${m.padRight(9)}${b.count.toString().padLeft(9)}'
         '${(b.winRate * 100).toStringAsFixed(1).padLeft(7)}%'
         '${b.avg.toStringAsFixed(2).padLeft(8)}%'
-        '${b.median.toStringAsFixed(2).padLeft(8)}%  $bar');
+        '${b.median.toStringAsFixed(2).padLeft(8)}%  $bar'
+        '${truncated ? "  ← 截断，勿作月度观察" : ""}');
   }
 
   // 与报告对账

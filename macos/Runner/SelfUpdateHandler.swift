@@ -110,40 +110,55 @@ class SelfUpdateHandler {
 
   /// 在 bundle 里找 updater.sh。
   ///
-  /// 实测布局（macOS + asset 声明 `macos/Runner/updater.sh`）：
-  /// `App.framework/Versions/A/Resources/flutter_assets/macos/Runner/updater.sh`。
-  /// Flutter 把资源塞进 App.framework，而 macOS 上 `Bundle.main` 就是它，
-  /// 所以 `Bundle.main.resourceURL` 已经指向 `.../App.framework/Versions/A/Resources`。
-  /// 下面按这个顺序找，并对 Debug/Dart-only 的差异留兜底。
+  /// ## 实测结论（别再猜 `Bundle.main` 是什么）
+  ///
+  /// 在 app 进程里实测（把探针塞进 ASTock.app/Contents/MacOS 跑出来的）：
+  /// ```
+  /// Bundle.main.bundlePath  = /Applications/ASTock.app          ← 是 .app，不是 App.framework
+  /// Bundle.main.resourceURL = .../ASTock.app/Contents/Resources  ← 脚本不在这里
+  /// ```
+  /// Flutter 把 asset 塞进 **App.framework**，所以脚本的真实位置是：
+  /// ```
+  /// ASTock.app/Contents/Frameworks/App.framework/Versions/A/Resources/flutter_assets/macos/Runner/updater.sh
+  /// ```
+  /// 之前按「Bundle.main 就是 App.framework」去找，候选路径全落在
+  /// Contents/Resources 下，于是每个候选都不存在 → script_missing。
   private func locateScript() -> URL? {
     var candidates: [URL] = []
 
     func add(_ url: URL?) { if let url { candidates.append(url) } }
-
-    // 1) flutter_assets 下的声明路径（Release/Debug 通用）
-    if let res = Bundle.main.resourceURL {
-      add(res.appendingPathComponent("flutter_assets")
+    func assetIn(_ base: URL, _ sub: String) {
+      add(base.appendingPathComponent(sub)
         .appendingPathComponent(Self.selfUpdateAssetDir)
-        .appendingPathComponent("updater.sh"))
-      add(res.appendingPathComponent(Self.selfUpdateAssetDir)
         .appendingPathComponent("updater.sh"))
     }
-    add(Bundle.main.url(forResource: "updater", withExtension: "sh"))
 
-    // 2) 若以上都没中，退回 .app 内常见位置
     let appURL = URL(fileURLWithPath: Bundle.main.bundlePath)
-    if appURL.path.hasSuffix(".framework") {
-      add(appURL.deletingLastPathComponent()
-        .appendingPathComponent("Resources/flutter_assets")
-        .appendingPathComponent(Self.selfUpdateAssetDir)
-        .appendingPathComponent("updater.sh"))
-    } else {
-      for sub in ["Contents/MacOS", "Contents/Resources", "Contents/Resources/flutter_assets"] {
-        add(appURL.appendingPathComponent(sub)
-          .appendingPathComponent(Self.selfUpdateAssetDir)
-          .appendingPathComponent("updater.sh"))
+    let contents = appURL.appendingPathComponent("Contents")
+
+    // 1) 真实布局：脚本在 App.framework 的 flutter_assets 下（Release/Debug 都一样）
+    let frameworks = contents.appendingPathComponent("Frameworks")
+    if let fw = try? FileManager.default.contentsOfDirectory(atPath: frameworks.path) {
+      for name in fw where name.hasSuffix("App.framework") || name.hasSuffix(".framework") {
+        let res = frameworks.appendingPathComponent(name)
+          .appendingPathComponent("Versions/Current/Resources")
+        assetIn(res, "flutter_assets")
+        assetIn(res, "")
       }
     }
+
+    // 2) Bundle.main 自身（Debug 或将来布局变化时的兜底）
+    if let res = Bundle.main.resourceURL {
+      assetIn(res, "flutter_assets")
+      assetIn(res, "")
+    }
+
+    // 3) .app 内常见位置
+    for sub in ["Contents/MacOS", "Contents/Resources",
+                "Contents/Resources/flutter_assets"] {
+      assetIn(appURL.appendingPathComponent(sub), "")
+    }
+    add(Bundle.main.url(forResource: "updater", withExtension: "sh"))
 
     return candidates.first { FileManager.default.fileExists(atPath: $0.path) }
   }

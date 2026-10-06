@@ -1,5 +1,24 @@
 # 发布说明（发版时复制到 Release Notes）
 
+## 2.2.1
+
+修复 2.2.0 真机验证暴露的两个问题。**2.2.0 的自动更新实际上没能工作**，本版本才可用。
+
+**修复**
+
+- **macOS 自动安装报「bundle 内找不到 updater.sh」**：脚本一直都在 app 包里，是查找路径写错了。原代码假设 macOS 上 `Bundle.main` 指向 App.framework，实测（把探针塞进 app 里跑）它指向 `.app` 本身，于是所有候选路径都落在 `Contents/Resources` 下，而脚本实际在 `Contents/Frameworks/App.framework/Versions/Current/Resources/flutter_assets/`。改为遍历 `Contents/Frameworks` 下所有 framework 取第一个命中的
+- **首次检查更新说「已是最新」，再点一次才拿到新版本**：多源竞速把「某个源说没有新版」当成了终局结论立刻返回。而各源缓存刷新有差，先返回的是 CDN 上的旧版本。改为：任一源说「有新版」即返回；只有**所有**源都说「无新版」或失败才判定为已是最新。代价是最坏情况多等一个超时（15 秒），换来不会漏报
+
+**测试**：485 项全部通过（新增多源竞速 5 项回归测试），`flutter analyze` 0 issue。
+
+**下载**
+
+- `AStock-2.2.1-macOS.zip` — macOS 应用内更新用
+- `A股选股台.dmg` — macOS 手动安装
+- `AStock-2.2.1-Android.apk` — 安卓 8.0+，覆盖安装保留全部数据
+
+**数据来源**：tushare pro（免费额度）、新浪/东方财富公开行情接口。行情数据仅供个人研究使用，不构成投资建议。
+
 ## 2.2.0
 
 验证 macOS 自动更新的真机链路。功能与 2.1.0 相同，本次用于在真实设备上跑通

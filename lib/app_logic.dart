@@ -20,7 +20,7 @@ import 'package:stock/data/sync_service.dart';
 import 'package:stock/data/tushare_client.dart';
 
 /// 当前应用版本（发布新包时同步修改，与 pubspec.version 保持一致）。
-const kAppVersion = '2.2.0';
+const kAppVersion = '2.2.1';
 
 /// 更新清单候选源（并发竞速，第一个响应的胜出）。
 /// 国内网络优先命中 Gitee；jsDelivr 镜像可加速 GitHub raw。建仓库后替换为你的地址。
@@ -97,13 +97,31 @@ Future<UpdateInfo?> checkForUpdate({
     });
     pending.add(f);
   }
+  // 竞速，但不能被「某个源说没有新版」盖掉结论。
+  //
+  // update.json 刚发布时各源缓存刷新有差（真机实测：首次点检查更新说已是最新，
+  // 再点一次才拿到新版本——先返回的是 CDN 上的旧版本）。所以：
+  // - 任一源说「有新版」→ 立刻返回，不等其它源（慢源没理由推翻它）；
+  // - 只有当**所有**源都说「无新版」或失败，才判定为「已是最新」。
+  // 代价是最坏情况多等一个超时（15s），换来的是不会漏报新版本。
   Object? lastError;
+  UpdateInfo? found;
+  var anyUsable = false;
   while (pending.isNotEmpty) {
     final r = await Future.any(pending);
     pending.remove(r.self);
-    if (r.ok) return r.info;
-    lastError = r.error;
+    if (!r.ok) {
+      lastError = r.error;
+      continue;
+    }
+    anyUsable = true;
+    if (r.info != null) {
+      found = r.info;
+      break;
+    }
   }
+  if (found != null) return found;
+  if (anyUsable) return null; // 所有可用源一致：已是最新
   throw lastError ?? StateError('没有可用的更新源');
 }
 
