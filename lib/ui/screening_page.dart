@@ -560,6 +560,8 @@ class _ScreeningPageState extends State<ScreeningPage> {
             _headerRow(wide),
             Expanded(
               child: ListView.builder(
+                // 行高固定（_row 外层 Container），声明后省略逐行测量
+                itemExtent: 34,
                 itemCount: _sortedRows.length,
                 itemBuilder: (_, i) => _row(_sortedRows[i], i, wide),
               ),

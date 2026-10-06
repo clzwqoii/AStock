@@ -76,34 +76,46 @@ const _ruleFeaturePrefixes = <String>[
 /// 其余静默忽略——加新规则要在这里显式登记，避免"悄悄多出来的维度"
 /// 让线上系数与训练时错位。
 List<double> featureVector(IndicatorSnapshot s, {List<String> hitRuleIds = const []}) {
-  final m = <String, double>{
-    'rsi14': s.rsi14,
-    'k': s.k,
-    'd': s.d,
-    'j': s.j,
-    'dif': s.dif,
-    'dea': s.dea,
-    'pctChange': s.pctChange,
-    'volumeRatio': s.volumeRatio,
-    'amountRatio': s.amountRatio,
-    'closePos': s.closePos,
-    'bias20': _bias(s.close, s.ma20),
-    'bias60': s.bias60 ?? 0,
-    'bias250': s.bias250 ?? 0,
-    'ma60Trend5': s.ma60Trend5 ?? 0,
-    'ma250Trend5': s.ma250Trend5 ?? 0,
-    'bullAlignment': s.bullAlignment ? 1 : 0,
-  };
-  final out = <double>[];
-  for (final name in featureNames) {
-    if (name.startsWith('rule_')) {
-      out.add(hitRuleIds.contains(name.substring(5)) ? 1 : 0);
+  final out = List<double>.filled(featureNames.length, 0);
+  for (var i = 0; i < featureNames.length; i++) {
+    final name = featureNames[i];
+    final ruleId = _ruleIdOf[name];
+    if (ruleId != null) {
+      out[i] = hitRuleIds.contains(ruleId) ? 1 : 0;
     } else {
-      out.add(m[name] ?? 0);
+      out[i] = _scalarOf[name]?.call(s) ?? 0;
     }
   }
   return out;
 }
+
+/// 'rule_xxx' 特征名 → 规则 id 'xxx'。静态映射替代逐次 substring——
+/// 训练按命中样本逐条调用（百万级），每次 10 个临时字符串是纯浪费。
+final Map<String, String> _ruleIdOf = {
+  for (final n in featureNames)
+    if (n.startsWith('rule_')) n: n.substring(5),
+};
+
+/// 标量特征取值器。与 [featureNames] 非规则段一一对应（缺省 0 的语义不变）；
+/// 静态 Map 让每次调用不再构建 16 项临时 Map。
+final Map<String, double Function(IndicatorSnapshot)> _scalarOf = {
+  'rsi14': (s) => s.rsi14,
+  'k': (s) => s.k,
+  'd': (s) => s.d,
+  'j': (s) => s.j,
+  'dif': (s) => s.dif,
+  'dea': (s) => s.dea,
+  'pctChange': (s) => s.pctChange,
+  'volumeRatio': (s) => s.volumeRatio,
+  'amountRatio': (s) => s.amountRatio,
+  'closePos': (s) => s.closePos,
+  'bias20': (s) => _bias(s.close, s.ma20),
+  'bias60': (s) => s.bias60 ?? 0,
+  'bias250': (s) => s.bias250 ?? 0,
+  'ma60Trend5': (s) => s.ma60Trend5 ?? 0,
+  'ma250Trend5': (s) => s.ma250Trend5 ?? 0,
+  'bullAlignment': (s) => s.bullAlignment ? 1 : 0,
+};
 
 /// (收盘/均线 − 1) × 100，截断到 [kBiasClampPct]。
 double _bias(double close, double ma) {

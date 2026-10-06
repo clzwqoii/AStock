@@ -302,7 +302,7 @@ Future<void> _defaultWriteConfig(String path, String content) async {
   await file.writeAsString(content);
 }
 
-class SettingsPage extends StatelessWidget {
+class SettingsPage extends StatefulWidget {
   const SettingsPage({
     super.key,
     this.initialToken = '',
@@ -352,14 +352,29 @@ class SettingsPage extends StatelessWidget {
   final SelfUpdateRunner? selfUpdate;
 
   @override
+  State<SettingsPage> createState() => _SettingsPageState();
+}
+
+/// token 输入框的 controller 由 State 持有：原实现放在 build 里每次重建，
+/// 外层一重建输入即丢（TextField 文本回退到 initialToken），controller 也从不 dispose。
+class _SettingsPageState extends State<SettingsPage> {
+  late final TextEditingController _token =
+      TextEditingController(text: widget.initialToken);
+
+  @override
+  void dispose() {
+    _token.dispose();
+    super.dispose();
+  }
+
+  @override
   Widget build(BuildContext context) {
-    final token = TextEditingController(text: initialToken);
     return ListView(
       padding: const EdgeInsets.all(16),
       children: [
         const Text('tushare Token'),
         TextField(
-          controller: token,
+          controller: _token,
           obscureText: true,
           decoration: const InputDecoration(
             hintText: '在 tushare.pro 注册后获取',
@@ -373,7 +388,7 @@ class SettingsPage extends StatelessWidget {
             const SizedBox(width: 5),
             Expanded(
               child: GestureDetector(
-                onTap: () => (launchUrl ?? defaultLaunchUrl)(Uri.parse(kTushareRegisterUrl)),
+                onTap: () => (widget.launchUrl ?? defaultLaunchUrl)(Uri.parse(kTushareRegisterUrl)),
                 child: const Text(
                   '没有 Token？点此前往 tushare.pro 注册（免费）',
                   style: TextStyle(fontSize: 12, color: Color(0xFF3B6BD6), decoration: TextDecoration.underline),
@@ -387,10 +402,10 @@ class SettingsPage extends StatelessWidget {
         Wrap(
           spacing: 12,
           children: [
-            OutlinedButton(onPressed: () => _save(context, token), child: const Text('保存配置')),
+            OutlinedButton(onPressed: () => _save(context, _token), child: const Text('保存配置')),
             FilledButton(
-              onPressed: syncing ? null : onSyncPressed,
-              child: syncing
+              onPressed: widget.syncing ? null : widget.onSyncPressed,
+              child: widget.syncing
                   ? const Row(mainAxisSize: MainAxisSize.min, children: [
                       SizedBox(
                           width: 14,
@@ -403,7 +418,7 @@ class SettingsPage extends StatelessWidget {
                   : const Text('同步数据'),
             ),
             OutlinedButton(
-              onPressed: syncing || onBackfillPressed == null
+              onPressed: widget.syncing || widget.onBackfillPressed == null
                   ? null
                   : () => _pickBackfill(context),
               child: const Text('回补历史'),
@@ -411,13 +426,13 @@ class SettingsPage extends StatelessWidget {
           ],
         ),
         const SizedBox(height: 8),
-        if (syncing) const Padding(
+        if (widget.syncing) const Padding(
           padding: EdgeInsets.only(top: 8),
           child: LinearProgressIndicator(),
         ),
-        if (syncMsg != null) Padding(
+        if (widget.syncMsg != null) Padding(
           padding: const EdgeInsets.only(top: 8),
-          child: Text(syncMsg!),
+          child: Text(widget.syncMsg!),
         ),
         const SizedBox(height: 24),
         const Text('主题色'),
@@ -435,14 +450,14 @@ class SettingsPage extends StatelessWidget {
           child: Text('点击即生效并保存；涨红跌绿是行情惯例，不随主题变。',
               style: TextStyle(fontSize: 12, color: Colors.grey)),
         ),
-        if (dbPath != null) Padding(
+        if (widget.dbPath != null) Padding(
           padding: const EdgeInsets.only(top: 24),
-          child: Text('数据库：$dbPath', style: const TextStyle(fontSize: 12, color: Colors.grey)),
+          child: Text('数据库：${widget.dbPath}', style: const TextStyle(fontSize: 12, color: Colors.grey)),
         ),
         Padding(
           padding: const EdgeInsets.only(top: 4),
           child: Text(
-            '配置保存到 $configPath，App 与命令行（桌面）共用；打开 App 会自动增量同步，无需手动操作。',
+            '配置保存到 ${widget.configPath}，App 与命令行（桌面）共用；打开 App 会自动增量同步，无需手动操作。',
             style: const TextStyle(fontSize: 12, color: Colors.grey),
           ),
         ),
@@ -461,11 +476,11 @@ class SettingsPage extends StatelessWidget {
                 context,
                 // 与 macOS 菜单 ⌘U 入口构造同一套依赖，杜绝两处分叉
                 deps: UpdateDeps(
-                  checkFn: checkUpdate,
-                  downloadFn: downloadPackage,
-                  installFn: installPackage,
-                  selfUpdateFn: selfUpdate,
-                  launchUrl: launchUrl,
+                  checkFn: widget.checkUpdate,
+                  downloadFn: widget.downloadPackage,
+                  installFn: widget.installPackage,
+                  selfUpdateFn: widget.selfUpdate,
+                  launchUrl: widget.launchUrl,
                 ),
               ),
               icon: const Icon(Icons.system_update_alt, size: 16),
@@ -479,10 +494,10 @@ class SettingsPage extends StatelessWidget {
   }
 
   Widget _accentSwatch(AccentColor a) {
-    final selected = a == accent;
+    final selected = a == widget.accent;
     return GestureDetector(
       key: ValueKey('accent-${a.name}'),
-      onTap: onAccentChanged == null ? null : () => onAccentChanged!(a),
+      onTap: widget.onAccentChanged == null ? null : () => widget.onAccentChanged!(a),
       child: Tooltip(
         message: a.label,
         child: Container(
@@ -532,7 +547,7 @@ class SettingsPage extends StatelessWidget {
   /// 回补历史选档：三档对应约 5/10/15 分钟（1.2s/日的限频间隔是主要开销）。
   /// 点档位即确认——弹窗文案已把「会拉多久、要保持前台」说清。
   void _pickBackfill(BuildContext context) {
-    final callback = onBackfillPressed;
+    final callback = widget.onBackfillPressed;
     if (callback == null) return;
     showDialog<void>(
       context: context,
@@ -560,17 +575,17 @@ class SettingsPage extends StatelessWidget {
 
   Future<void> _save(BuildContext context, TextEditingController token) async {
     // 保留文件里已有的其他键，只更新 TUSHARE_TOKEN。
-    final file = File(configPath);
+    final file = File(widget.configPath);
     final vars = file.existsSync()
         ? AppConfig.parseDotEnv(file.readAsStringSync())
         : <String, String>{};
     vars['TUSHARE_TOKEN'] = token.text.trim();
-    await writeConfig(
-      configPath,
+    await widget.writeConfig(
+      widget.configPath,
       '${[for (final e in vars.entries) '${e.key}=${e.value}'].join('\n')}\n',
     );
     if (!context.mounted) return;
     ScaffoldMessenger.of(context)
-        .showSnackBar(SnackBar(content: Text('已保存到 $configPath')));
+        .showSnackBar(SnackBar(content: Text('已保存到 ${widget.configPath}')));
   }
 }

@@ -167,7 +167,8 @@ _GapReport _gapReport(BarRepository repo) {
   final countByDate = <String, int>{};
   for (final s in stocks) {
     for (final b in s.bars) {
-      countByDate[_ymd(b.date)] = (countByDate[_ymd(b.date)] ?? 0) + 1;
+      final key = _ymd(b.date);
+      countByDate[key] = (countByDate[key] ?? 0) + 1;
     }
   }
   final cal = countByDate.entries.where((e) => e.value >= kCalendarMinRows).map((e) => e.key).toList()

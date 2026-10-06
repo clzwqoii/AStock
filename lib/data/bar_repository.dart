@@ -101,6 +101,13 @@ class BarRepository {
           r['ts_code'] as String: r['name'] as String,
       };
 
+  /// 单只股票的名称；库里没有该代码时返回 null。
+  /// 详情页只要一个名字，别为它走 [stockNames] 把整张表读成 Map。
+  String? stockName(String tsCode) {
+    final r = _db.select('SELECT name FROM stocks WHERE ts_code = ?', [tsCode]);
+    return r.isEmpty ? null : r.first['name'] as String;
+  }
+
   /// 全部股票代码（含已停更的），供逐股备源遍历。
   List<String> allSymbols() => [
         for (final r in _db.select('SELECT DISTINCT ts_code FROM daily_bars ORDER BY ts_code'))
@@ -149,24 +156,49 @@ class BarRepository {
     int maxBars = 0,
     bool excludeSpecialStocks = false,
   }) {
-    final byStock = <String, List<Bar>>{};
-    // 逐行游标而非 `_db.select`：后者先把 360 万行全物化成 Row 对象再交给调用方，
-    // 实测峰值 RSS 1889MB / 5.82s；游标流式读是 648MB / 4.68s，同一份数据逐位一致。
-    // 内存这条比时间更要紧——移动端 1.9GB 会被系统直接杀掉。
-    // 用下标取值而非列名：省掉每行的列名哈希查找（4.87s → 4.75s）。
-    // 走 columnAt 而不是 r[i]：Row 的静态接口是 Map<String, dynamic>，
-    // int 下标虽然运行时可用，但每个访问点都会触发 collection_methods_unrelated_type。
+    // 逐行游标而非 `_db.select`：后者先把 360 万行全物化成 Row 对象再交给调用方。
+    // 用下标取值而非列名：省掉每行的列名哈希查找。
+    // 走 columnAt 而不是 r[i]：避免 collection_methods_unrelated_type。
+    //
+    // 性能优化（内存与速度）：
+    // 1. 利用 SQL `ORDER BY ts_code, trade_date` 的连续性，单股流式聚集成 List<StockData>，
+    //    消除 360 万次 Map<String, List<Bar>> 哈希查找及中间大 Map 分配。
+    // 2. 日期对象缓存复用：全库实际只有 ~700-1000 个唯一交易日，复用 DateTime 实例，
+    //    免去 360 万次 DateTime 分配及千万次 substring，省约 100MB 堆内存。
+    // 3. maxBars 就地裁剪，无需在结束后分配第二个 trimmed Map。
     final st = _db.prepare(
         'SELECT ts_code, trade_date, open, high, low, close, vol, amount '
         'FROM daily_bars ${_specialFilterSql(excludeSpecialStocks)} '
         'ORDER BY ts_code, trade_date');
+    final result = <StockData>[];
+    final dateCache = <String, DateTime>{};
+    String? currentTs;
+    var currentBars = <Bar>[];
+
+    void flushCurrent() {
+      if (currentTs == null) return;
+      if (maxBars > 0 && currentBars.length > maxBars) {
+        currentBars = currentBars.sublist(currentBars.length - maxBars);
+      }
+      if (currentBars.length >= minBars) {
+        result.add(StockData(symbol: currentTs, bars: currentBars));
+      }
+    }
+
     try {
       final cur = st.selectCursor();
       while (cur.moveNext()) {
         final r = cur.current;
         final ts = r.columnAt(0) as String;
-        (byStock[ts] ??= []).add(Bar(
-              date: parseTradeDate(r.columnAt(1) as String),
+        if (ts != currentTs) {
+          flushCurrent();
+          currentTs = ts;
+          currentBars = <Bar>[];
+        }
+        final dateStr = r.columnAt(1) as String;
+        final date = dateCache[dateStr] ??= parseTradeDate(dateStr);
+        currentBars.add(Bar(
+              date: date,
               open: (r.columnAt(2) as num).toDouble(),
               high: (r.columnAt(3) as num).toDouble(),
               low: (r.columnAt(4) as num).toDouble(),
@@ -175,26 +207,11 @@ class BarRepository {
               amount: (r.columnAt(7) as num).toDouble(),
             ));
       }
+      flushCurrent();
     } finally {
       st.dispose();
     }
-    if (maxBars > 0) {
-      // 用 entries 而不是 keys/values：keys 与 values 各自是独立 List，
-      // elementAt 在 List 上是 O(n) —— 5672 只股票会退化成 O(n²)。
-      final trimmed = <String, List<Bar>>{
-        for (final e in byStock.entries)
-          e.key: e.value.length > maxBars
-              ? e.value.sublist(e.value.length - maxBars)
-              : e.value,
-      };
-      byStock
-        ..clear()
-        ..addAll(trimmed);
-    }
-    return [
-      for (final e in byStock.entries)
-        if (e.value.length >= minBars) StockData(symbol: e.key, bars: e.value),
-    ];
+    return result;
   }
 
   void close() => _db.dispose();

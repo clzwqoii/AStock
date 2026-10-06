@@ -213,18 +213,18 @@ class LogRegModel {
           grad[a] += zi[a] * resid;
         }
         grad[d] += resid;
-        final row = List<double>.filled(k, 0);
+        // XᵀWX 上三角累加。增广行是 [zi..., 1]，不物化 row 数组——
+        // 之前每轮每样本新建 k 元 List（n×迭代 次分配），内容还每轮一样。
+        // 累加顺序与 row 版逐位一致（b2 升序，b2=d 的项在末尾）。
         for (var a = 0; a < d; a++) {
-          row[a] = zi[a];
-        }
-        row[d] = 1;
-        for (var a = 0; a < k; a++) {
-          final ra = row[a] * wgt;
+          final ra = zi[a] * wgt;
           if (ra == 0) continue;
-          for (var b2 = a; b2 < k; b2++) {
-            xtwx[a][b2] += ra * row[b2];
+          for (var b2 = a; b2 < d; b2++) {
+            xtwx[a][b2] += ra * zi[b2];
           }
+          xtwx[a][d] += ra;
         }
+        xtwx[d][d] += wgt;
       }
       for (var a = 0; a < k; a++) {
         for (var b2 = a; b2 < k; b2++) {

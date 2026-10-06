@@ -44,6 +44,12 @@ void main() {
     expect(repo.stockNames()['000001.SZ'], '平安银行');
   });
 
+  test('stockName 单只查询：命中返回名称，未命中返回 null', () {
+    repo.upsertStocks([(tsCode: '000001.SZ', name: '平安银行')]);
+    expect(repo.stockName('000001.SZ'), '平安银行');
+    expect(repo.stockName('999999.SZ'), isNull);
+  });
+
   test('数据库启用 WAL 模式（允许同步写入与选股读取并发）', () {
     final db2 = sqlite3.open('${tmp.path}/test.db');
     try {
@@ -293,4 +299,17 @@ void main() {
     expect(repo.loadAllStocks().single.bars.single.date, expected);
     expect(repo.barsFor('000001.SZ').single.date, expected);
   });
+
+  test('loadAllStocks 跨股票共享同一交易日的 DateTime 实例（内存复用）', () {
+    repo.upsertBars([
+      row('000001.SZ', '20260930'),
+      row('600000.SH', '20260930'),
+    ]);
+    final stocks = repo.loadAllStocks();
+    expect(stocks, hasLength(2));
+    final date1 = stocks.firstWhere((s) => s.symbol == '000001.SZ').bars.single.date;
+    final date2 = stocks.firstWhere((s) => s.symbol == '600000.SH').bars.single.date;
+    expect(identical(date1, date2), isTrue);
+  });
 }
+

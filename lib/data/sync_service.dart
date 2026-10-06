@@ -359,22 +359,37 @@ class SyncService {
     if (fetchers.isEmpty) return;
     var done = 0;
     var got = 0;
-    for (final sym in todo) {
-      for (final fetch in fetchers) {
-        try {
-          final name = await fetch(sym);
-          if (name != null && name.isNotEmpty) {
-            _repo.upsertStocks([(tsCode: sym, name: name)]);
-            got++;
-            break;
+    // 攒批入库：逐只 upsertStocks 是每只一次 BEGIN/COMMIT（一次 fsync），
+    // 全市场 5000+ 只。凑满一批再写，单只结果不变，中断时已拿到的名字
+    // 由 finally 落库（幂等，缺的下轮同步会再补）。
+    final batch = <({String tsCode, String name})>[];
+    void flush() {
+      if (batch.isEmpty) return;
+      _repo.upsertStocks(batch);
+      batch.clear();
+    }
+
+    try {
+      for (final sym in todo) {
+        for (final fetch in fetchers) {
+          try {
+            final name = await fetch(sym);
+            if (name != null && name.isNotEmpty) {
+              batch.add((tsCode: sym, name: name));
+              got++;
+              break;
+            }
+          } catch (_) {
+            // 该源这只失败，尝试下一源。
           }
-        } catch (_) {
-          // 该源这只失败，尝试下一源。
         }
+        done++;
+        if (done % 500 == 0) onProgress?.call('名称回填 $done/${todo.length}');
+        if (batch.length >= 200) flush();
+        await Future.delayed(const Duration(milliseconds: 30));
       }
-      done++;
-      if (done % 500 == 0) onProgress?.call('名称回填 $done/${todo.length}');
-      await Future.delayed(const Duration(milliseconds: 30));
+    } finally {
+      flush();
     }
     onProgress?.call('名称回填完成：$got/${todo.length}');
   }

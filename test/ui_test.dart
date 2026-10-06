@@ -397,6 +397,29 @@ Future<void> scrollTo(WidgetTester tester, Finder finder) =>
   });
 
   group('设置页', () {
+    testWidgets('外层重建后 token 输入不丢：controller 不随 build 重建', (tester) async {
+      Widget pump() => MaterialApp(
+            home: Scaffold(
+              body: SettingsPage(
+                initialToken: 'old',
+                configPath: '${tmp.path}/.env',
+                dbPath: dbPath,
+              ),
+            ),
+          );
+      await tester.pumpWidget(pump());
+      await tester.pump();
+      await tester.enterText(find.byType(TextField), 'typed');
+      await tester.pump();
+
+      await tester.pumpWidget(pump()); // 模拟外层重建（外壳 setState 重建设置页）
+      await tester.pump();
+
+      expect(tester.widget<TextField>(find.byType(TextField)).controller!.text,
+          'typed',
+          reason: 'controller 提升到 State 后，重建不应把输入重置回 initialToken');
+    });
+
     testWidgets('保存 token 到配置文件', (tester) async {
       final envPath = '${tmp.path}/sub/.env';
       var written = <String, String>{};

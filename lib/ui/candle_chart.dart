@@ -11,6 +11,17 @@ import '../core/models.dart';
 import 'candle_chart_math.dart';
 import 'colors.dart';
 
+// ── 配色常量（主图 _CandlePainter 与光标层 _CrosshairPainter 共用） ──
+const _up = AppColors.red;
+const _down = AppColors.down;
+const _maColors = maColors;
+const _difColor = AppColors.text; // DIF 深色实线
+const _deaColor = Color(0xFFF59E0B); // DEA 琥珀（与 MA5 同色系）
+const _kColor = AppColors.text; // K 深色
+const _dColor = Color(0xFFF59E0B); // D 琥珀
+const _jColor = Color(0xFF8B5CF6); // J 紫（与 MA20 同色系）
+const _dim = AppColors.dim;
+
 class CandleChart extends StatefulWidget {
   const CandleChart({super.key, required this.bars, this.maxBars = 120});
 
@@ -101,15 +112,28 @@ class _CandleChartState extends State<CandleChart> {
               child: Stack(
                 fit: StackFit.expand,
                 children: [
+                  // 光标层在下：虚线不盖蜡烛（与单层绘制时的先后一致）。
+                  // 指针每帧移动只重绘这一层（十字线/标签/面板数值）。
                   CustomPaint(
-                    painter: _CandlePainter(
+                    painter: _CrosshairPainter(
                       geo: geo,
                       bars: _visible,
-                      maSeries: _maSeries,
                       macdData: _macd,
                       kdjData: _kdj,
                       activeIndex: _active,
                       pointerY: _pointer?.dy,
+                    ),
+                  ),
+                  // 主图独立成 layer：光标移动不再牵动蜡烛/均线/MACD/KDJ 重绘。
+                  RepaintBoundary(
+                    child: CustomPaint(
+                      painter: _CandlePainter(
+                        geo: geo,
+                        bars: _visible,
+                        maSeries: _maSeries,
+                        macdData: _macd,
+                        kdjData: _kdj,
+                      ),
                     ),
                   ),
                   if (_active != null) _readout(),
@@ -185,6 +209,8 @@ class _CandleChartState extends State<CandleChart> {
       );
 }
 
+/// 主图（静态层）：网格、成交量柱、蜡烛、MA、MACD/KDJ 图形。
+/// 十字光标/表头数值/价格刻度在 [_CrosshairPainter]，指针移动不重绘这一层。
 class _CandlePainter extends CustomPainter {
   _CandlePainter({
     required this.geo,
@@ -192,8 +218,6 @@ class _CandlePainter extends CustomPainter {
     required this.maSeries,
     this.macdData,
     this.kdjData,
-    this.activeIndex,
-    this.pointerY,
   });
 
   final ChartGeometry geo;
@@ -206,21 +230,6 @@ class _CandlePainter extends CustomPainter {
   /// 可见窗口的 KDJ 数据；null（不足 9 根）不画面板内容。
   final ({List<double?> k, List<double?> d, List<double?> j})? kdjData;
 
-  /// 十字光标指向的索引，null 不画。
-  final int? activeIndex;
-  /// 指针 y（横线位置），null 不画。
-  final double? pointerY;
-
-  static const _up = AppColors.red;
-  static const _down = AppColors.down;
-  static const _maColors = maColors;
-  static const _difColor = AppColors.text; // DIF 深色实线
-  static const _deaColor = Color(0xFFF59E0B); // DEA 琥珀（与 MA5 同色系）
-  static const _kColor = AppColors.text; // K 深色
-  static const _dColor = Color(0xFFF59E0B); // D 琥珀
-  static const _jColor = Color(0xFF8B5CF6); // J 紫（与 MA20 同色系）
-  static const _dim = AppColors.dim;
-
   @override
   void paint(Canvas canvas, Size size) {
     if (bars.isEmpty) return;
@@ -228,14 +237,13 @@ class _CandlePainter extends CustomPainter {
     final priceRect = geo.priceRect;
     final volRect = geo.volRect;
 
-    // 网格与右侧价格标签
+    // 网格线（右侧价格刻度文字由光标层画，与价格标签同层）
     final grid = Paint()..color = const Color(0xFFEEF0F4)..strokeWidth = 1;
     final tp = TextPainter(textDirection: TextDirection.ltr);
     for (var i = 0; i <= 2; i++) {
       final p = geo.lo + (geo.hi - geo.lo) * i / 2;
       final y = geo.yForPrice(p);
       canvas.drawLine(Offset(0, y), Offset(priceRect.right, y), grid);
-      _text(canvas, tp, p.toStringAsFixed(2), Offset(priceRect.right + 4, y - 6));
     }
 
     final slot = geo.slot;
@@ -252,31 +260,6 @@ class _CandlePainter extends CustomPainter {
       final color = (b.close >= b.open ? _up : _down).withValues(alpha: 0.55);
       canvas.drawRect(
           Rect.fromLTWH(geo.centerX(i) - bodyW / 2, volRect.bottom - h, bodyW, h), Paint()..color = color);
-    }
-    if (volRect.height > 8) {
-      _panelHeader(canvas, tp, volRect, '成交量',
-          [(formatVolume(bars[_displayIndex].volume), _dim)]);
-    }
-
-    // 十字光标：选中列高亮 → 竖线 → 横线（画在蜡烛下面，避免盖住当日走势）
-    final active = activeIndex;
-    if (active != null && active >= 0 && active < bars.length) {
-      final cx = geo.centerX(active);
-      canvas.drawRect(
-        Rect.fromLTWH(cx - slot / 2, priceRect.top - 4, slot, volRect.bottom - priceRect.top + 4),
-        Paint()..color = AppColors.text.withValues(alpha: 0.05),
-      );
-    }
-    final hair = Paint()
-      ..color = _dim.withValues(alpha: 0.85)
-      ..strokeWidth = 1;
-    if (active != null && active >= 0 && active < bars.length) {
-      _dashed(canvas, Offset(geo.centerX(active), priceRect.top - 4),
-          Offset(geo.centerX(active), volRect.bottom), hair);
-    }
-    if (pointerY != null) {
-      _dashed(canvas, Offset(0, pointerY!), Offset(priceRect.right, pointerY!), hair);
-      _priceTag(canvas, tp, geo.priceForY(pointerY!), pointerY!, size);
     }
 
     // 蜡烛：涨收红、跌收绿（A股惯例，按开收判断阴阳）
@@ -315,8 +298,8 @@ class _CandlePainter extends CustomPainter {
             ..style = PaintingStyle.stroke);
     }
 
-    _paintMacd(canvas, tp, grid);
-    _paintKdj(canvas, tp);
+    _paintMacd(canvas, grid);
+    _paintKdj(canvas);
 
     // 底部日期标签
     if (bars.length > 1) {
@@ -327,7 +310,7 @@ class _CandlePainter extends CustomPainter {
   }
 
   /// MACD 副面板：零轴线 + 红绿柱（国内惯例红正绿负）+ DIF/DEA 线。
-  void _paintMacd(Canvas canvas, TextPainter tp, Paint grid) {
+  void _paintMacd(Canvas canvas, Paint grid) {
     final m = macdData;
     final rect = geo.macdRect;
     if (m == null || rect.height < 8) return;
@@ -354,12 +337,6 @@ class _CandlePainter extends CustomPainter {
     for (final (color, series) in [(_difColor, m.dif), (_deaColor, m.dea)]) {
       _strokeSeries(canvas, series, (i) => yFor(series[i]), color, 1.2);
     }
-    final di = _displayIndex;
-    _panelHeader(canvas, tp, rect, 'MACD', [
-      ('DIF ${m.dif[di].toStringAsFixed(2)}', _difColor),
-      ('DEA ${m.dea[di].toStringAsFixed(2)}', _deaColor),
-      ('MACD ${m.hist[di].toStringAsFixed(2)}', _dim),
-    ]);
   }
 
   /// 逐日折线：跳过 null（KDJ 前 n−1 根无值），与 MA 均线同款画法。
@@ -385,7 +362,7 @@ class _CandlePainter extends CustomPainter {
   }
 
   /// KDJ 副面板：K/D/J 三线（纵轴按可见数据动态伸缩）。
-  void _paintKdj(Canvas canvas, TextPainter tp) {
+  void _paintKdj(Canvas canvas) {
     final k = kdjData;
     final rect = geo.kdjRect;
     if (k == null || rect.height < 8) return;
@@ -408,14 +385,45 @@ class _CandlePainter extends CustomPainter {
     _strokeSeries(canvas, k.k, (i) => yAt(k.k, i), _kColor, 1.2);
     _strokeSeries(canvas, k.d, (i) => yAt(k.d, i), _dColor, 1.2);
     _strokeSeries(canvas, k.j, (i) => yAt(k.j, i), _jColor, 1.1);
-    final di = _displayIndex;
-    final kv = k.k[di], dv = k.d[di], jv = k.j[di];
-    _panelHeader(canvas, tp, rect, 'KDJ', [
-      if (kv != null) ('K ${kv.toStringAsFixed(1)}', _kColor),
-      if (dv != null) ('D ${dv.toStringAsFixed(1)}', _dColor),
-      if (jv != null) ('J ${jv.toStringAsFixed(1)}', _jColor),
-    ]);
   }
+
+  void _bottomDate(Canvas canvas, TextPainter tp, DateTime date, double x, Size size) {
+    _drawText(canvas, tp, dateLabel(date), Offset(x, size.height - 16));
+  }
+
+  @override
+  bool shouldRepaint(_CandlePainter oldDelegate) =>
+      oldDelegate.bars != bars ||
+      oldDelegate.macdData != macdData ||
+      oldDelegate.kdjData != kdjData ||
+      oldDelegate.geo.lo != geo.lo ||
+      oldDelegate.geo.hi != geo.hi ||
+      oldDelegate.geo.size != geo.size;
+}
+
+// ── 光标层与共享绘制工具 ──────────────────────────────────────
+
+/// 十字光标层：价格刻度、选中列高亮、十字虚线、价格标签、三个面板的表头。
+/// 单独成层（叠在主图下方）让指针每帧移动只重绘这些元素，蜡烛/均线不动。
+class _CrosshairPainter extends CustomPainter {
+  _CrosshairPainter({
+    required this.geo,
+    required this.bars,
+    this.macdData,
+    this.kdjData,
+    this.activeIndex,
+    this.pointerY,
+  });
+
+  final ChartGeometry geo;
+  final List<Bar> bars;
+  final ({List<double> dif, List<double> dea, List<double> hist})? macdData;
+  final ({List<double?> k, List<double?> d, List<double?> j})? kdjData;
+
+  /// 十字光标指向的索引，null 不画。
+  final int? activeIndex;
+  /// 指针 y（横线位置），null 不画。
+  final double? pointerY;
 
   /// 数值行所指的 K 线：十字光标激活时跟随光标，否则显示最后一根。
   int get _displayIndex {
@@ -423,73 +431,132 @@ class _CandlePainter extends CustomPainter {
     return (a != null && a >= 0 && a < bars.length) ? a : bars.length - 1;
   }
 
-  /// 面板顶部行：左侧标题 + 右侧数值段（从右往左排，各段独立着色，与系列同色）。
-  void _panelHeader(
-      Canvas canvas, TextPainter tp, Rect rect, String title, List<(String, Color)> values) {
-    _text(canvas, tp, title, Offset(4, rect.top + 2));
-    var x = rect.right - 4;
-    for (final (text, color) in values.reversed) {
-      tp.text = TextSpan(text: text, style: TextStyle(fontSize: 10, color: color));
-      tp.layout();
-      x -= tp.width;
-      tp.paint(canvas, Offset(x, rect.top + 2));
-      x -= 10;
+  @override
+  void paint(Canvas canvas, Size size) {
+    if (bars.isEmpty) return;
+    final priceRect = geo.priceRect;
+    final volRect = geo.volRect;
+    final tp = TextPainter(textDirection: TextDirection.ltr);
+
+    // 右侧价格刻度（与价格标签同层，指针处的标签才能压住刻度文字）
+    for (var i = 0; i <= 2; i++) {
+      final p = geo.lo + (geo.hi - geo.lo) * i / 2;
+      final y = geo.yForPrice(p);
+      _drawText(canvas, tp, p.toStringAsFixed(2), Offset(priceRect.right + 4, y - 6));
     }
-  }
 
-  /// 横线右侧的价格标签（白底，压在价格刻度左侧）。
-  void _priceTag(Canvas canvas, TextPainter tp, double price, double y, Size size) {
-    final t = TextPainter(
-      text: TextSpan(
-        text: price.toStringAsFixed(2),
-        style: const TextStyle(fontSize: 10, color: AppColors.text),
-      ),
-      textDirection: TextDirection.ltr,
-    )..layout();
-    final left = geo.priceRect.right + 4;
-    final top = (y - t.height / 2).clamp(0.0, size.height - t.height);
-    canvas.drawRRect(
-      RRect.fromRectAndRadius(
-          Rect.fromLTWH(left, top, ChartGeometry.labelW - 8, t.height + 2), const Radius.circular(3)),
-      Paint()..color = Colors.white,
-    );
-    t.paint(canvas, Offset(left + 3, top + 1));
-  }
-
-  void _dashed(Canvas canvas, Offset a, Offset b, Paint paint,
-      {double dash = 5, double gap = 4}) {
-    final dx = b.dx - a.dx;
-    final dy = b.dy - a.dy;
-    final len = math.sqrt(dx * dx + dy * dy);
-    if (len == 0) return;
-    final ux = dx / len;
-    final uy = dy / len;
-    var d = 0.0;
-    while (d < len) {
-      final e = math.min(d + dash, len);
-      canvas.drawLine(Offset(a.dx + ux * d, a.dy + uy * d), Offset(a.dx + ux * e, a.dy + uy * e), paint);
-      d = e + gap;
+    // 十字光标：选中列高亮 → 竖虚线 → 横虚线（主图在其上层，不盖蜡烛）
+    final active = activeIndex;
+    final slot = geo.slot;
+    if (active != null && active >= 0 && active < bars.length) {
+      final cx = geo.centerX(active);
+      canvas.drawRect(
+        Rect.fromLTWH(cx - slot / 2, priceRect.top - 4, slot, volRect.bottom - priceRect.top + 4),
+        Paint()..color = AppColors.text.withValues(alpha: 0.05),
+      );
     }
-  }
+    final hair = Paint()
+      ..color = _dim.withValues(alpha: 0.85)
+      ..strokeWidth = 1;
+    if (active != null && active >= 0 && active < bars.length) {
+      _drawDashed(canvas, Offset(geo.centerX(active), priceRect.top - 4),
+          Offset(geo.centerX(active), volRect.bottom), hair);
+    }
+    if (pointerY != null) {
+      _drawDashed(canvas, Offset(0, pointerY!), Offset(priceRect.right, pointerY!), hair);
+      _drawPriceTag(canvas, geo, geo.priceForY(pointerY!), pointerY!, size);
+    }
 
-  void _bottomDate(Canvas canvas, TextPainter tp, DateTime date, double x, Size size) {
-    _text(canvas, tp, dateLabel(date), Offset(x, size.height - 16));
-  }
-
-  void _text(Canvas canvas, TextPainter tp, String text, Offset offset, {Color? color}) {
-    tp.text = TextSpan(text: text, style: TextStyle(fontSize: 10, color: color ?? _dim));
-    tp.layout();
-    tp.paint(canvas, offset);
+    // 面板表头（数值跟随光标指向的 K 线）
+    if (volRect.height > 8) {
+      _drawPanelHeader(canvas, tp, volRect, '成交量',
+          [(formatVolume(bars[_displayIndex].volume), _dim)]);
+    }
+    final m = macdData;
+    if (m != null && geo.macdRect.height >= 8) {
+      final di = _displayIndex;
+      _drawPanelHeader(canvas, tp, geo.macdRect, 'MACD', [
+        ('DIF ${m.dif[di].toStringAsFixed(2)}', _difColor),
+        ('DEA ${m.dea[di].toStringAsFixed(2)}', _deaColor),
+        ('MACD ${m.hist[di].toStringAsFixed(2)}', _dim),
+      ]);
+    }
+    final k = kdjData;
+    if (k != null && geo.kdjRect.height >= 8) {
+      final di = _displayIndex;
+      final kv = k.k[di], dv = k.d[di], jv = k.j[di];
+      _drawPanelHeader(canvas, tp, geo.kdjRect, 'KDJ', [
+        if (kv != null) ('K ${kv.toStringAsFixed(1)}', _kColor),
+        if (dv != null) ('D ${dv.toStringAsFixed(1)}', _dColor),
+        if (jv != null) ('J ${jv.toStringAsFixed(1)}', _jColor),
+      ]);
+    }
   }
 
   @override
-  bool shouldRepaint(_CandlePainter oldDelegate) =>
-      oldDelegate.bars != bars ||
+  bool shouldRepaint(_CrosshairPainter oldDelegate) =>
       oldDelegate.activeIndex != activeIndex ||
       oldDelegate.pointerY != pointerY ||
+      oldDelegate.bars != bars ||
       oldDelegate.macdData != macdData ||
       oldDelegate.kdjData != kdjData ||
       oldDelegate.geo.lo != geo.lo ||
       oldDelegate.geo.hi != geo.hi ||
       oldDelegate.geo.size != geo.size;
+}
+
+/// 画一行小字（价格刻度、日期、面板表头共用）。
+void _drawText(Canvas canvas, TextPainter tp, String text, Offset offset, {Color? color}) {
+  tp.text = TextSpan(text: text, style: TextStyle(fontSize: 10, color: color ?? _dim));
+  tp.layout();
+  tp.paint(canvas, offset);
+}
+
+/// 横线右侧的价格标签（白底，压在价格刻度左侧）。
+void _drawPriceTag(Canvas canvas, ChartGeometry geo, double price, double y, Size size) {
+  final t = TextPainter(
+    text: TextSpan(
+      text: price.toStringAsFixed(2),
+      style: const TextStyle(fontSize: 10, color: AppColors.text),
+    ),
+    textDirection: TextDirection.ltr,
+  )..layout();
+  final left = geo.priceRect.right + 4;
+  final top = (y - t.height / 2).clamp(0.0, size.height - t.height);
+  canvas.drawRRect(
+    RRect.fromRectAndRadius(
+        Rect.fromLTWH(left, top, ChartGeometry.labelW - 8, t.height + 2), const Radius.circular(3)),
+    Paint()..color = Colors.white,
+  );
+  t.paint(canvas, Offset(left + 3, top + 1));
+}
+
+void _drawDashed(Canvas canvas, Offset a, Offset b, Paint paint,
+    {double dash = 5, double gap = 4}) {
+  final dx = b.dx - a.dx;
+  final dy = b.dy - a.dy;
+  final len = math.sqrt(dx * dx + dy * dy);
+  if (len == 0) return;
+  final ux = dx / len;
+  final uy = dy / len;
+  var d = 0.0;
+  while (d < len) {
+    final e = math.min(d + dash, len);
+    canvas.drawLine(Offset(a.dx + ux * d, a.dy + uy * d), Offset(a.dx + ux * e, a.dy + uy * e), paint);
+    d = e + gap;
+  }
+}
+
+/// 面板顶部行：左侧标题 + 右侧数值段（从右往左排，各段独立着色，与系列同色）。
+void _drawPanelHeader(
+    Canvas canvas, TextPainter tp, Rect rect, String title, List<(String, Color)> values) {
+  _drawText(canvas, tp, title, Offset(4, rect.top + 2));
+  var x = rect.right - 4;
+  for (final (text, color) in values.reversed) {
+    tp.text = TextSpan(text: text, style: TextStyle(fontSize: 10, color: color));
+    tp.layout();
+    x -= tp.width;
+    tp.paint(canvas, Offset(x, rect.top + 2));
+    x -= 10;
+  }
 }

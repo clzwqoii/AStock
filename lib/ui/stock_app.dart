@@ -95,6 +95,41 @@ class _StockAppState extends State<StockApp> {
   /// 是否正在重算回测报告（同步到新数据后自动触发）。
   bool _refreshingReport = false;
 
+  /// 主题缓存：ColorScheme.fromSeed 走 HCT 推导、ThemeData 又要派生全部组件主题，
+  /// 都不便宜；外壳每次 setState（同步进度、回测完成）都会过一遍 build。
+  /// 主题只随强调色变化，缓存到 [_themeAccent] 不匹配为止。
+  late final ColorScheme _scheme = ColorScheme.fromSeed(seedColor: AppColors.seed);
+  ThemeData? _theme;
+  AccentColor? _themeAccent;
+
+  ThemeData get _currentTheme {
+    if (_theme != null && _themeAccent == _accent) return _theme!;
+    final accent = _accent.color;
+    _theme = ThemeData(
+      colorScheme: _scheme,
+      scaffoldBackgroundColor: AppColors.bg,
+      appBarTheme: const AppBarTheme(
+        backgroundColor: Colors.white,
+        surfaceTintColor: Colors.transparent,
+        elevation: 0,
+        shape: Border(bottom: BorderSide(color: AppColors.border)),
+      ),
+      tabBarTheme: TabBarThemeData(
+        labelColor: accent,
+        unselectedLabelColor: AppColors.dim,
+        indicatorColor: accent,
+      ),
+      filledButtonTheme: FilledButtonThemeData(
+        style: FilledButton.styleFrom(
+          backgroundColor: accent,
+          foregroundColor: Colors.white,
+        ),
+      ),
+    );
+    _themeAccent = _accent;
+    return _theme!;
+  }
+
   @override
   void initState() {
     super.initState();
@@ -295,34 +330,12 @@ class _StockAppState extends State<StockApp> {
 
   @override
   Widget build(BuildContext context) {
-    final accent = _accent.color;
-    final scheme = ColorScheme.fromSeed(seedColor: AppColors.seed);
     return AccentScope(
-      color: accent,
+      color: _accent.color,
       child: MaterialApp(
         navigatorKey: _navigatorKey,
         title: 'A股选股',
-        theme: ThemeData(
-          colorScheme: scheme,
-          scaffoldBackgroundColor: AppColors.bg,
-          appBarTheme: const AppBarTheme(
-            backgroundColor: Colors.white,
-            surfaceTintColor: Colors.transparent,
-            elevation: 0,
-            shape: Border(bottom: BorderSide(color: AppColors.border)),
-          ),
-          tabBarTheme: TabBarThemeData(
-            labelColor: accent,
-            unselectedLabelColor: AppColors.dim,
-            indicatorColor: accent,
-          ),
-          filledButtonTheme: FilledButtonThemeData(
-            style: FilledButton.styleFrom(
-              backgroundColor: accent,
-              foregroundColor: Colors.white,
-            ),
-          ),
-        ),
+        theme: _currentTheme,
         home: Builder(
           builder: (ctx) {
             // 窄屏（手机）走移动原生布局，宽屏（桌面）走工作台。

@@ -461,7 +461,7 @@ Future<StockDetail?> loadStockDetail(String dbPath, String symbol) async {
     final stock = StockData(symbol: symbol, bars: bars);
     return StockDetail(
       symbol: symbol,
-      name: repo.stockNames()[symbol],
+      name: repo.stockName(symbol),
       bars: bars,
       snapshot: IndicatorSnapshot.fromStock(stock),
     );
