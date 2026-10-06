@@ -47,8 +47,13 @@ Future<void> _pump(WidgetTester tester, {ExportCsvFn? exportCsv}) async {
       child: Scaffold(
         body: ScreeningPage(
           dbPath: '/tmp/stock-test/stock.db',
-          screenFn: (dbPath, rules) async =>
-              (total: 100, picked: _rows(), dataDate: '20260930'),
+          screenFn: (dbPath, rules) async => (
+            total: 100,
+            picked: _rows(),
+            dataDate: '20260930',
+            blockedStale: 0,
+            blockedCorporateAction: 0,
+          ),
           exportCsv: exportCsv,
         ),
       ),
@@ -137,8 +142,13 @@ void main() {
         child: Scaffold(
           body: ScreeningPage(
             dbPath: '/tmp/stock-test/stock.db',
-            screenFn: (dbPath, rules) async =>
-                (total: 0, picked: <ScreenRow>[], dataDate: null),
+            screenFn: (dbPath, rules) async => (
+              total: 0,
+              picked: <ScreenRow>[],
+              dataDate: null,
+              blockedStale: 0,
+              blockedCorporateAction: 0,
+            ),
           ),
         ),
       ),

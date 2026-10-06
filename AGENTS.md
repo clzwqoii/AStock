@@ -39,6 +39,8 @@ export PUB_HOSTED_URL=https://pub.flutter-io.cn FLUTTER_STORAGE_BASE_URL=https:/
 
 ## 开发规则
 
+0. **行情数据的两处口径卫生（2026-10-06 起，改动选股/回测必须遵守）**：库内是不复权价，除权日会留下永久价位断层。判定一律走 `lib/core/market.dart` 的 `isCorporateActionGap` / `isCleanSignalDay`（按代码判涨跌停幅度），**不要在别处另写一套跳空阈值**。除权护栏在 `screener` / `backtestRule` / `baseline` / `backtestAll` / `tool/train_score.dart` 五处共用；新鲜度护栏（末根滞后 30 天）只在 `screener`，**不得加进回测**（那是存活者偏差）。口径数字与取舍见 `docs/project-structure.md`「数据卫生护栏」节
+
 1. **TDD 强制**：core/data 层任何新逻辑先写失败测试再实现；指标期望值必须来自独立 oracle（`test/fixtures.dart` 顶部注释记录了 python 基准值），不允许用实现自身算期望值
 2. **Widget 测试注意**：flutter_test 的 testWidgets 主体在 FakeAsync 区，真实 IO 与 Isolate.run 的完成事件永远等不到——临时目录一律在 setUp 建；页面把引擎调用/文件写入/同步都做成可注入参数（screenFn/writeConfig/runSyncFn），测试注入假实现；TextField 光标闪烁会让 pumpAndSettle 永不收敛，改用固定步进 pump
 3. 新增指标/规则时：实现 + 测试 + 同步登记到 `builtInRules` + 更新 `docs/project-structure.md`

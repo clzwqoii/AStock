@@ -182,6 +182,57 @@ void main() {
     expect(repo.maxTradeDate(), '20261005');
     repo.close();
   });
+  test('runBackfillSync 强制区间补拉：fromDate 早于水位线的日期也能补上', () async {
+    // 库内水位 20261002；增量模式只会拉它之后的日期。
+    // 区间模式必须把 fromDate(20260926) 起的水位线之前日期也拉回来——
+    // 这正是手机端「首轮回填没跑成、之后永远补不回历史」的解药。
+    seedStocks(dbPath);
+    dailySeen.clear();
+    http.Response resp(List<String> fields, List<List<dynamic>> items) =>
+        http.Response.bytes(
+          utf8.encode(jsonEncode({
+            'code': 0,
+            'data': {'fields': fields, 'items': items},
+          })),
+          200,
+        );
+    final client = TushareClient(
+      token: 'tok',
+      http: MockClient((req) async {
+        final api =
+            (jsonDecode(req.body) as Map<String, dynamic>)['api_name'] as String;
+        switch (api) {
+          case 'trade_cal':
+            return resp(['cal_date', 'is_open'], [
+              for (final d in ['20260925', '20260928', '20260929', '20261007', '20261008'])
+                [d, '1'],
+            ]);
+          case 'daily':
+            final td = ((jsonDecode(req.body)
+                as Map<String, dynamic>)['params'] as Map)['trade_date'] as String;
+            dailySeen.add(td);
+            return resp(
+              ['ts_code', 'trade_date', 'open', 'high', 'low', 'close', 'vol', 'amount'],
+              [['S1.SH', td, 1.0, 1.0, 1.0, 1.0, 100.0, 10.0]],
+            );
+          default:
+            return resp(['ts_code', 'name'], []);
+        }
+      }),
+    );
+    final r = await runBackfillSync(
+      dbPath: dbPath,
+      token: 'tok',
+      fromDate: '20260926',
+      now: () => DateTime(2026, 10, 8, 18),
+      clientFactory: (_) => client,
+      rateDelay: Duration.zero,
+    );
+    // 9/28、9/29 都 ≤ 水位线 20261002：增量永远给不了，区间模式必须补上
+    expect(r.dates, 4);
+    expect(dailySeen, contains('20260928'));
+    expect([for (final d in dailySeen) if (d.compareTo('20260926') < 0) d], isEmpty);
+  });
 }
 
 final dailySeen = <String>[];

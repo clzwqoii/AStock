@@ -116,4 +116,187 @@ void main() {
       expect(screenWithHits(stocks, rules).map((h) => h.stock.symbol), ['BO']);
     });
   });
+
+  group('新鲜度护栏', () {
+    // 指定末根日期造序列（其余每日 -1 天），末根放量以命中 volume_surge。
+    StockData dated(
+      String symbol,
+      DateTime lastDate, {
+      int bars = 30,
+      double lastVolume = 300,
+    }) =>
+        StockData(
+          symbol: symbol,
+          bars: [
+            for (var i = 0; i < bars; i++)
+              Bar(
+                date: lastDate.subtract(Duration(days: bars - 1 - i)),
+                open: 10,
+                high: 11,
+                low: 9.9,
+                close: i == bars - 1 ? 10.5 : 10.0,
+                volume: i == bars - 1 ? lastVolume : 100,
+              ),
+          ],
+        );
+
+    final today = DateTime(2024, 1, 1);
+
+    test('末根滞后池内最大交易日超过 maxLastBarLagDays 直接出池', () {
+      final all = [
+        dated('FOSSIL', DateTime(2023, 1, 1)), // 滞后 366 天
+        dated('FRESH', today),
+      ];
+      expect(screenWithHits(all, [volume]).map((h) => h.stock.symbol), ['FRESH']);
+      // 关掉护栏才复现旧口径
+      expect(
+        screenWithHits(all, [volume], maxLastBarLagDays: 0)
+            .map((h) => h.stock.symbol)
+            .toList()
+          ..sort(),
+        ['FOSSIL', 'FRESH'],
+      );
+    });
+
+    test('滞后在阈值之内（停牌几天）仍然保留', () {
+      final all = [
+        dated('SUSPENDED', today.subtract(const Duration(days: 5))),
+        dated('FRESH', today),
+      ];
+      expect(
+        screenWithHits(all, [volume]).map((h) => h.stock.symbol).toList()..sort(),
+        ['FRESH', 'SUSPENDED'],
+      );
+    });
+  });
+
+  group('除权/复牌护栏', () {
+    test('信号日落在除权后 20 根内不出信号', () {
+      // 前 30 根收 10.0，第 30 根（下标 30）主板除权（开盘 7.7 = -23%），
+      // 之后停在新价位，末根放量以命中 volume_surge。
+      final bars = [
+        for (var i = 0; i < 40; i++)
+          i < 30
+              ? kbar(close: 10.0)
+              : kbar(open: 7.7, high: 7.8, low: 7.6, close: 7.75,
+                  volume: i == 39 ? 300 : 100),
+      ];
+      final hit = StockData(symbol: 'EXDIV', bars: bars);
+      expect(screenWithHits([hit], [volume]).map((h) => h.stock.symbol), isEmpty);
+      // 关掉护栏（lookbackBars=0）就复现旧口径：能选出来
+      expect(
+        screenWithHits([hit], [volume], corporateActionLookbackBars: 0)
+            .map((h) => h.stock.symbol),
+        ['EXDIV'],
+      );
+    });
+
+    test('除权满 20 根之后恢复正常选股', () {
+      // 同样的除权，但信号日距除权已 25 根
+      final bars = [
+        for (var i = 0; i < 56; i++)
+          i < 30
+              ? kbar(close: 10.0)
+              : kbar(open: 7.7, high: 7.8, low: 7.6, close: 7.75,
+                  volume: i == 55 ? 300 : 100),
+      ];
+      expect(
+        screenWithHits([StockData(symbol: 'EXDIV', bars: bars)], [volume])
+            .map((h) => h.stock.symbol),
+        ['EXDIV'],
+      );
+    });
+  });
+
+  group('screenDiagnostics 计数', () {
+    // 30 根 10.0 且末根 +5%、放量 → 命中 volume_surge；日期统一取 2024-01-01。
+    StockData fresh() => stockOf(
+          [...List.filled(39, 10.0), 10.5],
+          symbol: 'FRESH',
+          lastVolume: 300,
+        );
+
+    test('无护栏阻挡时两个计数都是 0', () {
+      final d = screenDiagnostics([fresh()], [volume]);
+      expect(d.hits.single.stock.symbol, 'FRESH');
+      expect(d.blockedStale, 0);
+      expect(d.blockedCorporateAction, 0);
+    });
+
+    test('只数"本来会入选"的：不中规则的陈旧票不计入', () {
+      // 同样陈旧，但末根不放量 → volume_surge 不命中，不该被算成"挡掉的假信号"
+      final staleNoHit = StockData(
+        symbol: 'STALE_NOHIT',
+        bars: [
+          for (var i = 0; i < 30; i++)
+            Bar(
+              date: DateTime(2023, 1, 1).add(Duration(days: i)),
+              open: 10,
+              high: 11,
+              low: 9.9,
+              close: 10.0,
+              volume: 100,
+            ),
+        ],
+      );
+      final d = screenDiagnostics([fresh(), staleNoHit], [volume]);
+      expect(d.hits.map((h) => h.stock.symbol), ['FRESH']);
+      expect(d.blockedStale, 0, reason: '本来就不会入选的陈旧票不该计入');
+    });
+
+    test('陈旧且本来会入选 → 计入 blockedStale', () {
+      final staleHit = StockData(
+        symbol: 'STALE_HIT',
+        bars: [
+          for (var i = 0; i < 30; i++)
+            Bar(
+              date: DateTime(2023, 1, 1).add(Duration(days: i)),
+              open: 10,
+              high: 11,
+              low: 9.9,
+              close: i == 29 ? 10.5 : 10.0,
+              volume: i == 29 ? 300 : 100,
+            ),
+        ],
+      );
+      final d = screenDiagnostics([fresh(), staleHit], [volume]);
+      expect(d.hits.map((h) => h.stock.symbol), ['FRESH']);
+      expect(d.blockedStale, 1);
+      expect(d.blockedCorporateAction, 0);
+    });
+
+    test('除权污染窗口内且本来会入选 → 计入 blockedCorporateAction', () {
+      final bars = [
+        for (var i = 0; i < 40; i++)
+          i < 30
+              ? kbar(close: 10.0)
+              : kbar(open: 7.7, high: 7.8, low: 7.6, close: 7.75,
+                  volume: i == 39 ? 300 : 100),
+      ];
+      final d =
+          screenDiagnostics([StockData(symbol: 'EXDIV', bars: bars)], [volume]);
+      expect(d.hits, isEmpty);
+      expect(d.blockedCorporateAction, 1);
+      expect(d.blockedStale, 0);
+    });
+
+    test('关掉护栏后计数归零、结果回到旧口径', () {
+      final bars = [
+        for (var i = 0; i < 40; i++)
+          i < 30
+              ? kbar(close: 10.0)
+              : kbar(open: 7.7, high: 7.8, low: 7.6, close: 7.75,
+                  volume: i == 39 ? 300 : 100),
+      ];
+      final d = screenDiagnostics(
+        [StockData(symbol: 'EXDIV', bars: bars)],
+        [volume],
+        maxLastBarLagDays: 0,
+        corporateActionLookbackBars: 0,
+      );
+      expect(d.hits.map((h) => h.stock.symbol), ['EXDIV']);
+      expect(d.blockedStale, 0);
+      expect(d.blockedCorporateAction, 0);
+    });
+  });
 }

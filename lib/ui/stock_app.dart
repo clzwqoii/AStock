@@ -9,6 +9,7 @@ import 'dart:io' show Platform;
 import '../app_logic.dart';
 import '../core/backtest.dart';
 import '../config.dart';
+import '../data/sync_service.dart' show SyncResult, backfillFromDate;
 import '../net_diag.dart';
 import '../update_download.dart';
 import '../update_notice.dart';
@@ -24,6 +25,7 @@ class StockApp extends StatefulWidget {
     super.key,
     required this.config,
     this.runSyncFn = runSync,
+    this.runBackfillFn = runBackfillSync,
     this.runBacktestFn = runBacktest,
     this.persistAccent,
     this.screenFn,
@@ -37,6 +39,9 @@ class StockApp extends StatefulWidget {
 
   /// 供测试注入假同步；生产用默认实现。
   final RunSyncFn runSyncFn;
+
+  /// 回补历史同步；测试注入假实现，生产用 [runBackfillSync]。
+  final RunBackfillFn runBackfillFn;
 
   /// 重算回测报告；测试可注入假实现，避免真跑 30~50 秒。
   final Future<BacktestReport> Function(String dbPath, {String? reportPath})
@@ -163,7 +168,40 @@ class _StockAppState extends State<StockApp> {
   }
 
   /// 增量同步：只拉本地缺的交易日，库里数据齐全时接口调用为 0。
-  Future<void> _startSync() async {
+  Future<void> _startSync() => _runSync(
+        doneLabel: '同步完成',
+        failLabel: '同步',
+        task: () => widget.runSyncFn(
+          dbPath: _config.dbPath,
+          token: _config.tushareToken,
+          onProgress: (m) {
+            if (mounted) setState(() => _syncMsg = '同步中：$m');
+          },
+        ),
+      );
+
+  /// 回补历史：绕过水位线从所选年数前强制重拉。手机首次回填没跑成时，
+  /// 历史深度只能靠这条路补（增量永远只拉水位线之后的日期）。
+  Future<void> _startBackfill(int years) => _runSync(
+        doneLabel: '回补完成',
+        failLabel: '回补',
+        task: () => widget.runBackfillFn(
+          dbPath: _config.dbPath,
+          token: _config.tushareToken,
+          fromDate: backfillFromDate(DateTime.now(), years),
+          onProgress: (m) {
+            if (mounted) setState(() => _syncMsg = '回补中：$m');
+          },
+        ),
+      );
+
+  /// 增量与回补共用的执行骨架：互斥守卫、进度透传、完成/失败消息、
+  /// 有新增数据（或报告缺失）就重算回测报告。
+  Future<void> _runSync({
+    required String doneLabel,
+    required String failLabel,
+    required Future<SyncResult> Function() task,
+  }) async {
     if (_syncing) return;
     if (_config.tushareToken.isEmpty) {
       setState(() => _syncMsg = '未配置 token：请打开设置输入并保存');
@@ -174,23 +212,19 @@ class _StockAppState extends State<StockApp> {
       _syncMsg = null;
     });
     try {
-      final r = await widget.runSyncFn(
-        dbPath: _config.dbPath,
-        token: _config.tushareToken,
-        onProgress: (m) {
-          if (mounted) setState(() => _syncMsg = '同步中：$m');
-        },
-      );
+      final r = await task();
       if (!mounted) return;
       setState(() {
-        _syncMsg = '同步完成：新增 ${r.dates} 个交易日、${r.rows} 行（数据齐全时为 0）';
+        _syncMsg = '$doneLabel：新增 ${r.dates} 个交易日、${r.rows} 行（数据齐全时为 0）';
         _syncedDate = r.latestDate ?? _syncedDate;
       });
-      // 有新增数据就重算回测报告，否则选股页规则列表上的胜率还是上周的。
-      if (r.rows > 0) _refreshReport();
+      // 有新增数据就重算回测报告，否则选股页规则列表上的胜率还是上周的；
+      // 报告缺失（手机首次安装、从没跑过回测）时也要补算——规则排序、
+      // 胜率统计行、评分与目标/止损价全都依赖这份报告。
+      if (r.rows > 0 || _report == null) _refreshReport();
     } catch (e) {
       if (!mounted) return;
-      setState(() => _syncMsg = '同步失败：${describeSyncError(e)}');
+      setState(() => _syncMsg = '$failLabel失败：${describeSyncError(e)}');
     } finally {
       if (mounted) setState(() => _syncing = false);
     }
@@ -237,6 +271,7 @@ class _StockAppState extends State<StockApp> {
             syncing: _syncing,
             syncMsg: _syncMsg,
             onSyncPressed: _startSync,
+            onBackfillPressed: _startBackfill,
             accent: _accent,
             onAccentChanged: _setAccent,
             launchUrl: widget.launchUrl,
@@ -302,6 +337,7 @@ class _StockAppState extends State<StockApp> {
                 accent: _accent,
                 onAccentChanged: _setAccent,
                 onSyncPressed: _startSync,
+                onBackfillPressed: _startBackfill,
                 configPath: _configPath,
                 initialToken: _config.tushareToken,
                 launchUrl: widget.launchUrl,

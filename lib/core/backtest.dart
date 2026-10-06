@@ -7,6 +7,7 @@ library;
 
 import 'dart:math' as math;
 
+import 'market.dart';
 import 'models.dart';
 import 'rules.dart';
 
@@ -324,10 +325,21 @@ int evaluableDays(int barCount, int forwardDays) {
 ///
 /// 快照只用 `bars[0..t]` 构造（见 [IndicatorSeries]），因此**不存在前瞻偏差**。
 /// 同一只股票可能在多个日期重复出信号，信号之间不独立。
+///
+/// [corporateActionLookbackBars] 是除权/复牌护栏的回溯根数，默认
+/// [kCorporateActionLookbackBars]，与选股入口（`screener`）共用同一份判定——
+/// 库内是不复权价，除权日的价位断层会把指标砸成假信号，那些日子在选股侧
+/// 本来就不会出现；回测若还统计它们，报告与用户实际看到的结果就不同源。
+/// 传 0 关闭（用于复现 2026-10-06 之前的口径做对照）。
+///
+/// **这里刻意没有"末根必须最新"过滤**：逐日回放里那等于要求这只票活到数据
+/// 末尾，是未来信息（存活者偏差），会让回测系统性偏乐观。选股侧要它、
+/// 回测侧不要，这个不对称是故意的。
 BacktestResult backtestRule(
   List<StockData> stocks,
   Rule rule, {
   required int forwardDays,
+  int corporateActionLookbackBars = kCorporateActionLookbackBars,
 }) {
   if (forwardDays <= 0) {
     throw ArgumentError('forwardDays 必须为正，实际 $forwardDays');
@@ -337,8 +349,13 @@ BacktestResult backtestRule(
     final bars = stock.bars;
     if (evaluableDays(bars.length, forwardDays) == 0) continue;
     final series = IndicatorSeries.from(bars);
+    final sinceGap = barsSinceCorporateAction(stock.symbol, bars);
     final lastEval = bars.length - 1 - forwardDays;
     for (var t = IndicatorSnapshot.minBars; t <= lastEval; t++) {
+      if (corporateActionLookbackBars > 0 &&
+          sinceGap[t] < corporateActionLookbackBars) {
+        continue;
+      }
       if (!rule.test(series.at(t))) continue;
       final from = bars[t].close, to = bars[t + forwardDays].close;
       outcomes.add(SignalOutcome(
@@ -354,7 +371,14 @@ BacktestResult backtestRule(
 
 /// 与 [backtestRule] 覆盖同一批可评估日，但不做任何规则过滤，
 /// 统计所有可评估日的前瞻收益，作为 base rate。
-Baseline baseline(List<StockData> stocks, {required int forwardDays}) {
+///
+/// 除权护栏必须与 [backtestRule] 一致：只滤信号不滤基准，等于让信号从
+/// "干净日子"里选、基准还含污染日，对比反而失真。
+Baseline baseline(
+  List<StockData> stocks, {
+  required int forwardDays,
+  int corporateActionLookbackBars = kCorporateActionLookbackBars,
+}) {
   if (forwardDays <= 0) {
     throw ArgumentError('forwardDays 必须为正，实际 $forwardDays');
   }
@@ -362,8 +386,13 @@ Baseline baseline(List<StockData> stocks, {required int forwardDays}) {
   for (final stock in stocks) {
     final bars = stock.bars;
     if (evaluableDays(bars.length, forwardDays) == 0) continue;
+    final sinceGap = barsSinceCorporateAction(stock.symbol, bars);
     final lastEval = bars.length - 1 - forwardDays;
     for (var t = IndicatorSnapshot.minBars; t <= lastEval; t++) {
+      if (corporateActionLookbackBars > 0 &&
+          sinceGap[t] < corporateActionLookbackBars) {
+        continue;
+      }
       returns.add((bars[t + forwardDays].close / bars[t].close - 1) * 100);
     }
   }
@@ -556,6 +585,7 @@ BacktestReport backtestAll(
   List<StockData> stocks,
   List<Rule> rules, {
   required List<int> horizons,
+  int corporateActionLookbackBars = kCorporateActionLookbackBars,
 }) {
   if (horizons.isEmpty) throw ArgumentError('horizons 不能为空');
   final hs = [...horizons]..sort();
@@ -587,8 +617,15 @@ BacktestReport backtestAll(
     // 可评估日统一取最大持有期的范围，保证三个持有期覆盖同一批交易日、彼此可比。
     if (bars.length < IndicatorSnapshot.minBars + maxH) continue;
     final series = IndicatorSeries.from(bars);
+    // 除权/复牌护栏：污染日整日跳过——基准与信号一并剔除，两侧始终覆盖
+    // 同一批可评估日（否则"信号从干净日里选、基准还含污染日"会失真）。
+    final sinceGap = barsSinceCorporateAction(stock.symbol, bars);
     final lastEval = bars.length - 1 - maxH;
     for (var t = IndicatorSnapshot.minBars; t <= lastEval; t++) {
+      if (corporateActionLookbackBars > 0 &&
+          sinceGap[t] < corporateActionLookbackBars) {
+        continue;
+      }
       final from = bars[t].close;
       final year = bars[t].date.year;
       final mk = '${bars[t].date.year}-${bars[t].date.month.toString().padLeft(2, '0')}';

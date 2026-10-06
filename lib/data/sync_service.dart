@@ -22,6 +22,14 @@ class SyncResult {
   final String? latestDate;
 }
 
+/// 回补历史的区间下界：今天往前推 [years] 个日历年（`YYYYMMDD`，闭区间）。
+/// 2/29 回补 1 年会滚到 3/1——区间模式只要求"约一年前"，无需精确日。
+String backfillFromDate(DateTime now, int years) {
+  final d = DateTime(now.year - years, now.month, now.day);
+  String p2(int v) => v.toString().padLeft(2, '0');
+  return '${d.year}${p2(d.month)}${p2(d.day)}';
+}
+
 /// 同步规则：
 /// - 首次（空库）回填最近 [backfillDays] 个交易日；
 /// - 之后只拉「已同步最大交易日之后、且已收盘」的交易日；

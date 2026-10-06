@@ -64,7 +64,7 @@ void main() {
               close: 18.21, change: 0.41, changePct: 2.31,
               volumeRatio: 1.8, amountWan: 8452, ma20: 18.10),
         ],
-        dataDate: '20260930',
+        dataDate: '20260930', blockedStale: 0, blockedCorporateAction: 0,
       ),
     ));
     await tester.pump();
@@ -105,7 +105,7 @@ void main() {
               close: 10.5, change: 0.5, changePct: 5.0,
               volumeRatio: 3.0, amountWan: 0.1, ma20: 10.025),
         ],
-        dataDate: '20260930',
+        dataDate: '20260930', blockedStale: 0, blockedCorporateAction: 0,
       ),
     ));
     await tester.pump();
@@ -213,6 +213,35 @@ void main() {
     expect(find.textContaining('· 60信号'), findsNothing);
   });
 
+  testWidgets('选股完成后规则面板自动收起，结果列表不再被面板遮住', (tester) async {
+    _phone(tester);
+    await tester.pumpWidget(StockApp(
+      config: AppConfig(tushareToken: '', dbPath: dbPath),
+      showOnboarding: false,
+      screenFn: (dbPath, rules) async => (
+        total: 2,
+        picked: [
+          ScreenRow(
+              symbol: '000581.SZ',
+              name: '威孚高科',
+              close: 18.21, change: 0.41, changePct: 2.31,
+              volumeRatio: 1.8, amountWan: 8452, ma20: 18.10),
+        ],
+        dataDate: '20260930', blockedStale: 0, blockedCorporateAction: 0,
+      ),
+    ));
+    await tester.pump();
+    expect(find.byType(Switch), findsNWidgets(20)); // 面板展开中
+
+    await tester.tap(find.text('收盘价站上MA20').last);
+    await tester.pump();
+    await tester.tap(find.text('开始选股'));
+    await tester.pumpAndSettle();
+
+    expect(find.byType(Switch), findsNothing, reason: '选股完成应收起规则面板');
+    expect(find.textContaining('只 · 点击查看详情'), findsOneWidget);
+  });
+
   testWidgets('头部渐变随主题色（绿主题不再是红头部）', (tester) async {
     _phone(tester);
     // IndexedStack 只构建当前页签，直接以绿主题启动断言头部渐变
@@ -242,7 +271,13 @@ void main() {
       showOnboarding: false,
       screenFn: (dbPath, rules) async {
         await Future<void>.delayed(const Duration(milliseconds: 300));
-        return (total: 1, picked: const <ScreenRow>[], dataDate: '20260930');
+        return (
+          total: 1,
+          picked: const <ScreenRow>[],
+          dataDate: '20260930',
+          blockedStale: 0,
+          blockedCorporateAction: 0,
+        );
       },
     ));
     await tester.pump();
@@ -262,6 +297,14 @@ void main() {
       showOnboarding: false,
       runSyncFn: ({required dbPath, required token, onProgress}) async =>
           const SyncResult(dates: 0, rows: 0, latestDate: '20261006'),
+      // 报告缺失会触发自动补算回测；注入假实现避免真跑 30~50 秒
+      runBacktestFn: (_, {reportPath}) async => BacktestReport(
+        generatedAt: DateTime(2026, 10, 5).toIso8601String(),
+        horizons: const [10],
+        stockCount: 0,
+        baseline: const {},
+        results: const {},
+      ),
     ));
     await tester.pump();
     await tester.pump(const Duration(seconds: 1));

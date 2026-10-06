@@ -20,7 +20,7 @@ import 'package:stock/data/sync_service.dart';
 import 'package:stock/data/tushare_client.dart';
 
 /// 当前应用版本（发布新包时同步修改，与 pubspec.version 保持一致）。
-const kAppVersion = '2.2.2';
+const kAppVersion = '2.5.0';
 
 /// 更新清单候选源（并发竞速，第一个响应的胜出）。
 /// 国内网络优先命中 Gitee；jsDelivr 镜像可加速 GitHub raw。建仓库后替换为你的地址。
@@ -153,6 +153,8 @@ class ScreenRow {
     this.matchedRules = const [],
     this.score,
     this.forecast,
+    this.signalDate = '',
+    this.ret20 = 0,
   });
 
   final String symbol;
@@ -163,6 +165,15 @@ class ScreenRow {
   final double volumeRatio;
   final double amountWan;
   final double ma20;
+
+  /// 信号日（该股最后一根 K 线的日期，`YYYY-MM-DD`）。护栏默认会把滞后
+  /// [kMaxLastBarLagDays] 天以上的票挡掉，所以正常情况下它就是数据截止日；
+  /// 停牌几周的票会短一些。
+  final String signalDate;
+
+  /// 信号日之前 20 个交易日的累计涨跌（%）。超卖/放量类规则选出来的必然是
+  /// "已经跌了很多"的票，这一列让"我在抄什么底"一目了然，而不是只看当日涨跌。
+  final double ret20;
 
   /// 命中的规则名（可多条；组合选股时按勾选顺序展示）。CLI/旧调用方可能为空。
   final List<String> matchedRules;
@@ -224,16 +235,24 @@ String _csvCell(Object? v) {
 
 /// 选股结果 → CSV 文本（UTF-8 文本，导出时由 [exportRowsCsv] 加 BOM 以便 Excel 识别中文）。
 /// 第一行是说明行（含数据日期与规则组合），第二行起是表头与数据，列序与工作台表头一致。
-String rowsToCsv(List<ScreenRow> rows, {String? dataDate, String? combo, bool withScore = false}) {
-  // 列序：默认与旧版逐字节一致。新列只追加在最后，且要显式传 [withScore]
-  // 才有——CSV 是被外部脚本消费的格式，"突然多出六列"会让它们整行错位。
+String rowsToCsv(
+  List<ScreenRow> rows, {
+  String? dataDate,
+  String? combo,
+  bool withScore = false,
+  bool withSignalDay = false,
+}) {
+  // 列序：默认与旧版逐字节一致。新列只追加在最后，且要显式传 [withScore] /
+  // [withSignalDay] 才有——CSV 是被外部脚本消费的格式，"突然多出六列"会让它们
+  // 整行错位。追加在最末列对按下标读的脚本是安全的，但严格校验列数的会炸。
   const scoreHeader = ',评分,档位,目标价,止损价,盈亏比,样本数,评分来源';
+  const signalDayHeader = ',信号日,20日%';
   final buf = StringBuffer()
     ..writeln('# A股选股结果（不复权·手）'
         '${dataDate == null ? '' : '  数据截至 $dataDate'}'
         '${combo == null || combo.isEmpty ? '' : '  规则：$combo'}')
     ..writeln('代码,名称,收盘,涨跌,涨跌幅%,量比,成交额(万),MA20,数据截至,规则组合'
-        '${withScore ? scoreHeader : ''}');
+        '${withScore ? scoreHeader : ''}${withSignalDay ? signalDayHeader : ''}');
   for (final r in rows) {
     final cells = [
       _csvCell(r.symbol),
@@ -262,6 +281,12 @@ String rowsToCsv(List<ScreenRow> rows, {String? dataDate, String? combo, bool wi
         sc == null ? '' : sc.source,
       ]);
     }
+    if (withSignalDay) {
+      cells.addAll([
+        r.signalDate,
+        '${r.ret20 >= 0 ? '+' : '-'}${r.ret20.abs().toStringAsFixed(2)}',
+      ]);
+    }
     buf.writeln(cells.join(','));
   }
   return buf.toString();
@@ -271,6 +296,11 @@ String rowsToCsv(List<ScreenRow> rows, {String? dataDate, String? combo, bool wi
 typedef WriteCsvFn = Future<void> Function(String path, List<int> bytes);
 
 /// 导出 CSV 到 [dirPath]（传数据库所在目录：桌面 ~/.stock、移动端沙盒应用目录）。
+/// `DateTime` → `YYYY-MM-DD`（选股行展示信号日用）。
+String _ymd(DateTime d) =>
+    '${d.year.toString().padLeft(4, '0')}-${d.month.toString().padLeft(2, '0')}'
+    '-${d.day.toString().padLeft(2, '0')}';
+
 /// 文件名带日期时间戳，重复导出不覆盖。返回落盘路径（UI 弹提示用）。
 Future<String> exportRowsCsv(
   List<ScreenRow> rows, {
@@ -299,8 +329,12 @@ String _stamp() {
 }
 
 /// 选股：后台 isolate 里打开库 → 全量加载（剔除 ST / 退市 / 科创板）→ 规则筛选 → 组装展示行 → 关库。
-/// 返回股票总数、入选行、数据截止交易日。
-Future<({int total, List<ScreenRow> picked, String? dataDate})> runScreening(
+/// 返回股票总数、入选行、数据截止交易日，以及两个数据卫生护栏各挡掉多少只
+/// （不显示这个数，用户只会看到"入选变少了"而不知道原因）。
+Future<
+        ({int total, List<ScreenRow> picked, String? dataDate, int blockedStale,
+            int blockedCorporateAction})>
+    runScreening(
   String dbPath,
   List<Rule> rules,
 ) =>
@@ -312,7 +346,8 @@ Future<({int total, List<ScreenRow> picked, String? dataDate})> runScreening(
         final picked = <ScreenRow>[];
         final report = loadBacktestReport(dbPath);
         final model = loadScoreModel(dbPath);
-        for (final hit in screenWithHits(stocks, rules)) {
+        final screened = screenDiagnostics(stocks, rules);
+        for (final hit in screened.hits) {
           final s = hit.stock;
           final snap = hit.snapshot; // 筛选时已构建，直接复用
           final prevClose = s.bars[s.bars.length - 2].close;
@@ -327,6 +362,10 @@ Future<({int total, List<ScreenRow> picked, String? dataDate})> runScreening(
             amountWan: s.last.amount / 10,
             ma20: snap.ma20,
             matchedRules: [for (final id in ids) ruleById(id).name],
+            signalDate: _ymd(s.last.date),
+            ret20: s.bars.length > 21
+                ? (s.last.close / s.bars[s.bars.length - 21].close - 1) * 100
+                : 0,
             // 有 score-model.json 就走方案 B（holdout AUC 0.530）；没有就退回
             // 方案 A。模型缺失是常态（首次安装、还没训练过），不该影响选股。
             score: scoreOf(
@@ -345,7 +384,13 @@ Future<({int total, List<ScreenRow> picked, String? dataDate})> runScreening(
             ),
           ));
         }
-        return (total: stocks.length, picked: picked, dataDate: repo.maxTradeDate());
+        return (
+          total: stocks.length,
+          picked: picked,
+          dataDate: repo.maxTradeDate(),
+          blockedStale: screened.blockedStale,
+          blockedCorporateAction: screened.blockedCorporateAction,
+        );
       } finally {
         repo.close();
       }
@@ -426,6 +471,7 @@ Future<StockDetail?> loadStockDetail(String dbPath, String symbol) async {
 /// [clientFactory] / [sinaFactory] 供测试注入假客户端；生产用默认值。
 /// 新浪备源必须接上（AGENTS 行情口径第 6 条的降级链）：不传时 tushare 日线
 /// 一故障就原样抛出，40203 限频还会空转 5 次 65 秒。
+/// [fromDate] / [rateDelay] 透传给 [SyncService.sync]：区间补拉用（见 [runBackfillSync]）。
 Future<SyncResult> runSync({
   required String dbPath,
   required String token,
@@ -433,14 +479,46 @@ Future<SyncResult> runSync({
   TushareClient Function(String token)? clientFactory,
   SinaClient Function()? sinaFactory,
   void Function(String msg)? onProgress,
+  String? fromDate,
+  Duration rateDelay = const Duration(milliseconds: 350),
 }) async {
   final repo = BarRepository(dbPath);
   try {
     final client = clientFactory?.call(token) ?? TushareClient(token: token);
     return await SyncService(client, repo, now: now,
             sina: sinaFactory?.call() ?? SinaClient())
-        .sync(onProgress: onProgress);
+        .sync(onProgress: onProgress, fromDate: fromDate, rateDelay: rateDelay);
   } finally {
     repo.close();
   }
 }
+
+/// tushare daily 低积分限 50 次/分 → 间隔 ≥1.2s 才能整段区间不撞 40203。
+/// 撞了会被 maxAttempts=1 立刻甩进逐股新浪备源：约 33 分钟且新浪只有
+/// 400 根深度，3 年区间补不满——慢而可控好过快而断。
+const kBackfillRateDelay = Duration(milliseconds: 1200);
+
+/// 回补历史的同步入口：绕过水位线，强制拉 [fromDate]（`YYYYMMDD`）起
+/// 全部已收盘交易日。手机端首次回填没跑成时，历史深度只能靠它补——
+/// 水位线增量永远只拉「已同步最大交易日之后」，补不了早于水位的历史。
+Future<SyncResult> runBackfillSync({
+  required String dbPath,
+  required String token,
+  required String fromDate,
+  DateTime Function()? now,
+  TushareClient Function(String token)? clientFactory,
+  SinaClient Function()? sinaFactory,
+  void Function(String msg)? onProgress,
+  Duration rateDelay = kBackfillRateDelay,
+}) =>
+    runSync(dbPath: dbPath, token: token, now: now,
+        clientFactory: clientFactory, sinaFactory: sinaFactory,
+        onProgress: onProgress, fromDate: fromDate, rateDelay: rateDelay);
+
+/// 回补历史的注入端口（外壳字段用）；生产用 [runBackfillSync]。
+typedef RunBackfillFn = Future<SyncResult> Function({
+  required String dbPath,
+  required String token,
+  required String fromDate,
+  void Function(String msg)? onProgress,
+});

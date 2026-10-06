@@ -41,7 +41,7 @@ void main() {
             dbPath: dbPath,
             screenFn: (_, rules) async => (
               total: 2,
-              dataDate: '20260930',
+              dataDate: '20260930', blockedStale: 0, blockedCorporateAction: 0,
               picked: [
                 ScreenRow(
                   symbol: 'S1.SH',

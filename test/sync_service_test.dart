@@ -711,5 +711,12 @@ void main() {
         expect(again.dates, 2);
         expect(repo.maxTradeDate(), '20260102');
       });
+
+      test('backfillFromDate：回补 N 年的区间下界（YYYYMMDD）', () {
+        expect(backfillFromDate(DateTime(2026, 9, 30), 1), '20250930');
+        expect(backfillFromDate(DateTime(2026, 9, 30), 3), '20230930');
+        // 2/29 回补 1 年落到 2/28 不存在的日子：Dart 滚到 3/1，语义仍是"约一年前"
+        expect(backfillFromDate(DateTime(2024, 2, 29), 1), '20230301');
+      });
     });
 }

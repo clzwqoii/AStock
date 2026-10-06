@@ -13,8 +13,11 @@ import '../core/rules.dart';
 import 'colors.dart';
 import 'stock_detail_page.dart';
 
-typedef ScreenFn = Future<({int total, List<ScreenRow> picked, String? dataDate})> Function(
-    String dbPath, List<Rule> rules);
+typedef ScreenFn =
+    Future<
+            ({int total, List<ScreenRow> picked, String? dataDate, int blockedStale,
+                int blockedCorporateAction})>
+        Function(String dbPath, List<Rule> rules);
 
 /// 长任务加载模态（居中卡片）：大号强调色转圈 + 标题 + 可选副标题，
 /// 带遮罩挡住重复点击。选股/网络自检/检查更新共用。
@@ -130,7 +133,8 @@ class _ScreeningPageState extends State<ScreeningPage> {
   final _selected = <String>{};
   bool _loading = false;
   String? _error;
-  ({int total, List<ScreenRow> picked, String? dataDate})? _result;
+  ({int total, List<ScreenRow> picked, String? dataDate, int blockedStale,
+      int blockedCorporateAction})? _result;
 
   /// 当前排序列与方向；null = 引擎返回顺序。
   SortField? _sortField;
@@ -590,6 +594,10 @@ class _ScreeningPageState extends State<ScreeningPage> {
                   _sortableHeader('收盘', 64, SortField.close),
                   _sortableHeader('涨跌', 64, null),
                   _sortableHeader('涨跌幅', 78, SortField.changePct),
+                  // 超卖/放量类规则选出来的必然是"已经跌了很多"的票。
+                  // 只看当日涨跌幅会让人以为在追强势股，这一列把"抄了多深的底"
+                  // 摆在明处。不可排序：它是叙述性信息，不是排序维度。
+                  _headerCell('20日%', 64),
                   _sortableHeader('量比', 56, SortField.volumeRatio),
                   _sortableHeader('成交额(万)', 84, SortField.amount), // 定宽：右对齐数字列被拉宽会留大片空白
                   _sortableHeader('MA20', 64, SortField.ma20),
@@ -671,8 +679,8 @@ class _ScreeningPageState extends State<ScreeningPage> {
       return width == null ? Expanded(child: padded) : SizedBox(width: width, child: padded);
     }
 
-    // 名称定宽（宽屏）；窄屏由表头/单元格的 null 宽度交给名称弹性伸展
-    final nameCell = cell(row.name ?? '—', wide ? 96 : null,
+    // 名称是弹性列（宽窄屏一致），成交额定宽；数字右对齐列不能弹性伸展
+    final nameCell = cell(row.name ?? '—', null,
         const TextStyle(fontSize: 12, color: AppColors.dim), left: true);
 
     return GestureDetector(
@@ -688,8 +696,14 @@ class _ScreeningPageState extends State<ScreeningPage> {
                 cell(_f2(row.close), 64, plain.copyWith(fontWeight: FontWeight.w600)),
                 cell(_signed(row.change), 64, changeStyle),
                 cell(_signed(row.changePct, suffix: '%'), 78, pctStyle),
+                cell(_signed(row.ret20, suffix: '%'), 64,
+                    TextStyle(
+                        fontSize: 12.5,
+                        fontWeight: FontWeight.w700,
+                        color: row.ret20 >= 0 ? AppColors.red : AppColors.down,
+                        fontFeatures: const [FontFeature.tabularFigures()])),
                 cell(_f2(row.volumeRatio), 56, plain),
-                cell(row.amountWan.toStringAsFixed(0), null, plain), // 弹性列吃剩余宽度
+                cell(row.amountWan.toStringAsFixed(0), 84, plain),
                 cell(_f2(row.ma20), 64, plain),
                 cell(_scoreCell(row), 52, _scoreStyle(row)),
                 cell(row.forecast?.target?.toStringAsFixed(2) ?? '', 60,
@@ -754,6 +768,13 @@ class _ScreeningPageState extends State<ScreeningPage> {
               color: AccentScope.of(context)),
           const SizedBox(width: 20),
           _sbItem('已选规则', '${_selected.length}'),
+          const SizedBox(width: 20),
+          if (r != null && (r.blockedStale + r.blockedCorporateAction) > 0)
+            _sbItem(
+              '过滤假信号',
+              '${r.blockedStale + r.blockedCorporateAction}',
+              color: AppColors.down,
+            ),
           const Spacer(),
           Flexible(
             child: Text(

@@ -173,9 +173,12 @@ class _BacktestPageState extends State<BacktestPage> {
     final hs = r.horizons; // 升序；列完全由它推导，不硬编码 5/10/20
     final pfH = hs.length >= 2 ? hs[1] : hs.last; // 盈亏比取中间持有期（默认 10 日）
 
+    // 可信 = 跨年稳健 **且** 信号不集中。早先这里只用 isRuleYearlyRobust，
+    // 于是按年胜率每年都赢、但 70% 信号集中在单月的规则也能进"稳健"名单。
+    // 加了这个 AND 之后，严格版 RSI超卖·放量 在只开这一档时会被筛掉。
     final shown = _robustOnly
         ? [for (final rule in builtInRules)
-            if (isRuleYearlyRobust(r, rule.id)) rule]
+            if (isRuleTrustworthy(r, rule.id)) rule]
         : builtInRules;
     final rows = <_Row>[
       for (final rule in shown)

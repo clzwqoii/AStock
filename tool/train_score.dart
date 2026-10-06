@@ -17,6 +17,10 @@
 /// 只取「至少命中一条内置规则」的交易日。评分要排序的就是这批股票，
 /// 在全样本上训练会稀释我们真正关心的那部分。
 ///
+/// **与选股/回测同口径加除权护栏**：库内是不复权价，除权后 20 根内的指标
+/// 是断层造成的假信号。训练集若还含它们，学到的就是"除权后更容易跌"这种
+/// 与策略假设无关的东西（那批样本 10 日胜率 40.6%，低于无条件基准）。
+///
 /// 用法: dart run tool/train_score.dart [dbPath]
 library;
 
@@ -30,6 +34,7 @@ import 'package:stock/config.dart';
 import 'package:stock/app_logic.dart' show loadBacktestReport;
 import 'package:stock/core/features.dart';
 import 'package:stock/core/logreg.dart';
+import 'package:stock/core/market.dart';
 import 'package:stock/core/score.dart';
 import 'package:stock/core/rules.dart';
 import 'package:stock/data/bar_repository.dart';
@@ -67,8 +72,10 @@ Future<void> main(List<String> args) async {
     final bars = stock.bars;
     if (bars.length < IndicatorSnapshot.minBars + _horizon) continue;
     final series = IndicatorSeries.from(bars);
+    final sinceGap = barsSinceCorporateAction(stock.symbol, bars);
     final last = bars.length - 1 - _horizon;
     for (var t = IndicatorSnapshot.minBars; t <= last; t++) {
+      if (sinceGap[t] < kCorporateActionLookbackBars) continue; // 除权污染日
       scanned++;
       final snap = series.at(t);
       final ids = [for (final r in builtInRules) if (r.test(snap)) r.id];

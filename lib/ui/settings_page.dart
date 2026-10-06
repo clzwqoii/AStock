@@ -311,6 +311,7 @@ class SettingsPage extends StatelessWidget {
     this.syncing = false,
     this.syncMsg,
     this.onSyncPressed,
+    this.onBackfillPressed,
     this.writeConfig = _defaultWriteConfig,
     this.accent = AccentColor.red,
     this.onAccentChanged,
@@ -329,6 +330,9 @@ class SettingsPage extends StatelessWidget {
   final bool syncing;
   final String? syncMsg;
   final VoidCallback? onSyncPressed;
+
+  /// 回补历史：参数为用户选的年数（1/2/3），编排同样在外壳（[StockApp]）。
+  final ValueChanged<int>? onBackfillPressed;
   final WriteConfigFn writeConfig;
 
   /// 主题强调色（编排在外壳：切换即重建主题并持久化）。
@@ -379,10 +383,11 @@ class SettingsPage extends StatelessWidget {
           ],
         ),
         const SizedBox(height: 12),
-        Row(
+        // Wrap 而不是 Row：三个按钮在 320dp 窄屏会溢出，Wrap 自动换行
+        Wrap(
+          spacing: 12,
           children: [
             OutlinedButton(onPressed: () => _save(context, token), child: const Text('保存配置')),
-            const SizedBox(width: 12),
             FilledButton(
               onPressed: syncing ? null : onSyncPressed,
               child: syncing
@@ -396,6 +401,12 @@ class SettingsPage extends StatelessWidget {
                       Text('同步中…'),
                     ])
                   : const Text('同步数据'),
+            ),
+            OutlinedButton(
+              onPressed: syncing || onBackfillPressed == null
+                  ? null
+                  : () => _pickBackfill(context),
+              child: const Text('回补历史'),
             ),
           ],
         ),
@@ -513,6 +524,35 @@ class SettingsPage extends StatelessWidget {
         content: Text(result, style: const TextStyle(fontSize: 13)),
         actions: [
           TextButton(onPressed: () => Navigator.pop(context), child: const Text('好')),
+        ],
+      ),
+    );
+  }
+
+  /// 回补历史选档：三档对应约 5/10/15 分钟（1.2s/日的限频间隔是主要开销）。
+  /// 点档位即确认——弹窗文案已把「会拉多久、要保持前台」说清。
+  void _pickBackfill(BuildContext context) {
+    final callback = onBackfillPressed;
+    if (callback == null) return;
+    showDialog<void>(
+      context: context,
+      builder: (dialogContext) => AlertDialog(
+        title: const Text('回补历史'),
+        content: const Text(
+          '首次同步若没拉全历史（回测数字明显偏少），从这里强制重拉。\n'
+          '与每日增量同一数据源，重复执行安全（幂等）。\n\n'
+          '近 1 年 / 2 年 / 3 年 ≈ 5 / 10 / 15 分钟，期间请保持 App 在前台、网络可用。',
+          style: TextStyle(fontSize: 13, height: 1.6),
+        ),
+        actions: [
+          for (final years in [1, 2, 3])
+            TextButton(
+              onPressed: () {
+                Navigator.pop(dialogContext);
+                callback(years);
+              },
+              child: Text('近 $years 年'),
+            ),
         ],
       ),
     );

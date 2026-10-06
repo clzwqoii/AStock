@@ -25,6 +25,7 @@ class MobileHome extends StatefulWidget {
     required this.accent,
     required this.onAccentChanged,
     required this.onSyncPressed,
+    this.onBackfillPressed,
     required this.configPath,
     required this.initialToken,
     this.screenFn,
@@ -44,6 +45,9 @@ class MobileHome extends StatefulWidget {
   final AccentColor accent;
   final ValueChanged<AccentColor> onAccentChanged;
   final VoidCallback onSyncPressed;
+
+  /// 回补历史入口（参数为年数）；编排在外壳，null 时设置页入口自动禁用。
+  final ValueChanged<int>? onBackfillPressed;
   final String configPath;
   final String initialToken;
   final LaunchUrlFn? launchUrl;
@@ -96,6 +100,7 @@ class _MobileHomeState extends State<MobileHome> {
               syncing: widget.syncing,
               syncMsg: widget.syncMsg,
               onSyncPressed: widget.onSyncPressed,
+              onBackfillPressed: widget.onBackfillPressed,
               accent: widget.accent,
               onAccentChanged: widget.onAccentChanged,
               launchUrl: widget.launchUrl,
@@ -162,7 +167,8 @@ class _MobileScreeningState extends State<MobileScreening> {
   bool _expanded = true;
   bool _loading = false;
   String? _error;
-  ({int total, List<ScreenRow> picked, String? dataDate})? _result;
+  ({int total, List<ScreenRow> picked, String? dataDate, int blockedStale,
+      int blockedCorporateAction})? _result;
 
   void _toggle(String id) {
     setState(() {
@@ -188,7 +194,13 @@ class _MobileScreeningState extends State<MobileScreening> {
       _error = e.toString();
     } finally {
       navigator.pop();
-      if (mounted) setState(() => _loading = false);
+      // 选股完成后收起规则面板：结果列表会被 20 行的面板整个挡住。
+      if (mounted) {
+        setState(() {
+          _loading = false;
+          if (_error == null) _expanded = false;
+        });
+      }
     }
   }
 
@@ -259,8 +271,10 @@ class _MobileScreeningState extends State<MobileScreening> {
                 child: Text('A股选股',
                     style: TextStyle(fontSize: 22, fontWeight: FontWeight.w800, color: Colors.white)),
               ),
+              // 上下 padding 差 1dp：安卓中文字体（MiSans/Noto）行盒下部留白偏大，
+              // 胶囊内墨迹整体偏上（真机像素实测约 0.6dp，2026-10-06），反向补偿。
               Container(
-                padding: const EdgeInsets.symmetric(horizontal: 10, vertical: 4),
+                padding: const EdgeInsets.only(left: 10, right: 10, top: 4.5, bottom: 3.5),
                 decoration: BoxDecoration(color: Colors.white.withValues(alpha: 0.18), borderRadius: BorderRadius.circular(10)),
                 child: Text(
                   widget.syncing ? '同步中…' : _syncChipText(),
@@ -295,6 +309,9 @@ class _MobileScreeningState extends State<MobileScreening> {
   Widget _stats() {
     final r = _result;
     final msg = widget.syncMsg;
+    // 护栏挡掉的"本会入选"的假信号数。只在有数时显示——静默过滤会让用户
+    // 以为"规则没信号"，而这正是此前被两年前的化石票骗过的原因。
+    final blocked = (r?.blockedStale ?? 0) + (r?.blockedCorporateAction ?? 0);
     return Padding(
       padding: const EdgeInsets.symmetric(horizontal: 14),
       child: Column(
@@ -309,6 +326,15 @@ class _MobileScreeningState extends State<MobileScreening> {
               _statCard(_result == null ? '—' : '${_selected.length}', '已选规则'),
             ],
           ),
+          if (blocked > 0)
+            Padding(
+              padding: const EdgeInsets.only(top: 8, left: 4),
+              child: Text(
+                '数据护栏挡掉 $blocked 只假信号（停牌/退市 ${r!.blockedStale} 只 + '
+                '除权日 ${r.blockedCorporateAction} 只）',
+                style: const TextStyle(fontSize: 11, color: AppColors.dim),
+              ),
+            ),
           if (msg != null && msg.isNotEmpty)
             Padding(
               padding: const EdgeInsets.only(top: 8, left: 4),
@@ -527,6 +553,18 @@ class _MobileScreeningState extends State<MobileScreening> {
                   Text(row.name ?? '—', style: const TextStyle(fontSize: 15, fontWeight: FontWeight.w700)),
                   const SizedBox(height: 2),
                   Text(row.symbol, style: const TextStyle(fontSize: 11, color: AppColors.dim)),
+                  // 信号日 + 近 20 日涨跌：主规则选出来的都是超卖票，光看当日
+                  // 涨跌会让人误以为在追强势股。信号日还能看出数据新不新
+                  // （停牌几周的票会短于数据截止日）。
+                  Text(
+                    '${row.signalDate.isEmpty ? '' : '${row.signalDate.substring(5)} · '}'
+                    '20日 ${row.ret20 >= 0 ? '+' : '-'}${row.ret20.abs().toStringAsFixed(1)}%',
+                    style: TextStyle(
+                        fontSize: 10,
+                        fontWeight: FontWeight.w700,
+                        color: row.ret20 >= 0 ? AppColors.red : AppColors.down,
+                        fontFeatures: const [FontFeature.tabularFigures()]),
+                  ),
                 ],
               ),
             ),

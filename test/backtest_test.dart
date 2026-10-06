@@ -390,4 +390,80 @@ void main() {
       expect(cells.length, 7);
     });
   });
+
+  group('除权/复牌护栏（回测与选股同口径）', () {
+    // 50 根：前 30 根收 10.0，下标 30 处主板除权（开盘 7.7 = -23%），之后停在
+    // 新价位。forwardDays=5 时可评估日 t ∈ [20, 44]；污染窗口 30..49 覆盖
+    // t=30..44 全部 15 天，干净的可评估日只剩 t=20..29 共 10 天。
+    //
+    // 用一条恒真规则把「护栏行为」与「规则语义」隔离开：换成 volume_surge
+    // 之类的真规则，信号只会零星落在污染窗口里（量比要前 5 日都缩着才 >2），
+    // 那样测到的是规则的形状而不是护栏本身。
+    final always = Rule(
+      id: 'test_always',
+      name: '恒真',
+      desc: '测试专用：每天都命中，用来单独检验护栏',
+      test: (_) => true,
+    );
+    const pollutedDays = 15;
+    const cleanDays = 10;
+
+    StockData exDiv() => StockData(
+          symbol: 'EXDIV',
+          bars: [
+            for (var i = 0; i < 50; i++)
+              i < 30
+                  ? kbar(close: 10.0, date: _day0.add(Duration(days: i)))
+                  : kbar(open: 7.7, high: 7.8, low: 7.6, close: 7.75,
+                      date: _day0.add(Duration(days: i))),
+          ],
+        );
+
+    test('除权后 20 根内的信号不计入回测', () {
+      final stock = exDiv();
+      final on = backtestRule([stock], always, forwardDays: forward);
+      final off = backtestRule([stock], always,
+          forwardDays: forward, corporateActionLookbackBars: 0);
+      expect(on.count, cleanDays, reason: '护栏开启：只剩除权前的 10 天');
+      expect(off.count, cleanDays + pollutedDays, reason: '关掉护栏复现旧口径');
+      expect(off.count - on.count, pollutedDays);
+    });
+
+    test('基准同步过滤：被判定污染的日子两侧都不计入', () {
+      final stock = exDiv();
+      final on = baseline([stock], forwardDays: forward);
+      final off =
+          baseline([stock], forwardDays: forward, corporateActionLookbackBars: 0);
+      expect(on.count, cleanDays);
+      expect(off.count - on.count, pollutedDays);
+    });
+
+    test('backtestAll 也过滤（信号与基准覆盖同一批可评估日）', () {
+      final stock = exDiv();
+      final on = backtestAll([stock], [always], horizons: [forward]);
+      final off = backtestAll([stock], [always], horizons: [forward],
+          corporateActionLookbackBars: 0);
+      expect(on.results['test_always']![forward]!.count, cleanDays);
+      expect(off.results['test_always']![forward]!.count, cleanDays + pollutedDays);
+      expect(on.baseline[forward]!.count, cleanDays);
+      expect(off.baseline[forward]!.count, cleanDays + pollutedDays);
+    });
+
+    test('连续跌停（每天 -10%，主板）不会被误判成除权而误杀信号', () {
+      // 50 根每天 -10%：合法交易日，护栏不该动它
+      final bars = <Bar>[];
+      var close = 10.0;
+      for (var i = 0; i < 50; i++) {
+        final c = i == 0 ? close : close * 0.9; // 每天跌停 -10%
+        bars.add(kbar(open: c, high: c, low: c, close: c,
+            date: _day0.add(Duration(days: i))));
+        close = c;
+      }
+      final on = backtestRule([StockData(symbol: 'DOWN', bars: bars)], always,
+          forwardDays: forward);
+      final off = backtestRule([StockData(symbol: 'DOWN', bars: bars)], always,
+          forwardDays: forward, corporateActionLookbackBars: 0);
+      expect(on.count, off.count);
+    });
+  });
 }

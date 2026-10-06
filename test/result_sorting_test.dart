@@ -16,6 +16,8 @@ ScreenRow row(
   double ma20 = 9,
   String? name,
   List<String> matchedRules = const [],
+  String signalDate = '',
+  double ret20 = 0,
 }) =>
     ScreenRow(
       symbol: symbol,
@@ -27,6 +29,8 @@ ScreenRow row(
       amountWan: amountWan,
       ma20: ma20,
       matchedRules: matchedRules,
+      signalDate: signalDate,
+      ret20: ret20,
     );
 
 void main() {
@@ -188,6 +192,20 @@ void main() {
       expect(cells.length, 17);
       expect(cells[10], '', reason: '无报告时评分必须留空，不能写 0 分');
       expect(cells[12], '', reason: '无目标价时留空');
+    });
+
+    test('withSignalDay: true 追加信号日与 20 日涨跌，默认关闭', () {
+      final r = row('600000.SH', close: 10, name: '浦发银行', signalDate: '2026-09-30', ret20: -18.19);
+      final plain = rowsToCsv([r], dataDate: '20260930');
+      expect(plain.trim().split('\n')[1],
+          '代码,名称,收盘,涨跌,涨跌幅%,量比,成交额(万),MA20,数据截至,规则组合');
+
+      final withDay = rowsToCsv([r], dataDate: '20260930', withSignalDay: true);
+      final ls = withDay.trim().split('\n');
+      expect(ls[1],
+          '代码,名称,收盘,涨跌,涨跌幅%,量比,成交额(万),MA20,数据截至,规则组合,信号日,20日%');
+      expect(ls.last.split(',').last, '-18.19');
+      expect(ls.last.split(',')[10], '2026-09-30');
     });
 
     test('name 为 null 显示空字段而不是 null', () {

@@ -4,6 +4,75 @@
 >
 > **⚠️ 先读文档顶部《最该盯的一件事：超额在逐年衰减》——那是当前唯一重要的事。**
 
+## 数据卫生护栏（2026-10-06 上线，移动了回测口径）
+
+**结论先说**：主规则此前选出一批"大跌的票"，其中一部分根本不是真跌，而是数据造成的。
+本地库存的是**不复权**价（AGENTS.md 行情口径第 6 条），于是每个除权日都在价格序列上留下
+**永久性价位断层**；停牌/退市的股票则留下**远旧于"今天"的末根**。两者都会让超卖类规则
+拿到假信号。2026-09-30 实测：主规则选出 4 只，其中 2 只是 2024 年就停牌的化石票
+（中银绒业、鹏都农牧，末根滞后 831/820 天）、1 只的"当日 −30%"来自祥源新材 10 转 4 的
+除权日（按除权参考价实际只跌 2.3%）。**4 只里 3 只是假信号。**
+
+### 两个护栏（`lib/core/screener.dart`，默认开启，传 0 关闭）
+
+| 护栏 | 判定 | 默认 |
+|---|---|---|
+| 新鲜度 | 末根滞后池内最大交易日 > N **日历日** → 出池 | 30 天（≈20 个交易日） |
+| 除权/复牌 | 信号日落在除权/复牌后 N 根内 → 不出信号 | 20 根（RSI14 平滑期 + MA20 期） |
+
+除权判定在 `lib/core/market.dart`：开盘价相对前收盘跳空超过**该代码当日涨跌停幅度**
+（主板 10%、双创 20%、北交所 30%）只可能是除权除息或长期停牌复牌。取值依据见该文件注释。
+
+**回溯窗口为什么是 20 根**：只看信号当日不够（那只挡掉 1.3% 的信号）。实测信号落在
+除权后 20 根内的 10 日胜率 40.6%、均收益 −0.32%，**低于无条件基准 49.7%**——是系统性
+负贡献，不是噪声。取 14 根（RSI14 期）与 20 根差别已很小（81.9% vs 82.1%），
+再拉到 60 根只多剔 0.7% 的信号。最近 60 个交易日里有 10% 的信号落在这个窗口内。
+
+### 回测侧：除权护栏要同步，新鲜度护栏**绝对不能**
+
+| | 回测侧 | 理由 |
+|---|---|---|
+| 除权/复牌护栏 | **同步**（`backtestRule` / `baseline` / `backtestAll` 三个入口都加，信号与基准一起滤） | 它不是未来信息，是信号选择被数据口径污染。不同步则报告的胜率/PF/信号数与用户实际看到的结果不同源，而评分（`scoreOf`）、目标价止损价（`priceForecast`）、侧栏规则排序（`ruleIdsSortedByWinRate`）、"稳健"徽标全都从报告算 |
+| 新鲜度护栏 | **绝不加** | 逐日回放里"末根必须等于全池最后交易日"= 要求这只票活到数据末尾 = 未来信息（**存活者偏差**），会让回测系统性偏乐观。选股侧要它是因为那边回答"今天买不买得到"，两个问题答案本就不同 |
+
+> 这个不对称是故意的，别为了"两边一致"把新鲜度护栏加进回测。
+
+### 口径变更前后的数字（10 日持有期）
+
+| 口径 | 信号数 | 胜率 | 平均% | 盈亏比 | 基准胜率 |
+|---|---|---|---|---|---|
+| 护栏前（2026-10-06 之前） | 14181 | 78.5% | +13.04 | 8.95 | 49.8% |
+| 护栏后 | 13535 | 80.3% | +13.67 | 9.92 | 49.86% |
+
+- 回测口径 = `loadAllStocks()` 全池 5672 只；选股口径（剔 ST/科创板，4776 只）下信号数 11169 → 10736。
+- 评分模型 holdout AUC 0.5301 → 0.5359（`tool/train_score.dart` 已用同一护栏重训）。
+- `~/.stock/backtest-history.json` 里 20260930 那一期已按新口径重算（`--archive` 按 dataDate 幂等）。
+  **台账此前只有 1 期，等于没有台账**，所以这次断代没有污染任何趋势判断；下一期起都是新口径。
+- 复现旧口径：CLI 用 `dart run bin/screen.dart <规则id> --raw`；回测给
+  `backtestAll(stocks, rules, horizons: [...], corporateActionLookbackBars: 0)`。
+
+### 已知局限（已量化，2026-10-06）
+
+现行判定用"开盘跳空超过该代码涨跌停幅度"，于是落在限幅**之内**的送转会漏检。
+实测（`tool/diag_main_rule.dart` 第 9 节，全样本 11169 个信号）：
+
+| 漏检来源 | 信号数 | 占比 |
+|---|---|---|
+| 北交所 ±30% 内的送转/大幅低开（跳空 21%~30%） | 11 | **0.10%** |
+| 非北交所跳空超 21% | 0（现行护栏已全部抓住） | — |
+| 近 60 个交易日窗口内漏检 | 0 / 250 | **0%** |
+
+0.10% 是**上限**：那 11 个里既有真送转，也有北交所合法的大幅低开/高开，真实漏检更小。
+停牌一两天后复牌、开盘价仍在涨跌停内同样漏检，量级相当。
+
+**结论：不值得为它动数据层。** 彻底解法是引入 tushare `adj_factor`（除权因子）做判别，
+代价是：`daily_bars` 加列 + 迁移、`tushare_client`/`sync_service` 改协议、按日期回填
+约 424 个交易日（占用 10 分钟以上的日线额度）、以及**第三次口径移动**（护栏判定变了，
+报告/模型/台账又得全部重算）。为 0.1% 的信号付这个代价不划算——真要做的先决条件是
+先看到漏检在近窗里稳定非零。`dart run tool/diag_main_rule.dart` 第 9 节随时能量。
+
+---
+
 ## ⚠️ 最该盯的一件事：`RSI超卖·放量` 的超额在逐年衰减（2026-10-06 立档）
 
 **忘了别的可以，忘了这个不行。这是整个项目当前唯一重要的事。**
@@ -73,6 +142,7 @@ dart run tool/report_history.dart         # 看每条规则胜率随时间怎么
 | `tool/compare_rsi_variants.dart` | 严格/宽松两版怎么取舍 |
 | `tool/why_not_rsi20.dart` | 为什么最终选 RSI<20 |
 | `tool/report_history.dart` | 胜率漂移 |
+| `tool/diag_main_rule.dart` | 主规则选出来的到底是什么票（逐日画像/形态拆分/除权污染窗口） |
 
 ---
 
@@ -89,7 +159,7 @@ stock/
 │   ├── main.dart              # 入口：读配置 → 挂载 StockApp
 │   ├── config.dart            # 配置加载：环境变量 → 配置文件 → 默认值；configPath 记录设置页写入位置
 │   ├── app_paths.dart         # 启动配置：桌面沿用 ~/.stock（与 CLI 共享），移动端用 path_provider 应用支持目录
-│   ├── app_logic.dart         # App/CLI 共用重活：runScreening（后台 isolate 选股）、runSync（增量同步，进度可回调）、checkForUpdate（版本比较）
+│   ├── app_logic.dart         # App/CLI 共用重活：runScreening（后台 isolate 选股）、runSync（增量同步，进度可回调）、runBackfillSync（回补历史，1.2s/日防限频）、checkForUpdate（版本比较）
 │   ├── core/                  # ── 规则引擎（纯 Dart，零 IO/UI 依赖，可独立测试）──
 │   │   ├── models.dart        #   Bar（一根日K：开高低收/量）与 StockData（一只股票的日线序列）
 │   │   ├── indicators.dart    #   指标纯函数：sma/smaSeries/emaSeries/macd/rsi/kdj/volumeRatio/pctChange
@@ -97,6 +167,8 @@ stock/
 │   │   │                      #     + biasPctOf（biasPct 的标量形式）
 │   │   │                      #     + smaTrend(MA变动)/amountRatio(成交额比)/closePos(收盘位置)
 │   │   │                      #     + maBullAlignment(多头排列)
+│   │   ├── market.dart        #   交易制度纯函数：dailyLimitPct（按代码判涨跌停幅度）
+│   │   │                      #     + isCorporateActionGap / barsSinceCorporateAction / isCleanSignalDay（除权复牌识别与污染窗口）
 │   │   ├── rules.dart         #   IndicatorSnapshot（末日指标快照）+ BreakoutWindow（突破判定窗口）
 │   │   │                      #     + IndicatorSeries（整条指标序列，at(t) 按日切快照，回测无前瞻偏差）
 │   │   │                      #     + Ma60Filter（8 个可开关过滤项）+ ma60FilterPasses / ma60BreakoutWith
@@ -105,7 +177,8 @@ stock/
 │   │   │                      #     + 「60日线有效突破」全套阈值常量（breakout*/kBreakout*/kPullback*）
 │   │   ├── backtest.dart      #   规则滚动回测：SignalOutcome / Baseline / BacktestResult
 │   │   │                      #     + backtestRule / baseline；可评估日 t ∈ [minBars, 末根−forwardDays]
-│   │   └── screener.dart      #   screen(stocks, rules)：筛选入口；单规则=传一条，组合=多条 AND；历史不足 20 根自动跳过
+│   │   └── screener.dart      #   screen/screenWithHits/screenDiagnostics(stocks, rules)：筛选入口；单规则=传一条，组合=多条 AND
+│   │                          #     历史不足 20 根自动跳过；两个数据卫生护栏默认开启（详见「数据卫生护栏」节）
 │   │                          #     （MA60 突破类规则另需 70/79 根，不足时快照字段为 null、规则不命中而非报错）
 │   └── data/                  # ── 数据层（网络与存储）──
 │       ├── tushare_client.dart#   tushare pro HTTP 客户端：请求构造、offset 翻页、错误码翻译（TushareException）
@@ -115,6 +188,7 @@ stock/
 │       ├── bar_repository.dart#   SQLite 读写：stocks / daily_bars 表，upsert 幂等，loadAllStocks 供引擎消费；
 │       │                      #     excludeSpecialStocks=true 时剔除 ST/*ST/S*ST/PT/退市/科创板(68*)——选股入口开、回测关
 │       └── sync_service.dart  #   增量同步编排：交易日历（失败退化为工作日候选）→ 待拉日期 → 逐日入库；40203 限频自动重试
+│       │                      #     + backfillFromDate（回补 N 年的区间下界）；区间模式（fromDate/toDate）绕过水位线强制补历史
 │   ├── ui/                    # ── Flutter 界面 ──
 │       ├── candle_chart.dart  #   日K蜡烛图（CustomPainter 自绘：蜡烛+成交量+MA5/10/20）；十字光标（桌面悬停/移动拖动）与读数浮层
 │       ├── candle_chart_math.dart # K线图纯计算：ChartGeometry（像素↔索引/价格双向换算）、priceRange、CandleReadout、formatVolume；不依赖绘制，可独立单测
@@ -127,7 +201,7 @@ stock/
 │       ├── screening_page.dart#   选股页·方案C高密度工作台（docs/design/c-compact-workbench.html）：侧栏规则开关分组
 │       │                      #     + 工具栏（组合条件/同步徽章/开始按钮）+ 密集表格（涨跌/涨跌幅/量比/成交额/MA20）
 │       │                      #     + 底部状态栏；窄屏(<768)侧栏折叠为横向胶囊条；引擎调用可注入（screenFn）
-│       └── settings_page.dart #   设置页：token 保存 + 主题色色板（4 色即点即换）+ 手动同步按钮；IO 可注入
+│       └── settings_page.dart #   设置页：token 保存 + 主题色色板（4 色即点即换）+ 手动同步按钮 + 回补历史（近1/2/3年，三档弹窗）；IO 可注入
 ├── bin/                       # ── 命令行工具（胶水层，无业务逻辑）──
 │   ├── sync.dart              #   dart run bin/sync.dart [回填天数=250] [--from YYYYMMDD] [--to YYYYMMDD]
 │   │                          #     [--db 路径]：拉数据入库。水位线增量只拉 MAX(trade_date) 之后的日期，
@@ -350,6 +424,7 @@ ST 标记只在名称开头匹配——用 `LIKE '%ST%'` 子串搜索会误杀 `
 - ✅ Android 模拟器端到端验证（2026-10-04）：release APK 安装启动、debug 版沙盒路径注入 62 万行、自动同步（真实网络成功）、勾规则选股（5586→1800）、卡片进入 K 线详情（真实名称+均线+成交量）全通过；AVD 名 stock_test（无头启动 `-no-window -no-audio -no-snapshot -gpu swiftshader_indirect`）
 - ✅ iOS 模拟器验证（2026-10-04）：移动布局/主题/沙盒路径/本地数据/同步状态展示均正常；**模拟器内网络受宿主机代理 fake-ip（198.18.x）影响不可用（非代码问题，真机正常）**
 - ⏳ 数据源备份：✅ 日线双源 **tushare(按日全市场) → 新浪（逐股，与主源同口径：不复权/手）**；✅ 股票名单/名称三级链 **tushare stock_basic → 东财 clist → 腾讯/东财逐股名称回填**（东财 push2 域名在部分网络被拦时自动走逐股，一次性约 10 分钟，只补缺失名称）；交易日历 tushare → 工作日候选自愈
+- ✅ 回补历史入口（2026-10-06）：设置页「回补历史」按钮 → 近 1/2/3 年三档 → 外壳走 `runBackfillSync` 区间模式强制重拉（1.2s/日防 40203，约 5/10/15 分钟）；完成后自动重算回测报告。背景：手机首次回填没跑成时，水位线增量永远补不回历史，两端回测数字会因此差一个量级
 - ⏳ macOS/iOS 桌面构建需先完成 Xcode 许可初始化（三条 sudo 命令，须分行执行）
 
 ### 扩样本后的修正（2026-10-05，263 个交易日 / 5597 只 / 144.2 万行）
@@ -1403,3 +1478,44 @@ sklearn 1.8.0 只做 oracle，`test/logreg_test.dart` 里固化了期望值。
 其 `UpdateDeps.selfUpdateFn` 默认为空是"有意设计"，但测试断言非空，
 属该会话未完成的自相矛盾）与一处既有的 `mobile_ui_test.dart` 未用 import。
 **不是本次改动引入**，未代为修改以免覆盖对方进行中的工作。
+
+### 7. 把集中度接到判定上——否则它只是个装饰色
+
+上一轮加了 `kRuleTopMonthShareCeiling` 和表格警示色，但**没有任何判定读它**。
+探针实测确认：
+
+```
+robustRuleIds → rsi_oversold_volume_loose, rsi_oversold_volume
+  loose   share=44.7%  robust=true  concentrated=false  trustworthy=true
+  strict  share=70.0%  robust=true  concentrated=true   trustworthy=false   ← 超限但未拦
+```
+
+严格版按年胜率每年都赢基准，70% 信号却在单月——**"只看稳健规则"开关会把它放过去**。
+一个不影响任何判定的指标就是装饰（与评分列 AUC 0.512 是同一类错误）。
+
+现在：
+
+- `isRuleSignalConcentrated(report, ruleId)` —— 占比超限且信号量 ≥100 才判真。
+  低于 100 不判：1 个信号的占比是 100%，那不是"集中"是"没数据"。
+- `isRuleTrustworthy(report, ruleId)` = `isRuleYearlyRobust` **AND NOT** `concentrated`。
+- `backtest_page` 的「只看稳健规则」开关改用它。
+
+两条防呆：
+
+- **旧报告没有 signalProfile → concentrated 一律 false**（`profileOf` 返回空 profile，
+  share=0）。缺数据不默认有罪，否则升报告格式会让所有规则一起从开关里消失。
+- **信号量 <100 不判**：`ma60_breakout_now` 只有 1 个信号、占比 100%，
+  按集中度它会被冤枉，但它本来按年胜率也过不了，不冲突。
+
+### 现状与真正的下一步
+
+`flutter test` **506 全绿**。
+
+**台账仍只有 1 期**：刚复测 `20261008/09/12/13` 全市场仍为 0 行，市场未重开
+（或 tushare 未发布）。所以"sync 拿第 2 期做漂移检测"**依旧不可执行**，
+这是当前唯一被外部条件卡住的路径，等约 10 月 8 日后市场重开再跑
+`dart run bin/sync.dart && dart run tool/report_all.dart --archive`。
+
+**注意并发**：`test/update_deps_test.dart` / `result_table_layout_test.dart` 等文件
+是同一时段另一个会话新增的，期间全量测试红过两三次都是编译竞态，
+等对方写完即恢复，**不是本线改动的问题**。代为修改会覆盖对方进行中的工作。

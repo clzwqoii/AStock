@@ -495,14 +495,18 @@ void main() {
         },
         results: {
           ruleId: {
-            10: BacktestStats(
-              count: signals,
-              winRate: win,
-              avgReturn: 0,
-              medianReturn: 0,
-              bestReturn: 0,
-              worstReturn: 0,
-              profitFactor: 1,
+            10: BacktestResult.fromStats(
+              ruleId: ruleId,
+              forwardDays: 10,
+              stats: BacktestStats(
+                count: signals,
+                winRate: win,
+                avgReturn: 0,
+                medianReturn: 0,
+                bestReturn: 0,
+                worstReturn: 0,
+                profitFactor: 1,
+              ),
             ),
           },
         },

@@ -9,6 +9,7 @@ import 'package:stock/config.dart';
 import 'package:stock/core/backtest.dart';
 import 'package:stock/core/models.dart';
 import 'package:stock/core/rules.dart';
+import 'package:stock/data/report_store.dart';
 import 'package:stock/data/sync_service.dart';
 import 'package:stock/ui/colors.dart';
 import 'fixtures.dart';
@@ -98,6 +99,14 @@ Future<void> scrollTo(WidgetTester tester, Finder finder) =>
           usedDb = dbPath;
           return const SyncResult(dates: 0, rows: 0);
         },
+        // 报告缺失会触发自动补算回测；注入假实现避免真跑 30~50 秒
+        runBacktestFn: (_, {reportPath}) async => BacktestReport(
+          generatedAt: DateTime(2026, 10, 5).toIso8601String(),
+          horizons: const [10],
+          stockCount: 0,
+          baseline: const {},
+          results: const {},
+        ),
       ));
       await tester.pump();
       await tester.pump(const Duration(seconds: 1));
@@ -126,8 +135,9 @@ Future<void> scrollTo(WidgetTester tester, Finder finder) =>
   group('工作台选股页（方案C）', () {
   Future<void> pumpWith(
     WidgetTester tester,
-    Future<({int total, List<ScreenRow> picked, String? dataDate})> Function(
-            String, List<Rule>) screenFn,
+    Future<
+            ({int total, List<ScreenRow> picked, String? dataDate, int blockedStale,
+                int blockedCorporateAction})> Function(String, List<Rule>) screenFn,
   ) async {
     await tester.pumpWidget(MaterialApp(
       home: Scaffold(body: ScreeningPage(dbPath: dbPath, screenFn: screenFn)),
@@ -139,7 +149,13 @@ Future<void> scrollTo(WidgetTester tester, Finder finder) =>
     List<Rule>? passedRules;
     await pumpWith(tester, (dbPath, rules) async {
       passedRules = rules;
-      return (total: 2, picked: [fakeRow('S1.SH', name: '威孚高科')], dataDate: '20260930');
+      return (
+        total: 2,
+        picked: [fakeRow('S1.SH', name: '威孚高科')],
+        dataDate: '20260930',
+        blockedStale: 0,
+        blockedCorporateAction: 0,
+      );
     });
 
     expect(find.byType(Switch), findsNWidgets(20));
@@ -194,7 +210,7 @@ Future<void> scrollTo(WidgetTester tester, Finder finder) =>
               ),
             ),
           ],
-          dataDate: '20260930',
+          dataDate: '20260930', blockedStale: 0, blockedCorporateAction: 0,
         );
       });
       await scrollTo(tester, find.text('量比>2'));
@@ -223,7 +239,13 @@ Future<void> scrollTo(WidgetTester tester, Finder finder) =>
 
     testWidgets('无回测数据时新列留空，不显示 0 分或 0.00 价位', (tester) async {
       await pumpWith(tester, (dbPath, rules) async {
-        return (total: 1, picked: [fakeRow('600000.SH')], dataDate: '20260930');
+        return (
+          total: 1,
+          picked: [fakeRow('600000.SH')],
+          dataDate: '20260930',
+          blockedStale: 0,
+          blockedCorporateAction: 0,
+        );
       });
       await scrollTo(tester, find.text('量比>2'));
       await tester.tap(find.text('量比>2'));
@@ -242,7 +264,13 @@ Future<void> scrollTo(WidgetTester tester, Finder finder) =>
       List<Rule>? passedRules;
       await pumpWith(tester, (dbPath, rules) async {
         passedRules = rules;
-        return (total: 2, picked: [fakeRow('S1.SH')], dataDate: '20260930');
+        return (
+          total: 2,
+          picked: [fakeRow('S1.SH')],
+          dataDate: '20260930',
+          blockedStale: 0,
+          blockedCorporateAction: 0,
+        );
       });
 
       // 按规则名点，不按 Switch 下标：侧栏顺序由 ruleIdsSortedByWinRate 决定，
@@ -263,7 +291,13 @@ Future<void> scrollTo(WidgetTester tester, Finder finder) =>
     });
 
     testWidgets('引擎返回空库时提示先同步', (tester) async {
-      await pumpWith(tester, (a, b) async => (total: 0, picked: const <ScreenRow>[], dataDate: null));
+      await pumpWith(tester, (a, b) async => (
+            total: 0,
+            picked: const <ScreenRow>[],
+            dataDate: null,
+            blockedStale: 0,
+            blockedCorporateAction: 0,
+          ));
       await scrollTo(tester, find.text('量比>2'));
       await tester.tap(find.text('量比>2'));
       await tester.pump();
@@ -276,7 +310,13 @@ Future<void> scrollTo(WidgetTester tester, Finder finder) =>
     testWidgets('开始选股期间显示模态加载框，完成后消失', (tester) async {
       await pumpWith(tester, (dbPath, rules) async {
         await Future<void>.delayed(const Duration(milliseconds: 200));
-        return (total: 1, picked: [fakeRow('S1.SH', name: '威孚高科')], dataDate: '20260930');
+        return (
+          total: 1,
+          picked: [fakeRow('S1.SH', name: '威孚高科')],
+          dataDate: '20260930',
+          blockedStale: 0,
+          blockedCorporateAction: 0,
+        );
       });
       await tester.tap(find.text('收盘价站上MA20'));
       await tester.pump();
@@ -288,8 +328,13 @@ Future<void> scrollTo(WidgetTester tester, Finder finder) =>
     });
 
     testWidgets('名称缺失时降级显示占位符', (tester) async {
-      await pumpWith(tester, (a, b) async =>
-          (total: 1, picked: [fakeRow('600000.SH')], dataDate: '20260930'));
+      await pumpWith(tester, (a, b) async => (
+            total: 1,
+            picked: [fakeRow('600000.SH')],
+            dataDate: '20260930',
+            blockedStale: 0,
+            blockedCorporateAction: 0,
+          ));
       await tester.tap(find.text('收盘价站上MA20'));
       await tester.pump();
       await tester.tap(find.text('开始选股'));
@@ -324,7 +369,16 @@ Future<void> scrollTo(WidgetTester tester, Finder finder) =>
         color: AccentColor.green.color,
         child: MaterialApp(
           home: Scaffold(
-            body: ScreeningPage(dbPath: dbPath, screenFn: (a, b) async => (total: 1, picked: const <ScreenRow>[], dataDate: null)),
+            body: ScreeningPage(
+                dbPath: dbPath,
+                screenFn: (a, b) async => (
+                  total: 1,
+                  picked: const <ScreenRow>[],
+                  dataDate: null,
+                  blockedStale: 0,
+                  blockedCorporateAction: 0,
+                ),
+              ),
           ),
         ),
       ));
@@ -544,6 +598,46 @@ Future<void> scrollTo(WidgetTester tester, Finder finder) =>
       expect(find.byType(CircularProgressIndicator), findsOneWidget);
       expect(find.textContaining('同步中'), findsWidgets);
     });
+
+    testWidgets('回补历史：选档位后把年数回调给外壳', (tester) async {
+      int? years;
+      await tester.pumpWidget(MaterialApp(
+        home: Scaffold(
+          body: SettingsPage(
+            configPath: '${tmp.path}/.env',
+            dbPath: dbPath,
+            onBackfillPressed: (y) => years = y,
+          ),
+        ),
+      ));
+      await tester.pump();
+
+      await tester.tap(find.text('回补历史'));
+      await tester.pump();
+      await tester.tap(find.text('近 2 年'));
+      await tester.pump();
+
+      expect(years, 2);
+      expect(find.text('近 2 年'), findsNothing, reason: '选择后弹窗应关闭');
+    });
+
+    testWidgets('回补历史：同步进行中禁用入口', (tester) async {
+      await tester.pumpWidget(MaterialApp(
+        home: Scaffold(
+          body: SettingsPage(
+            configPath: '${tmp.path}/.env',
+            dbPath: dbPath,
+            syncing: true,
+          ),
+        ),
+      ));
+      await tester.pump();
+
+      final button = tester.widget<OutlinedButton>(
+        find.widgetWithText(OutlinedButton, '回补历史'),
+      );
+      expect(button.onPressed, isNull);
+    });
   });
   
   
@@ -575,7 +669,66 @@ Future<void> scrollTo(WidgetTester tester, Finder finder) =>
       expect(backtests, 1, reason: '有新数据就应重算一次报告');
     });
 
-    testWidgets('同步 0 行（数据齐全）不重算回测', (tester) async {
+    testWidgets('回补历史：设置页选档后外壳按年数算起点走回补同步', (tester) async {
+      String? usedFrom;
+      var backfills = 0;
+      await tester.pumpWidget(StockApp(
+        config: AppConfig(tushareToken: 'tok', dbPath: dbPath),
+        showOnboarding: false,
+        persistAccent: (_) async {},
+        runSyncFn: ({required dbPath, required token, onProgress}) async =>
+            const SyncResult(dates: 0, rows: 0),
+        runBackfillFn: ({required dbPath, required token, required fromDate, onProgress}) async {
+          backfills++;
+          usedFrom = fromDate;
+          return const SyncResult(dates: 500, rows: 200000);
+        },
+        runBacktestFn: (_, {reportPath}) async => fakeReport(),
+      ));
+      await tester.pump();
+      await scrollTo(tester, find.text('设置'));
+      await tester.tap(find.text('设置'));
+      await tester.pumpAndSettle();
+      await tester.tap(find.text('回补历史'));
+      await tester.pump();
+      await tester.tap(find.text('近 3 年'));
+      await tester.pump();
+      await tester.pumpAndSettle();
+
+      expect(backfills, 1);
+      // 容忍测试跨零点：今天或昨天起算的 3 年前都算对
+      final expected = {
+        backfillFromDate(DateTime.now(), 3),
+        backfillFromDate(DateTime.now().subtract(const Duration(days: 1)), 3),
+      };
+      expect(expected, contains(usedFrom));
+      // 消息同时出现在工作台状态行与设置弹窗里
+      expect(find.textContaining('回补完成'), findsWidgets);
+    });
+
+    testWidgets('同步失败时状态行以「同步失败」开头（不是「同步中失败」）', (tester) async {
+      await tester.pumpWidget(StockApp(
+        config: AppConfig(tushareToken: 'tok', dbPath: dbPath),
+        showOnboarding: false,
+        persistAccent: (_) async {},
+        runSyncFn: ({required dbPath, required token, onProgress}) async =>
+            throw Exception('boom'),
+        runBacktestFn: (_, {reportPath}) async => fakeReport(),
+      ));
+      await tester.pump();
+      await scrollTo(tester, find.text('设置'));
+      await tester.tap(find.text('设置'));
+      await tester.pumpAndSettle();
+      await tester.tap(find.text('同步数据'));
+      await tester.pumpAndSettle();
+
+      // describeSyncError 兜底文案本身含「同步失败」，不能用正向包含断言；
+      // 判据是外壳前缀不得再拼出「同步中失败」。
+      expect(find.textContaining('同步中失败'), findsNothing,
+          reason: '失败文案应为「同步失败：…」而非「同步中失败：…」');
+    });
+
+    testWidgets('报告缺失（如手机首次安装）时同步完成后自动补算一次', (tester) async {
       var backtests = 0;
       await tester.pumpWidget(StockApp(
         config: AppConfig(tushareToken: 'tok', dbPath: dbPath),
@@ -590,7 +743,26 @@ Future<void> scrollTo(WidgetTester tester, Finder finder) =>
       ));
       await tester.pump();
       await tester.pumpAndSettle();
-      expect(backtests, 0, reason: '没有新数据就不该白跑 30 秒');
+      expect(backtests, 1, reason: '没有报告时规则排序与评分/目标价都不可用，应补算');
+    });
+
+    testWidgets('报告已存在且同步 0 行：不重算', (tester) async {
+      ReportStore(reportPathFor(dbPath)).save(fakeReport());
+      var backtests = 0;
+      await tester.pumpWidget(StockApp(
+        config: AppConfig(tushareToken: 'tok', dbPath: dbPath),
+        showOnboarding: false,
+        persistAccent: (_) async {},
+        runSyncFn: ({required dbPath, required token, onProgress}) async =>
+            const SyncResult(dates: 0, rows: 0),
+        runBacktestFn: (_, {reportPath}) async {
+          backtests++;
+          return fakeReport();
+        },
+      ));
+      await tester.pump();
+      await tester.pumpAndSettle();
+      expect(backtests, 0, reason: '报告在就不重复跑，重算只由新增数据触发');
     });
   });
     group('规则列表显示回测统计', () {
@@ -614,8 +786,13 @@ Future<void> scrollTo(WidgetTester tester, Finder finder) =>
           home: Scaffold(
             body: ScreeningPage(
               dbPath: dbPath,
-              screenFn: (_, _) async =>
-                  (total: 1, picked: const <ScreenRow>[], dataDate: null),
+              screenFn: (_, _) async => (
+                total: 1,
+                picked: const <ScreenRow>[],
+                dataDate: null,
+                blockedStale: 0,
+                blockedCorporateAction: 0,
+              ),
               backtestReport: fakeReport(),
             ),
           ),
@@ -633,8 +810,13 @@ Future<void> scrollTo(WidgetTester tester, Finder finder) =>
           home: Scaffold(
             body: ScreeningPage(
               dbPath: dbPath,
-              screenFn: (_, _) async =>
-                  (total: 1, picked: const <ScreenRow>[], dataDate: null),
+              screenFn: (_, _) async => (
+                total: 1,
+                picked: const <ScreenRow>[],
+                dataDate: null,
+                blockedStale: 0,
+                blockedCorporateAction: 0,
+              ),
             ),
           ),
         ));
