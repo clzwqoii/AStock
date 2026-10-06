@@ -61,6 +61,13 @@ Directory makeApp(String parent, String name, {required String version}) {
 }
 
 void main() {
+  // updater.sh 依赖 macOS 专有命令（codesign/ditto/PlistBuddy），CI 跑在
+  // ubuntu-latest 上：非 macOS 直接整体跳过，别把「平台不适用」报成失败。
+  if (!Platform.isMacOS) {
+    test('updater.sh 集成测试', () {}, skip: '仅 macOS 可跑（依赖 ditto/codesign）');
+    return;
+  }
+
   setUp(() {
     tmp = Directory.systemTemp.createTempSync('updater_test');
   });
@@ -70,7 +77,6 @@ void main() {
 
   test('脚本存在且可执行', () {
     expect(File(_scriptPath).existsSync(), isTrue, reason: '缺少 macos/Runner/updater.sh');
-    expect(Platform.isMacOS, isTrue);
   });
 
   group('dry-run：只做校验与演练，不动真实安装', () {
