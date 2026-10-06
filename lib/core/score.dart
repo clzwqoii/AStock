@@ -25,6 +25,9 @@
 library;
 
 import 'package:stock/core/backtest.dart';
+import 'package:stock/core/features.dart';
+import 'package:stock/core/rules.dart';
+import 'package:stock/core/logreg.dart';
 
 /// 加权样本量低于此值时评分标为低置信。
 const kScoreMinSampleCount = 30;
@@ -45,6 +48,7 @@ class StockScore {
     required this.baselineWinRate,
     required this.sampleCount,
     required this.hitRuleIds,
+    required this.source,
     required this.lowConfidence,
     required this.reason,
   });
@@ -61,6 +65,10 @@ class StockScore {
   /// 加权样本量 = 各命中规则信号数之和。取值越小越不可信。
   final int sampleCount;
 
+  /// 打分层用了哪套方案：`planA` = 命中规则的加权历史胜率；
+  /// `planB` = 逻辑回归。UI 可据此标注，也便于回查是哪一版模型产出的排序。
+  final String source;
+
   /// 参与加权的规则 id（已剔除未登记/无数据的）。
   final List<String> hitRuleIds;
 
@@ -72,6 +80,17 @@ class StockScore {
 
   /// 相对基准的超额（百分点）。正表示历史上跑赢随便买。
   double get excessPp => (rawWinRate - baselineWinRate) * 100;
+
+  StockScore copyWith({String? reason}) => StockScore(
+        score: score,
+        rawWinRate: rawWinRate,
+        baselineWinRate: baselineWinRate,
+        sampleCount: sampleCount,
+        hitRuleIds: hitRuleIds,
+        source: source,
+        lowConfidence: lowConfidence,
+        reason: reason ?? this.reason,
+      );
 
   String get tier {
     if (score >= kScoreHighTier) return '高';
@@ -89,6 +108,9 @@ StockScore scoreOf(
   BacktestReport? report, {
   List<String> hitRuleIds = const [],
   int horizon = 10,
+  LogRegModel? model,
+  IndicatorSnapshot? snapshot,
+  bool fallbackToPlanA = false,
 }) {
   final base = report?.baseline[horizon];
   final baseWin = base?.winRate;
@@ -113,6 +135,7 @@ StockScore scoreOf(
       baselineWinRate: baseWin ?? 0.5,
       sampleCount: 0,
       hitRuleIds: const [],
+      source: 'planA',
       lowConfidence: true,
       reason: '暂无回测报告，评分不可用',
     );
@@ -124,6 +147,7 @@ StockScore scoreOf(
       baselineWinRate: 0.5,
       sampleCount: 0,
       hitRuleIds: const [],
+      source: 'planA',
       lowConfidence: true,
       reason: '回测报告缺 $horizon 日基准，评分不可用',
     );
@@ -135,6 +159,7 @@ StockScore scoreOf(
       baselineWinRate: baseWin,
       sampleCount: 0,
       hitRuleIds: const [],
+      source: 'planA',
       lowConfidence: true,
       reason: '未命中任何已回测规则',
     );
@@ -145,15 +170,58 @@ StockScore scoreOf(
   if (count < kScoreMinSampleCount) {
     reason = '历史样本仅 $count 个，评分不可信';
   }
-  return StockScore(
+  final planA = StockScore(
     score: raw * 100,
     rawWinRate: raw,
     baselineWinRate: baseWin,
     sampleCount: count,
     hitRuleIds: used,
+    source: 'planA',
     lowConfidence: count < kScoreMinSampleCount,
     reason: reason,
   );
+
+  // 方案 B：有模型且维度对得上就用它。
+  //
+  // 为什么值得替：方案 A 对「同一条规则」下的所有股票给出**同一个分**，
+  // 实测 holdout AUC 只有 0.512（≈随机）。方案 B 用 rsi14 等连续特征区分
+  // 规则内部的强弱，holdout AUC 0.530。两者的分数口径一致（0~100），
+  // 所以这里可以直接替换，UI 与 CSV 都不用改。
+  if (model != null) {
+    try {
+      if (snapshot == null) {
+        throw ArgumentError('要用模型打分就必须传 snapshot，否则没有特征向量');
+      }
+      final vec = featureVector(snapshot, hitRuleIds: hitRuleIds);
+      if (vec.length != model.featureCount) {
+        throw ArgumentError(
+            '模型特征数 ${model.featureCount} ≠ featureNames ${vec.length}，'
+            '系数会整体错位');
+      }
+      final p = model.predictProba(vec);
+      return StockScore(
+        score: p * 100,
+        rawWinRate: p,
+        baselineWinRate: baseWin,
+        // 样本量与命中规则仍取方案 A 的统计——那部分与用不用模型无关，
+        // 而且它是"有多少历史证据支撑"的诚实度量。
+        sampleCount: planA.sampleCount,
+        hitRuleIds: used,
+        source: 'planB',
+        lowConfidence: planA.lowConfidence,
+        reason: planA.reason,
+      );
+    } on ArgumentError catch (e) {
+      // 维度不符 = 系数错位，比不打分危险。要么按调用方要求回退，
+      // 要么直接抛——悄悄给个错分是最坏的选择。
+      if (fallbackToPlanA) {
+        return planA.copyWith(
+            reason: '模型与特征表不匹配（$e），已回退加权胜率评分');
+      }
+      rethrow;
+    }
+  }
+  return planA;
 }
 
 

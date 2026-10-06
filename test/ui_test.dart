@@ -175,6 +175,7 @@ Future<void> scrollTo(WidgetTester tester, Finder finder) =>
               ma20: 9.8,
               score: StockScore(
                 score: 90.4,
+                source: 'planA',
                 rawWinRate: 0.904,
                 baselineWinRate: 0.50,
                 sampleCount: 7496,

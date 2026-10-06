@@ -22,10 +22,10 @@ Future<void> main(List<String> args) async {
   }
   final repo = BarRepository(AppConfig.load().dbPath);
   try {
-    final stocks = repo.loadAllStocks();
+    final stocks = repo.loadAllStocks(excludeSpecialStocks: true);
     final rules = [for (final id in args) ruleById(id)];
     final picked = screen(stocks, rules);
-    print('股票总数: ${stocks.length}（按规则 ${args.join(' + ')} 筛选）');
+    print('股票总数: ${stocks.length}（按规则 ${args.join(' + ')} 筛选，已剔除 ST/退市/科创板）');
     print('入选 ${picked.length} 只:');
     for (final s in picked.take(30)) {
       print('  ${s.symbol.padRight(10)} 收盘 ${s.last.close}');

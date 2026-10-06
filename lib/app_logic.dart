@@ -9,6 +9,8 @@ import 'package:http/http.dart' as h;
 import 'package:stock/core/backtest.dart';
 import 'package:stock/core/models.dart';
 import 'package:stock/core/rules.dart';
+import 'package:stock/core/features.dart';
+import 'package:stock/core/logreg.dart';
 import 'package:stock/core/score.dart';
 import 'package:stock/core/screener.dart';
 import 'package:stock/data/bar_repository.dart';
@@ -18,7 +20,7 @@ import 'package:stock/data/sync_service.dart';
 import 'package:stock/data/tushare_client.dart';
 
 /// 当前应用版本（发布新包时同步修改，与 pubspec.version 保持一致）。
-const kAppVersion = '2.1.0';
+const kAppVersion = '2.2.0';
 
 /// 更新清单候选源（并发竞速，第一个响应的胜出）。
 /// 国内网络优先命中 Gitee；jsDelivr 镜像可加速 GitHub raw。建仓库后替换为你的地址。
@@ -207,7 +209,7 @@ String _csvCell(Object? v) {
 String rowsToCsv(List<ScreenRow> rows, {String? dataDate, String? combo, bool withScore = false}) {
   // 列序：默认与旧版逐字节一致。新列只追加在最后，且要显式传 [withScore]
   // 才有——CSV 是被外部脚本消费的格式，"突然多出六列"会让它们整行错位。
-  const scoreHeader = ',评分,档位,目标价,止损价,盈亏比,样本数';
+  const scoreHeader = ',评分,档位,目标价,止损价,盈亏比,样本数,评分来源';
   final buf = StringBuffer()
     ..writeln('# A股选股结果（不复权·手）'
         '${dataDate == null ? '' : '  数据截至 $dataDate'}'
@@ -238,6 +240,8 @@ String rowsToCsv(List<ScreenRow> rows, {String? dataDate, String? combo, bool wi
         f?.stop == null ? '' : f!.stop!.toStringAsFixed(2),
         f?.riskReward == null ? '' : f!.riskReward!.toStringAsFixed(2),
         sc == null ? '' : sc.sampleCount.toString(),
+        // planA / planB。回查某一版 CSV 是哪套模型产出的排序时用得上。
+        sc == null ? '' : sc.source,
       ]);
     }
     buf.writeln(cells.join(','));
@@ -276,7 +280,7 @@ String _stamp() {
   return '${n.year}${p2(n.month)}${p2(n.day)}-${p2(n.hour)}${p2(n.minute)}${p2(n.second)}';
 }
 
-/// 选股：后台 isolate 里打开库 → 全量加载 → 规则筛选 → 组装展示行 → 关库。
+/// 选股：后台 isolate 里打开库 → 全量加载（剔除 ST / 退市 / 科创板）→ 规则筛选 → 组装展示行 → 关库。
 /// 返回股票总数、入选行、数据截止交易日。
 Future<({int total, List<ScreenRow> picked, String? dataDate})> runScreening(
   String dbPath,
@@ -285,10 +289,11 @@ Future<({int total, List<ScreenRow> picked, String? dataDate})> runScreening(
     Isolate.run(() {
       final repo = BarRepository(dbPath);
       try {
-        final stocks = repo.loadAllStocks();
+        final stocks = repo.loadAllStocks(excludeSpecialStocks: true);
         final names = repo.stockNames();
         final picked = <ScreenRow>[];
         final report = loadBacktestReport(dbPath);
+        final model = loadScoreModel(dbPath);
         for (final hit in screenWithHits(stocks, rules)) {
           final s = hit.stock;
           final snap = hit.snapshot; // 筛选时已构建，直接复用
@@ -304,7 +309,16 @@ Future<({int total, List<ScreenRow> picked, String? dataDate})> runScreening(
             amountWan: s.last.amount / 10,
             ma20: snap.ma20,
             matchedRules: [for (final id in ids) ruleById(id).name],
-            score: scoreOf(report, hitRuleIds: ids, horizon: kScoreHorizon),
+            // 有 score-model.json 就走方案 B（holdout AUC 0.530）；没有就退回
+            // 方案 A。模型缺失是常态（首次安装、还没训练过），不该影响选股。
+            score: scoreOf(
+              report,
+              hitRuleIds: ids,
+              horizon: kScoreHorizon,
+              model: model,
+              snapshot: snap,
+              fallbackToPlanA: true,
+            ),
             forecast: priceForecast(
               report,
               close: snap.close,
@@ -322,6 +336,20 @@ Future<({int total, List<ScreenRow> picked, String? dataDate})> runScreening(
 /// 读回测报告缓存；无文件或文件损坏返回 null（报表不该影响选股）。
 BacktestReport? loadBacktestReport(String dbPath, {String? reportPath}) =>
     ReportStore(reportPath ?? reportPathFor(dbPath)).load();
+
+/// 读评分模型（方案 B）。文件缺失/损坏/维度与当前特征表不符时返回 null，
+/// 由 [scoreOf] 回退方案 A——模型是加速器，不是选股的前置条件。
+LogRegModel? loadScoreModel(String dbPath, {String? modelPath}) {
+  final f = File(modelPath ?? '${File(dbPath).parent.path}/score-model.json');
+  if (!f.existsSync()) return null;
+  final m = LogRegModel.fromJsonString(f.readAsStringSync());
+  if (m == null) return null;
+  if (m.featureCount != featureNames.length) {
+    // 特征表改过而模型没重训：维度不符等同系数整体错位，宁可不用。
+    return null;
+  }
+  return m;
+}
 
 /// 回测全部内置规则 × [kDefaultHorizons] 持有期，结果落盘后返回（后台 isolate）。
 /// 实测约 20 秒（5623 只 × 424 根）；落盘后页面秒开。

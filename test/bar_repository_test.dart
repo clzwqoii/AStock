@@ -176,10 +176,13 @@ void main() {
       expect(repo.loadAllStocks(excludeSpecialStocks: false), hasLength(9));
     });
 
-    test('与 minBars 过滤同时生效', () {
+    test('与 minBars 过滤同时生效（叠加而非互相替代）', () {
       seedMixed();
+      // 只有 600000.SH 逃过过滤，但它只有 1 根 < minBars=2 → 空
       expect(repo.loadAllStocks(excludeSpecialStocks: true, minBars: 2), isEmpty);
-      expect(repo.loadAllStocks(minBars: 2).map((s) => s.symbol), hasLength(9));
+      expect(repo.loadAllStocks(minBars: 2), isEmpty); // 都不开过滤时同样只有 1 根
+      expect(repo.loadAllStocks(minBars: 1), hasLength(9));
+      expect(repo.loadAllStocks(excludeSpecialStocks: true, minBars: 1), hasLength(1));
     });
 
     test('名单缺失（stocks 表为空）时只按代码剔科创板，不误杀其它股票', () {
@@ -188,11 +191,23 @@ void main() {
       expect(repo.loadAllStocks(excludeSpecialStocks: true).map((s) => s.symbol), ['600000.SH']);
     });
 
-    test('名称含 ST 的正常股票不被误杀（只在标记位上匹配，不做子串搜索）', () {
-      // 若实现误用 name LIKE '%ST%'，会把这类名字一并剔除。
-      repo.upsertStocks(const [(tsCode: '600007.SH', name: 'HOST服务')]);
-      repo.upsertBars([row('600007.SH', '20260930')]);
-      expect(repo.loadAllStocks(excludeSpecialStocks: true).map((s) => s.symbol), ['600007.SH']);
+    test('非标记位上的字母不误杀：XD 除权前缀与拉丁名都应保留', () {
+      // 除权后 tushare/eastmoney 名称带 XD 前缀（如 XD安徽凤凰），与 ST 无关；
+      // 另有 TCL智家、九号公司-WD 这类合法名字。若实现按 ST 子串搜索就会误伤。
+      repo.upsertStocks(const [
+        (tsCode: '600007.SH', name: 'XD安徽凤凰'),
+        (tsCode: '600008.SH', name: 'TCL中环'),
+        (tsCode: '600009.SH', name: '九号公司-WD'),
+        (tsCode: '600010.SH', name: 'ST龙韵'),
+      ]);
+      repo.upsertBars([
+        row('600007.SH', '20260930'),
+        row('600008.SH', '20260930'),
+        row('600009.SH', '20260930'),
+        row('600010.SH', '20260930'),
+      ]);
+      expect(repo.loadAllStocks(excludeSpecialStocks: true).map((s) => s.symbol),
+          ['600007.SH', '600008.SH', '600009.SH']);
     });
   });
 

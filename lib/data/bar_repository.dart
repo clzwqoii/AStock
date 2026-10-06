@@ -121,6 +121,14 @@ class BarRepository {
 
   /// 全部股票的日线，按股票分组、日期升序；不足 [minBars] 根的股票剔除。
   ///
+  /// [excludeSpecialStocks] 为 true 时把 ST 系与科创板挡在选股池外：
+  /// 名称以 ST / *ST / S*ST / PT 开头（风险警示与退市整理），名称含「退」（退市整理期
+  /// 个股，退市XX 与 XX退 两种写法都在真实库里），代码以 68 开头（科创板与 CDR，
+  /// 权限门槛与主板不同）。ST 标记只在开头——按子串匹配会误杀名字里含 ST 的正常股票。
+  ///
+  /// **回测必须传 false（默认）**：回测要在与选股一致的样本上才有意义，但剔除会移动
+  /// 样本口径（历史胜率会变），要换口径必须重新生成报告。选股入口传 true。
+  ///
   /// [maxBars] > 0 时每只股票只保留末尾这么多根。**默认 0（不截断），生产路径未启用**：
   /// 截断会移动 `IndicatorSeries` 的前缀位置，从而移动各指标的 null 边界——
   /// MA250 在序列前 249 位为 null，一只 320 根的股票截到 300 根后 MA250 仍可算，
@@ -129,7 +137,11 @@ class BarRepository {
   /// 是选股口径变更，要启用必须先确认口径变更可接受。
   ///
   /// 回测必须传 0：它逐日滚动、需要全部历史。
-  List<StockData> loadAllStocks({int minBars = 0, int maxBars = 0}) {
+  List<StockData> loadAllStocks({
+    int minBars = 0,
+    int maxBars = 0,
+    bool excludeSpecialStocks = false,
+  }) {
     final byStock = <String, List<Bar>>{};
     // 逐行游标而非 `_db.select`：后者先把 360 万行全物化成 Row 对象再交给调用方，
     // 实测峰值 RSS 1889MB / 5.82s；游标流式读是 648MB / 4.68s，同一份数据逐位一致。
@@ -139,7 +151,8 @@ class BarRepository {
     // int 下标虽然运行时可用，但每个访问点都会触发 collection_methods_unrelated_type。
     final st = _db.prepare(
         'SELECT ts_code, trade_date, open, high, low, close, vol, amount '
-        'FROM daily_bars ORDER BY ts_code, trade_date');
+        'FROM daily_bars ${_specialFilterSql(excludeSpecialStocks)} '
+        'ORDER BY ts_code, trade_date');
     try {
       final cur = st.selectCursor();
       while (cur.moveNext()) {
@@ -178,5 +191,15 @@ class BarRepository {
   }
 
   void close() => _db.dispose();
+
+  /// 选股池过滤的 SQL 片段（参数为 false 时返回空串，查询与不加过滤逐字节相同）。
+  /// GLOB 而非 LIKE：`?` 是 LIKE 的单字符通配符，用它写 `S?ST?*` 会连 `SHST` 之类
+  /// 一起匹配；GLOB 无此坑，且能用主键覆盖索引（实测 360 万行 1.4s，与不过滤同量级）。
+  String _specialFilterSql(bool excludeSpecialStocks) => excludeSpecialStocks
+      ? "WHERE ts_code NOT LIKE '68%' "
+          "AND ts_code NOT IN (SELECT ts_code FROM stocks WHERE "
+          "name GLOB 'ST*' OR name GLOB '*ST*' OR name GLOB 'S*ST*' "
+          "OR name GLOB 'PT*' OR name LIKE '%退%')"
+      : '';
 }
 

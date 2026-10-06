@@ -98,6 +98,7 @@ void main() {
           baselineWinRate: 0.5,
           sampleCount: 100,
           hitRuleIds: const ['x'],
+          source: 'planA',
           lowConfidence: false,
           reason: '',
         ),
@@ -177,14 +178,14 @@ void main() {
       final ls = withScore.trim().split('\n');
       expect(ls[1],
           '代码,名称,收盘,涨跌,涨跌幅%,量比,成交额(万),MA20,数据截至,规则组合,'
-          '评分,档位,目标价,止损价,盈亏比,样本数');
+          '评分,档位,目标价,止损价,盈亏比,样本数,评分来源');
     });
 
     test('withScore: true 时无评分/预测价写空串而不是 null 或 0', () {
       final csv = rowsToCsv([row('A', close: 10)], withScore: true);
       final cells = csv.trim().split('\n').last.split(',');
-      // 原 10 列 + 6 列新列 = 16
-      expect(cells.length, 16);
+      // 原 10 列 + 7 列新列 = 17
+      expect(cells.length, 17);
       expect(cells[10], '', reason: '无报告时评分必须留空，不能写 0 分');
       expect(cells[12], '', reason: '无目标价时留空');
     });

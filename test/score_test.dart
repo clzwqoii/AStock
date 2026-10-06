@@ -1,5 +1,9 @@
 import 'package:flutter_test/flutter_test.dart';
 import 'package:stock/core/backtest.dart';
+import 'package:stock/core/features.dart';
+import 'package:stock/core/rules.dart';
+
+import 'fixtures.dart';
 import 'package:stock/core/logreg.dart';
 import 'package:stock/core/score.dart';
 
@@ -28,62 +32,63 @@ BacktestStats _st(
       stdDev: sd,
     );
 
-void main() {
-  group('scoreOf 规则历史胜率聚合评分', () {
-    // 迷你报告：三条规则 + 基准。样本量差异巨大，用来验证加权与低置信降级。
-    BacktestReport miniReport() => BacktestReport(
-          generatedAt: '2026-10-06T00:00:00.000',
-          horizons: const [10],
-          stockCount: 5672,
-          baseline: {
-            10: Baseline.fromStats(
+/// 迷你报告：三条规则 + 基准，样本量差异巨大，用来验证加权与低置信降级。
+  // 迷你报告：三条规则 + 基准。样本量差异巨大，用来验证加权与低置信降级。
+  BacktestReport miniReport() => BacktestReport(
+        generatedAt: '2026-10-06T00:00:00.000',
+        horizons: const [10],
+        stockCount: 5672,
+        baseline: {
+          10: Baseline.fromStats(
+            forwardDays: 10,
+            stats: BacktestStats(
+              count: 1000000,
+              winRate: 0.50,
+              avgReturn: 0.2,
+              medianReturn: 0.1,
+              bestReturn: 50,
+              worstReturn: -40,
+              profitFactor: 1.05,
+              p10: -5,
+              p25: -2,
+              p75: 6,
+              p90: 10,
+              stdDev: 12,
+            ),
+          ),
+        },
+        results: {
+          'rsi_oversold_volume': {
+            10: BacktestResult.fromStats(
+              ruleId: 'rsi_oversold_volume',
               forwardDays: 10,
-              stats: BacktestStats(
-                count: 1000000,
-                winRate: 0.50,
-                avgReturn: 0.2,
-                medianReturn: 0.1,
-                bestReturn: 50,
-                worstReturn: -40,
-                profitFactor: 1.05,
-                p10: -5,
-                p25: -2,
-                p75: 6,
-                p90: 10,
-                stdDev: 12,
-              ),
+              stats: _st(0.90, 19.05, 7496,
+                  p10: -2.72, p25: 7.32, p75: 30.02, p90: 40.05, sd: 18.87),
             ),
           },
-          results: {
-            'rsi_oversold_volume': {
-              10: BacktestResult.fromStats(
-                ruleId: 'rsi_oversold_volume',
-                forwardDays: 10,
-                stats: _st(0.90, 19.05, 7496,
-                    p10: -2.72, p25: 7.32, p75: 30.02, p90: 40.05, sd: 18.87),
-              ),
-            },
-            'tiny_signal': {
-              10: BacktestResult.fromStats(
-                ruleId: 'tiny_signal',
-                forwardDays: 10,
-                stats: _st(0.99, 90, 5,
-                    p10: 5, p25: 30, p75: 80, p90: 95, sd: 20),
-              ),
-            },
-            'weak_rule': {
-              10: BacktestResult.fromStats(
-                ruleId: 'weak_rule',
-                forwardDays: 10,
-                stats: _st(0.40, -1.5, 800,
-                    p10: -9, p25: -5, p75: 2, p90: 4, sd: 5),
-              ),
-            },
+          'tiny_signal': {
+            10: BacktestResult.fromStats(
+              ruleId: 'tiny_signal',
+              forwardDays: 10,
+              stats: _st(0.99, 90, 5,
+                  p10: 5, p25: 30, p75: 80, p90: 95, sd: 20),
+            ),
           },
-          yearly: const {},
-          yearlyBaseline: const {},
-        );
+          'weak_rule': {
+            10: BacktestResult.fromStats(
+              ruleId: 'weak_rule',
+              forwardDays: 10,
+              stats: _st(0.40, -1.5, 800,
+                  p10: -9, p25: -5, p75: 2, p90: 4, sd: 5),
+            ),
+          },
+        },
+        yearly: const {},
+        yearlyBaseline: const {},
+      );
 
+void main() {
+  group('scoreOf 规则历史胜率聚合评分', () {
     test('单条规则命中 → 分数就是它的历史胜率 × 100', () {
       final s = scoreOf(miniReport(), hitRuleIds: const ['rsi_oversold_volume']);
       expect(s.score, closeTo(90, 1e-9));
@@ -194,17 +199,22 @@ void main() {
       // 同一条规则、同一个快照，方案 A 只会给出固定的 90 分；
       // 方案 B 能按 rsi14/量比等连续特征区分。
       final report = miniReport();
+      // 训练样本必须与 featureNames 等宽，否则测的是"维度检查"而不是"接管"
       final model = LogRegModel.train([
-        [15.0, 2.0],
-        [25.0, 1.0],
-        [15.0, 1.0],
-        [25.0, 2.0],
-      ], const [1, 0, 0, 0], maxIter: 60, l2: 1);
+        [for (var j = 0; j < featureNames.length; j++) 1.0],
+        [for (var j = 0; j < featureNames.length; j++) -1.0],
+        [for (var j = 0; j < featureNames.length; j++) 2.0],
+        [for (var j = 0; j < featureNames.length; j++) -2.0],
+      ], const [1, 0, 1, 0], maxIter: 60, l2: 1);
 
       final a = scoreOf(report, hitRuleIds: const ['rsi_oversold_volume']);
       final b = scoreOf(report,
-          hitRuleIds: const ['rsi_oversold_volume'], model: model);
+          hitRuleIds: const ['rsi_oversold_volume'],
+          model: model,
+          snapshot: snap());
       expect(a.score, closeTo(90, 1e-9), reason: '方案 A 对该规则是常数分');
+      expect(b.score, greaterThanOrEqualTo(0));
+      expect(b.score, lessThanOrEqualTo(100));
       expect(b.score, isNot(a.score));
       expect(b.source, 'planB');
       expect(a.source, 'planA');
@@ -219,7 +229,9 @@ void main() {
       ], const [0, 1], maxIter: 10, l2: 0);
       expect(
           () => scoreOf(report,
-              hitRuleIds: const ['rsi_oversold_volume'], model: wrongDim),
+              hitRuleIds: const ['rsi_oversold_volume'],
+              model: wrongDim,
+              snapshot: snap()),
           throwsA(isA<ArgumentError>()),
           reason: '维度不符意味着系数整体错位，比不打分危险得多');
     });
@@ -233,6 +245,7 @@ void main() {
       final s = scoreOf(report,
           hitRuleIds: const ['rsi_oversold_volume'],
           model: wrongDim,
+          snapshot: snap(),
           fallbackToPlanA: true);
       expect(s.source, 'planA');
       expect(s.score, closeTo(90, 1e-9));
@@ -241,20 +254,35 @@ void main() {
 
     test('模型给出的分数仍在 0~100', () {
       final model = LogRegModel.train([
-        [15.0, 2.0],
-        [25.0, 1.0],
-        [15.0, 1.0],
-        [25.0, 2.0],
-      ], const [1, 0, 0, 0], maxIter: 60, l2: 1);
+        [for (var j = 0; j < featureNames.length; j++) 1.0],
+        [for (var j = 0; j < featureNames.length; j++) -1.0],
+        [for (var j = 0; j < featureNames.length; j++) 2.0],
+        [for (var j = 0; j < featureNames.length; j++) -2.0],
+      ], const [1, 0, 1, 0], maxIter: 60, l2: 1);
       for (var i = 0; i < 4; i++) {
         final s = scoreOf(miniReport(),
-            hitRuleIds: const ['rsi_oversold_volume'], model: model);
+            hitRuleIds: const ['rsi_oversold_volume'],
+            model: model,
+            snapshot: snap());
         expect(s.score, greaterThanOrEqualTo(0));
         expect(s.score, lessThanOrEqualTo(100));
       }
     });
   });
 }
+
+/// 造一个真实快照喂给特征层（IndicatorSnapshot 只有私有构造器）。
+IndicatorSnapshot snap() => IndicatorSeries.from([
+      for (var i = 0; i < 30; i++)
+        kbar(
+          close: 10 + i * 0.1,
+          open: 10 + i * 0.1,
+          high: 10 + i * 0.1 + 0.05,
+          low: 10 + i * 0.1 - 0.05,
+          volume: 100 + i.toDouble(),
+          date: DateTime(2024, 1, 1).add(Duration(days: i)),
+        ),
+    ]).at(29);
 
 /// 用胜率直接造一个 StockScore，专测档位边界。
 StockScore _scoreOfWin(double win) => StockScore(
@@ -263,6 +291,7 @@ StockScore _scoreOfWin(double win) => StockScore(
       baselineWinRate: 0.5,
       sampleCount: 1000,
       hitRuleIds: const ['x'],
+      source: 'planA',
       lowConfidence: false,
       reason: '',
     );
