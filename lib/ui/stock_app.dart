@@ -7,8 +7,10 @@ import 'package:flutter/services.dart';
 import 'dart:io' show Platform;
 
 import '../app_logic.dart';
+import '../core/backtest.dart';
 import '../config.dart';
 import '../net_diag.dart';
+import 'backtest_page.dart';
 import 'colors.dart';
 import 'mobile_home.dart';
 import 'onboarding.dart';
@@ -20,6 +22,7 @@ class StockApp extends StatefulWidget {
     super.key,
     required this.config,
     this.runSyncFn = runSync,
+    this.runBacktestFn = runBacktest,
     this.persistAccent,
     this.screenFn,
     this.persistToken,
@@ -31,6 +34,10 @@ class StockApp extends StatefulWidget {
 
   /// 供测试注入假同步；生产用默认实现。
   final RunSyncFn runSyncFn;
+
+  /// 重算回测报告；测试可注入假实现，避免真跑 30~50 秒。
+  final Future<BacktestReport> Function(String dbPath, {String? reportPath})
+      runBacktestFn;
 
   /// 供测试注入假选股；生产用默认实现。
   final ScreenFn? screenFn;
@@ -52,6 +59,9 @@ class StockApp extends StatefulWidget {
 }
 
 class _StockAppState extends State<StockApp> {
+  /// 桌面端：false = 选股工作台，true = 回测对比页。
+  bool _showBacktest = false;
+
   late AppConfig _config = widget.config;
   bool _syncing = false;
   String? _syncMsg;
@@ -63,9 +73,18 @@ class _StockAppState extends State<StockApp> {
       : '${Platform.environment['HOME'] ?? '.'}/.stock/.env';
   final _navigatorKey = GlobalKey<NavigatorState>();
 
+  /// 回测报告缓存：启动时读一次，选股页规则列表与回测页共用；
+  /// 回测完成后 [onReport] 回来刷新，两处胜率同步更新。
+  BacktestReport? _report;
+
+  /// 是否正在重算回测报告（同步到新数据后自动触发）。
+  bool _refreshingReport = false;
+
   @override
   void initState() {
     super.initState();
+    // 回测报告是纯读的小 JSON（约 12KB），启动时顺手读掉；读失败不影响选股。
+    _report = loadBacktestReport(_config.dbPath);
     // 原生菜单（macOS）回调：Swift 端点菜单项 → 这里打开对应弹框。
     const MethodChannel('platform_menu').setMethodCallHandler((call) async {
       switch (call.method) {
@@ -125,11 +144,29 @@ class _StockAppState extends State<StockApp> {
       if (!mounted) return;
       setState(() =>
           _syncMsg = '同步完成：新增 ${r.dates} 个交易日、${r.rows} 行（数据齐全时为 0）');
+      // 有新增数据就重算回测报告，否则选股页规则列表上的胜率还是上周的。
+      if (r.rows > 0) _refreshReport();
     } catch (e) {
       if (!mounted) return;
       setState(() => _syncMsg = '同步失败：${describeSyncError(e)}');
     } finally {
       if (mounted) setState(() => _syncing = false);
+    }
+  }
+
+  /// 重算回测报告（约 30~50 秒，走后台 isolate）并刷新两处胜率展示。
+  /// 失败只提示，不影响选股——报表是附加信息，不是选股的前置条件。
+  Future<void> _refreshReport() async {
+    setState(() => _refreshingReport = true);
+    try {
+      final r = await widget.runBacktestFn(_config.dbPath);
+      if (!mounted) return;
+      setState(() => _report = r);
+    } on Exception catch (e) {
+      if (!mounted) return;
+      setState(() => _syncMsg = '回测报告刷新失败：$e');
+    } finally {
+      if (mounted) setState(() => _refreshingReport = false);
     }
   }
 
@@ -210,21 +247,37 @@ class _StockAppState extends State<StockApp> {
                 dbPath: _config.dbPath,
                 screenFn: widget.screenFn,
                 syncing: _syncing,
-                syncMsg: _syncMsg,
+                syncMsg: _refreshingReport ? '正在重算回测报告…' : _syncMsg,
                 accent: _accent,
                 onAccentChanged: _setAccent,
                 onSyncPressed: _startSync,
                 configPath: _configPath,
                 initialToken: _config.tushareToken,
                 launchUrl: widget.launchUrl,
+                backtestReport: _report,
+                backtestRunFn: widget.runBacktestFn,
+                onReport: (r) => setState(() => _report = r),
               );
             }
             return Scaffold(
-              body: ScreeningPage(
-                dbPath: _config.dbPath,
-                syncing: _syncing,
-                syncStatus: _syncMsg,
-                onOpenSettings: () => _openSettings(ctx),
+              body: IndexedStack(
+                index: _showBacktest ? 1 : 0,
+                children: [
+                  ScreeningPage(
+                    dbPath: _config.dbPath,
+                    syncing: _syncing,
+                    syncStatus: _syncMsg,
+                    onOpenSettings: () => _openSettings(ctx),
+                    onOpenBacktest: () => setState(() => _showBacktest = true),
+                    backtestReport: _report,
+                  ),
+                  BacktestPage(
+                    dbPath: _config.dbPath,
+                    onBack: () => setState(() => _showBacktest = false),
+                    initialReport: _report,
+                    onReport: (r) => setState(() => _report = r),
+                  ),
+                ],
               ),
             );
           },

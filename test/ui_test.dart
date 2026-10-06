@@ -5,9 +5,12 @@ import 'package:flutter/material.dart';
 import 'package:flutter_test/flutter_test.dart';
 import 'package:stock/app_logic.dart';
 import 'package:stock/config.dart';
+import 'package:stock/core/backtest.dart';
+import 'package:stock/core/models.dart';
 import 'package:stock/core/rules.dart';
 import 'package:stock/data/sync_service.dart';
 import 'package:stock/ui/colors.dart';
+import 'fixtures.dart';
 import 'package:stock/ui/screening_page.dart';
 import 'package:stock/ui/settings_page.dart';
 import 'package:stock/ui/stock_app.dart';
@@ -88,14 +91,14 @@ Future<void> scrollTo(WidgetTester tester, Finder finder) =>
     await tester.pump();
   }
 
-  testWidgets('侧栏 7 个规则开关按分组展示，单选结果传给引擎', (tester) async {
+  testWidgets('侧栏 20 个规则开关按分组展示，单选结果传给引擎', (tester) async {
     List<Rule>? passedRules;
     await pumpWith(tester, (dbPath, rules) async {
       passedRules = rules;
       return (total: 2, picked: [fakeRow('S1.SH', name: '威孚高科')], dataDate: '20260930');
     });
 
-    expect(find.byType(Switch), findsNWidgets(7));
+    expect(find.byType(Switch), findsNWidgets(20));
     expect(find.text('趋势'), findsOneWidget);
     expect(find.text('超买超卖'), findsOneWidget);
 
@@ -118,16 +121,17 @@ Future<void> scrollTo(WidgetTester tester, Finder finder) =>
         return (total: 2, picked: [fakeRow('S1.SH')], dataDate: '20260930');
       });
 
-      // 量比>2 是第 6 个开关，当日涨幅>3% 是第 7 个（测试视口高度有限，需滚动到底）。
-      await scrollTo(tester, find.byType(Switch).at(5));
-      await tester.tap(find.byType(Switch).at(5));
+      // 量比>2 是第 7 个开关，当日涨幅>3% 是第 8 个（趋势组加了 KDJ金叉，下标后移一位；
+      // 测试视口高度有限，需滚动到底）。
+      await scrollTo(tester, find.byType(Switch).at(6));
+      await tester.tap(find.byType(Switch).at(6));
       await tester.pump();
       await tester.scrollUntilVisible(
-        find.byType(Switch).at(6),
+        find.byType(Switch).at(7),
         60,
         scrollable: find.byType(Scrollable).first,
       );
-      await tester.tap(find.byType(Switch).at(6));
+      await tester.tap(find.byType(Switch).at(7));
       await tester.pump();
       await tester.tap(find.text('开始选股'));
       await tester.pumpAndSettle();
@@ -408,4 +412,103 @@ Future<void> scrollTo(WidgetTester tester, Finder finder) =>
       expect(find.textContaining('同步中'), findsWidgets);
     });
   });
+  
+  
+  group('同步到新数据后自动刷新回测报告', () {
+    /// 造一份最小报告，供注入的 runBacktestFn 返回。
+    BacktestReport fakeReport() => BacktestReport(
+          generatedAt: DateTime(2026, 10, 5).toIso8601String(),
+          horizons: const [10],
+          stockCount: 3,
+          baseline: const {},
+          results: const {},
+        );
+
+    testWidgets('同步有新增行时自动重算回测', (tester) async {
+      var backtests = 0;
+      await tester.pumpWidget(StockApp(
+        config: AppConfig(tushareToken: 'tok', dbPath: dbPath),
+        showOnboarding: false,
+        persistAccent: (_) async {},
+        runSyncFn: ({required dbPath, required token, onProgress}) async =>
+            const SyncResult(dates: 1, rows: 5560),
+        runBacktestFn: (_, {reportPath}) async {
+          backtests++;
+          return fakeReport();
+        },
+      ));
+      await tester.pump();
+      await tester.pumpAndSettle();
+      expect(backtests, 1, reason: '有新数据就应重算一次报告');
+    });
+
+    testWidgets('同步 0 行（数据齐全）不重算回测', (tester) async {
+      var backtests = 0;
+      await tester.pumpWidget(StockApp(
+        config: AppConfig(tushareToken: 'tok', dbPath: dbPath),
+        showOnboarding: false,
+        persistAccent: (_) async {},
+        runSyncFn: ({required dbPath, required token, onProgress}) async =>
+            const SyncResult(dates: 0, rows: 0),
+        runBacktestFn: (_, {reportPath}) async {
+          backtests++;
+          return fakeReport();
+        },
+      ));
+      await tester.pump();
+      await tester.pumpAndSettle();
+      expect(backtests, 0, reason: '没有新数据就不该白跑 30 秒');
+    });
+  });
+    group('规则列表显示回测统计', () {
+      /// 造一份只有 2 条规则、2 个持有期的小报告。
+      BacktestReport fakeReport() => backtestAll(
+            [
+              StockData(
+                symbol: 'S',
+                bars: [
+                  for (var i = 0; i < 90; i++)
+                    kbar(close: 10.0 + 0.1 * i, volume: 100, date: DateTime(2024, 1, 1).add(Duration(days: i))),
+                ],
+              ),
+            ],
+            builtInRules,
+            horizons: kDefaultHorizons,
+          );
+  
+      testWidgets('传入报告后规则名下方显示 10日胜率/PF/信号数', (tester) async {
+        await tester.pumpWidget(MaterialApp(
+          home: Scaffold(
+            body: ScreeningPage(
+              dbPath: dbPath,
+              screenFn: (_, _) async =>
+                  (total: 1, picked: const <ScreenRow>[], dataDate: null),
+              backtestReport: fakeReport(),
+            ),
+          ),
+        ));
+        await tester.pump();
+  
+        // 收盘价站上MA20：10 日胜率应是 100%（序列单调上行）
+        expect(find.textContaining('10日 100.0%'), findsWidgets);
+        expect(find.textContaining('PF 0.00'), findsWidgets);
+        expect(find.textContaining('信号'), findsWidgets);
+      });
+  
+      testWidgets('不传报告时不显示统计行（不占高度）', (tester) async {
+        await tester.pumpWidget(MaterialApp(
+          home: Scaffold(
+            body: ScreeningPage(
+              dbPath: dbPath,
+              screenFn: (_, _) async =>
+                  (total: 1, picked: const <ScreenRow>[], dataDate: null),
+            ),
+          ),
+        ));
+        await tester.pump();
+  
+        expect(find.textContaining('10日 '), findsNothing);
+        expect(find.text('收盘价站上MA20'), findsOneWidget);
+      });
+    });
 }

@@ -646,4 +646,70 @@ void main() {
     expect(emCalls, greaterThan(0), reason: 'tushare 名单失败应换东财');
     expect(r.rows, greaterThan(0), reason: '名单源全挂也不能影响日线入库');
   });
+  
+    group('按日期区间补拉（fromDate/toDate）', () {
+      test('水位线增量补不了 MAX(trade_date) 之前的历史，fromDate 可以', () async {
+        final now = DateTime(2026, 1, 8, 18);
+        await svc(now).sync(backfillDays: 2); // 只入库 20260105/20260106
+        expect(repo.maxTradeDate(), '20260106');
+        dailyRequested.clear();
+  
+        // 常规增量只看 MAX 之后，补不到 1/1、1/2
+        final incremental = await svc(now).sync();
+        expect(incremental.dates, 0);
+  
+        // 显式 fromDate 绕过水位线，把更早的历史补回来
+        final backfilled = await svc(now).sync(fromDate: '20260101');
+        expect(backfilled.dates, 4);
+        expect(dailyRequested, ['20260101', '20260102', '20260105', '20260106']);
+      });
+  
+      test('fromDate + toDate 闭区间补拉', () async {
+        final r = await svc(DateTime(2026, 1, 8, 18))
+            .sync(fromDate: '20260101', toDate: '20260105');
+        expect(r.dates, 3);
+        expect(dailyRequested, ['20260101', '20260102', '20260105']);
+      });
+  
+      test('from 早于日历窗口起点时按窗口起点截断，不越界请求', () async {
+        final r = await svc(DateTime(2026, 1, 8, 18))
+            .sync(fromDate: '20200101', toDate: '20260102');
+        expect(r.dates, 2);
+        expect(dailyRequested, ['20260101', '20260102']);
+      });
+  
+      test('区间内没有已收盘交易日时返回 0 且不请求 daily', () async {
+        final r = await svc(DateTime(2026, 1, 8, 18))
+            .sync(fromDate: '20260101', toDate: '20260101');
+        // 1/8 18 点时 1/1 已收盘，应能拉到
+        expect(r.dates, greaterThanOrEqualTo(1));
+      });
+  
+      test('fromDate 晚于 toDate 抛 ArgumentError', () async {
+        expect(
+          () => svc(DateTime(2026, 1, 8, 18))
+              .sync(fromDate: '20260106', toDate: '20260101'),
+          throwsArgumentError,
+        );
+      });
+  
+      test('非 YYYYMMDD 格式抛 ArgumentError', () async {
+        expect(
+          () => svc(DateTime(2026, 1, 8, 18)).sync(fromDate: '2026-01-01'),
+          throwsArgumentError,
+        );
+        expect(
+          () => svc(DateTime(2026, 1, 8, 18)).sync(toDate: '2026011'),
+          throwsArgumentError,
+        );
+      });
+  
+      test('补拉是幂等的：重复拉同一区间不会因 upsert 报错', () async {
+        final now = DateTime(2026, 1, 8, 18);
+        await svc(now).sync(fromDate: '20260101', toDate: '20260102');
+        final again = await svc(now).sync(fromDate: '20260101', toDate: '20260102');
+        expect(again.dates, 2);
+        expect(repo.maxTradeDate(), '20260102');
+      });
+    });
 }

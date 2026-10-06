@@ -4,8 +4,12 @@ import 'package:flutter/material.dart';
 import 'package:flutter_test/flutter_test.dart';
 import 'package:stock/app_logic.dart';
 import 'package:stock/config.dart';
+import 'package:stock/core/backtest.dart';
+import 'package:stock/core/models.dart';
+import 'package:stock/core/rules.dart';
 import 'package:stock/ui/candle_chart.dart';
 import 'package:stock/ui/colors.dart';
+import 'package:stock/ui/mobile_home.dart';
 import 'package:stock/ui/stock_app.dart';
 
 import 'fixtures.dart';
@@ -34,13 +38,13 @@ void main() {
         persistAccent: persistAccent,
       );
 
-  testWidgets('窄屏显示底部导航与移动选股页（7 个规则开关，无侧栏）', (tester) async {
+  testWidgets('窄屏显示底部导航与移动选股页（20 个规则开关，无侧栏）', (tester) async {
     _phone(tester);
     await tester.pumpWidget(stockApp());
     await tester.pump();
 
     expect(find.byType(NavigationBar), findsOneWidget);
-    expect(find.byType(Switch), findsNWidgets(7));
+    expect(find.byType(Switch), findsNWidgets(20));
     expect(find.text('开始选股'), findsOneWidget);
     expect(find.textContaining('全市场'), findsOneWidget);
   });
@@ -139,6 +143,72 @@ void main() {
     await tester.pump();
 
     expect(persisted, 'blue');
+  });
+
+  testWidgets('移动端重新回测后 onReport 回传，选股页统计行同步刷新', (tester) async {
+    _phone(tester);
+    // 单调上涨序列：close_above_ma20 从第 20 根起每天都命中，
+    // 90 根 → 10 日持有期 60 个信号；50 根 → 20 个信号。统计行只差在信号数。
+    BacktestReport rising(int n) => backtestAll(
+          [
+            StockData(
+              symbol: 'X',
+              bars: [
+                for (var i = 0; i < n; i++)
+                  kbar(
+                    close: 10.0 + 0.1 * i,
+                    volume: 100,
+                    date: DateTime(2024, 1, 1).add(Duration(days: i)),
+                  ),
+              ],
+            ),
+          ],
+          [ruleById('close_above_ma20')],
+          horizons: const [5, 10],
+        );
+
+    var current = rising(90);
+    final updated = rising(50);
+    BacktestReport? reported;
+
+    Future<void> pumpHome() => tester.pumpWidget(MaterialApp(
+          home: AccentScope(
+            color: AccentColor.red.color,
+            child: MobileHome(
+              dbPath: dbPath,
+              syncing: false,
+              syncMsg: null,
+              accent: AccentColor.red,
+              onAccentChanged: (_) {},
+              onSyncPressed: () {},
+              configPath: '${tmp.path}/.env',
+              initialToken: '',
+              backtestReport: current,
+              backtestRunFn: (_, {reportPath}) async => updated,
+              onReport: (r) => reported = r,
+            ),
+          ),
+        ));
+
+    await pumpHome();
+    await tester.pump();
+    expect(find.textContaining('· 60信号'), findsWidgets); // 初始统计行
+
+    await tester.tap(find.text('回测'));
+    await tester.pumpAndSettle();
+    await tester.tap(find.text('重新回测'));
+    await tester.pumpAndSettle();
+
+    // 回测页把新报告交回外壳（与桌面端 onReport 同一条链路）
+    expect(reported, same(updated));
+    // 外壳收到后换新报告重建（StockApp: setState(() => _report = r)）
+    current = updated;
+    await pumpHome();
+    await tester.pump();
+    await tester.tap(find.text('选股'));
+    await tester.pumpAndSettle();
+    expect(find.textContaining('· 20信号'), findsWidgets);
+    expect(find.textContaining('· 60信号'), findsNothing);
   });
 
   testWidgets('头部渐变随主题色（绿主题不再是红头部）', (tester) async {

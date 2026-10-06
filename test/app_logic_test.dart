@@ -7,6 +7,7 @@ import 'package:http/testing.dart';
 import 'package:stock/app_logic.dart';
 import 'package:stock/core/rules.dart';
 import 'package:stock/data/bar_repository.dart';
+import 'package:stock/data/sina_client.dart';
 import 'package:stock/data/tushare_client.dart';
 
 import 'fixtures.dart';
@@ -125,6 +126,61 @@ void main() {
 
     final after = await runScreening(dbPath, [ruleById('close_above_ma20')]);
     expect(after.total, 1);
+  });
+
+  test('runSync 接线新浪备源：tushare daily 故障时自动逐股降级', () async {
+    // 生产构造点（runSync / bin/sync.dart）必须把新浪传给 SyncService，
+    // 否则日线降级链形同虚设：tushare daily 一挂就原样抛出，40203 还会
+    // 空转 5 次 65 秒。这里 daily 返回非 40203 错误码——不触发限频等待，
+    // 直接考验「有没有备源」这一根因。
+    seedStocks(dbPath); // S1.SH / S2.SZ 各 40 根，止于 20261002
+    final tushare = TushareClient(
+      token: 'tok',
+      http: MockClient((req) async {
+        final api =
+            (jsonDecode(req.body) as Map<String, dynamic>)['api_name'] as String;
+        if (api == 'daily') {
+          return http.Response.bytes(
+            utf8.encode(jsonEncode({'code': 50000, 'msg': '接口异常'})),
+            200,
+          );
+        }
+        return http.Response.bytes(
+          utf8.encode(jsonEncode({
+            'code': 0,
+            'data': {'fields': ['cal_date', 'is_open'], 'items': [['20261005', '1']]},
+          })),
+          200,
+        );
+      }),
+    );
+    final sina = SinaClient(
+      http: MockClient((req) async => http.Response.bytes(
+            utf8.encode(jsonEncode([
+              {
+                'day': '2026-10-05',
+                'open': '10.0',
+                'high': '10.6',
+                'low': '10.0',
+                'close': '10.5',
+                'volume': '920000',
+              },
+            ])),
+            200,
+          )),
+    );
+
+    final r = await runSync(
+      dbPath: dbPath,
+      token: 'tok',
+      now: () => DateTime(2026, 10, 5, 18),
+      clientFactory: (_) => tushare,
+      sinaFactory: () => sina,
+    );
+    expect(r.rows, 2, reason: 'tushare daily 不可用时两只股票都应由新浪补上 20261005');
+    final repo = BarRepository(dbPath);
+    expect(repo.maxTradeDate(), '20261005');
+    repo.close();
   });
 }
 

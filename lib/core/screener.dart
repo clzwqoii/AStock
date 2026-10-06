@@ -5,13 +5,18 @@ import 'models.dart';
 import 'rules.dart';
 
 /// 一次筛选的命中结果：股票本身 + **命中的规则 id**（组合选股 = 全部命中）。
+/// [snapshot] 是筛选时已经建好的末日快照，调用方直接复用——
+/// 不要再对同一只股票重复 [IndicatorSnapshot.fromStock]（那会重建整条指标序列）。
 class ScreenHit {
-  const ScreenHit(this.stock, this.matchedRuleIds);
+  const ScreenHit(this.stock, this.matchedRuleIds, this.snapshot);
 
   final StockData stock;
 
   /// 命中的规则 id，顺序与传入的规则一致；AND 筛选下长度 == 规则条数。
   final List<String> matchedRuleIds;
+
+  /// 该股末根的指标快照（筛选时构建，与 [IndicatorSnapshot.fromStock(stock)] 等价）。
+  final IndicatorSnapshot snapshot;
 }
 
 /// 用选定规则筛选股票，全部规则满足才入选（AND）。
@@ -37,7 +42,7 @@ List<ScreenHit> screenWithHits(
     if (stock.bars.length < minBars) continue;
     final snap = IndicatorSnapshot.fromStock(stock);
     final matched = [for (final r in rules) if (r.test(snap)) r.id];
-    if (matched.length == rules.length) hits.add(ScreenHit(stock, matched));
+    if (matched.length == rules.length) hits.add(ScreenHit(stock, matched, snap));
   }
   return hits;
 }

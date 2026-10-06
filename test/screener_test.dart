@@ -1,4 +1,5 @@
 import 'package:flutter_test/flutter_test.dart';
+import 'package:stock/core/models.dart';
 import 'package:stock/core/rules.dart';
 import 'package:stock/core/screener.dart';
 
@@ -60,6 +61,59 @@ void main() {
 
     test('与 screen 同口径：结果集完全一致', () {
       expect(screenWithHits(stocks, [volume, pct]).map((h) => h.stock), screen(stocks, [volume, pct]));
+    });
+
+    test('命中结果直接带回筛选时的快照（调用方不必再 fromStock 重建）', () {
+      final hits = screenWithHits(stocks, [volume, pct]);
+      final s = hits.single.stock;
+      expect(hits.single.snapshot.close, s.bars.last.close);
+      expect(hits.single.snapshot.pctChange, IndicatorSnapshot.fromStock(s).pctChange);
+    });
+  });
+  
+  group('MA60 有效突破规则的短历史兜底', () {
+    /// 历史不足有效突破窗口（70 根 / 79 根）的股票：不入选，且不抛 StateError。
+    StockData shortStock(String symbol, int bars) => StockData(
+          symbol: symbol,
+          bars: [for (var i = 0; i < bars; i++) kbar(close: 20.0 + 0.05 * i)],
+        );
+  
+    test('有效突破规则下短历史股票被跳过、长历史形态 A 入选', () {
+      final stocks = [
+        shortStock('SHORT_A', 69), // 不足 70 根
+        shortStock('SHORT_B', 78), // 不足 79 根
+        StockData(symbol: 'BO', bars: barsMa60Breakout()),
+      ];
+      final hits = screenWithHits(stocks, [ruleById('ma60_breakout_confirmed')]);
+      expect(hits.map((h) => h.stock.symbol), ['BO']);
+    });
+  
+    test('回踩确认规则下短历史股票被跳过、长历史形态 B 入选', () {
+      final stocks = [
+        shortStock('SHORT_A', 69),
+        shortStock('SHORT_B', 78), // 不足 79 根
+        StockData(symbol: 'PB', bars: barsMa60Pullback()),
+      ];
+      final hits = screenWithHits(stocks, [ruleById('ma60_breakout_pullback')]);
+      expect(hits.map((h) => h.stock.symbol), ['PB']);
+    });
+  
+    test('组合选股：两条 MA60 突破规则同时勾选时，形态 A 与形态 B 不会同时入选', () {
+      final stocks = [
+        StockData(symbol: 'BO', bars: barsMa60Breakout()),
+        StockData(symbol: 'PB', bars: barsMa60Pullback()),
+      ];
+      final rules = [ruleById('ma60_breakout_confirmed'), ruleById('ma60_breakout_pullback')];
+      expect(screenWithHits(stocks, rules), isEmpty);
+    });
+  
+    test('组合选股：有效突破 ∧ 收盘价站上MA60', () {
+      final stocks = [
+        StockData(symbol: 'BO', bars: barsMa60Breakout()),
+        StockData(symbol: 'PB', bars: barsMa60Pullback()),
+      ];
+      final rules = [ruleById('ma60_breakout_confirmed'), ruleById('close_above_ma60')];
+      expect(screenWithHits(stocks, rules).map((h) => h.stock.symbol), ['BO']);
     });
   });
 }

@@ -5,11 +5,13 @@ library;
 import 'package:flutter/material.dart';
 
 import '../app_logic.dart';
+import '../core/backtest.dart';
 import '../core/rules.dart';
 import 'colors.dart';
 import 'onboarding.dart' show LaunchUrlFn;
 import 'stock_detail_page.dart';
 import 'screening_page.dart' show LoadingDialog, ruleGroups, ScreenFn;
+import 'backtest_page.dart';
 import 'settings_page.dart';
 
 class MobileHome extends StatefulWidget {
@@ -25,6 +27,9 @@ class MobileHome extends StatefulWidget {
     required this.initialToken,
     this.screenFn,
     this.launchUrl,
+    this.backtestReport,
+    this.backtestRunFn,
+    this.onReport,
   });
 
   final String dbPath;
@@ -38,12 +43,24 @@ class MobileHome extends StatefulWidget {
   final String initialToken;
   final LaunchUrlFn? launchUrl;
 
+  /// 可注入的回测入口（测试注入假实现，避免真跑 30~50 秒）；null 时用真实现。
+  final Future<BacktestReport> Function(String dbPath, {String? reportPath})?
+      backtestRunFn;
+
+  /// 重算成功后把新报告交回外壳，外壳换缓存重建，选股页统计行随之刷新。
+  final ValueChanged<BacktestReport>? onReport;
+
+  /// 回测报告缓存（外壳读一次）；非 null 时规则面板在名字下显示 10 日胜率/PF/信号数。
+  final BacktestReport? backtestReport;
+
   @override
   State<MobileHome> createState() => _MobileHomeState();
 }
 
 class _MobileHomeState extends State<MobileHome> {
   int _tab = 0;
+
+  /// _tab 同时是 IndexedStack 与 NavigationBar 的下标：0 选股、1 回测、2 设置。
 
   @override
   Widget build(BuildContext context) {
@@ -56,6 +73,14 @@ class _MobileHomeState extends State<MobileHome> {
             screenFn: widget.screenFn,
             syncing: widget.syncing,
             syncMsg: widget.syncMsg,
+            backtestReport: widget.backtestReport,
+          ),
+          BacktestPage(
+            dbPath: widget.dbPath,
+            initialReport: widget.backtestReport,
+            runFn: widget.backtestRunFn ?? runBacktest,
+            onBack: () => setState(() => _tab = 0),
+            onReport: widget.onReport,
           ),
           SafeArea(
             child: SettingsPage(
@@ -72,6 +97,8 @@ class _MobileHomeState extends State<MobileHome> {
           ),
         ],
       ),
+      // 注意：destinations 的顺序必须与上面 IndexedStack 的 children 一致
+      // （选股 / 回测 / 设置），否则点标签会打开错的页面。
       bottomNavigationBar: NavigationBar(
         selectedIndex: _tab,
         onDestinationSelected: (i) => setState(() => _tab = i),
@@ -81,6 +108,11 @@ class _MobileHomeState extends State<MobileHome> {
             icon: Icon(Icons.manage_search_outlined, color: AppColors.dim),
             selectedIcon: Icon(Icons.manage_search, color: widget.accent.color),
             label: '选股',
+          ),
+          NavigationDestination(
+            icon: Icon(Icons.query_stats_outlined, color: AppColors.dim),
+            selectedIcon: Icon(Icons.query_stats, color: widget.accent.color),
+            label: '回测',
           ),
           NavigationDestination(
             icon: Icon(Icons.settings_outlined, color: AppColors.dim),
@@ -100,12 +132,16 @@ class MobileScreening extends StatefulWidget {
     required this.syncing,
     required this.syncMsg,
     this.screenFn,
+    this.backtestReport,
   });
 
   final String dbPath;
   final ScreenFn? screenFn;
   final bool syncing;
   final String? syncMsg;
+
+  /// 回测报告缓存；非 null 时规则面板显示各规则的 10 日胜率/PF/信号数。
+  final BacktestReport? backtestReport;
 
   @override
   State<MobileScreening> createState() => _MobileScreeningState();
@@ -319,12 +355,42 @@ class _MobileScreeningState extends State<MobileScreening> {
               ),
             ),
             if (_expanded)
-              for (final e in ruleGroups.entries)
-                for (final id in e.value)
-                  _ruleRow(ruleById(id), e.key, accent),
+              // 规则多到 11 条后面板会顶到 500px+，把「开始选股」挤出首屏；
+              // 限高并内部滚动，保证主按钮始终在首屏内可见可点。
+              ConstrainedBox(
+                constraints: const BoxConstraints(maxHeight: 280),
+                child: SingleChildScrollView(
+                  child: Column(
+                    children: [
+                      // 分组按「组内最高 10 日胜率」降序，组内再按胜率降序
+                      for (final e in ruleGroupsSortedByWinRate(
+                          ruleGroups, widget.backtestReport))
+                        for (final id in ruleIdsSortedByWinRate(
+                            e.value, widget.backtestReport))
+                          _ruleRow(ruleById(id), e.key, accent),
+                    ],
+                  ),
+                ),
+              ),
           ],
         ),
       );
+
+  /// 规则名下的回测统计行：`10日 55.6% · PF 1.46 · 795信号`。
+  /// 无报告或无信号时不占高度。
+  Widget _statLine(Rule rule) {
+    final r = widget.backtestReport?.result(rule.id, 10);
+    if (r == null || r.count == 0) return const SizedBox.shrink();
+    return Padding(
+      padding: const EdgeInsets.only(top: 2),
+      child: Text(
+        '10日 ${(r.winRate * 100).toStringAsFixed(1)}%'
+        ' · PF ${r.profitFactor.toStringAsFixed(2)}'
+        ' · ${r.count}信号',
+        style: const TextStyle(fontSize: 10, color: AppColors.dim),
+      ),
+    );
+  }
 
   Widget _ruleRow(Rule rule, String category, Color accent) {
     final on = _selected.contains(rule.id);
@@ -335,7 +401,16 @@ class _MobileScreeningState extends State<MobileScreening> {
         decoration: const BoxDecoration(border: Border(top: BorderSide(color: Color(0xFFF2F3F7)))),
         child: Row(
           children: [
-            Expanded(child: Text(rule.name, style: const TextStyle(fontSize: 14))),
+            Expanded(
+            child: Column(
+              crossAxisAlignment: CrossAxisAlignment.start,
+              mainAxisSize: MainAxisSize.min,
+              children: [
+                Text(rule.name, style: const TextStyle(fontSize: 14)),
+                _statLine(rule),
+              ],
+            ),
+          ),
             Container(
               padding: const EdgeInsets.symmetric(horizontal: 6, vertical: 1),
               decoration: BoxDecoration(border: Border.all(color: const Color(0xFFE5E8EF)), borderRadius: BorderRadius.circular(4)),

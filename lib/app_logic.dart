@@ -6,15 +6,18 @@ import 'dart:io';
 import 'dart:isolate';
 
 import 'package:http/http.dart' as h;
+import 'package:stock/core/backtest.dart';
 import 'package:stock/core/models.dart';
 import 'package:stock/core/rules.dart';
 import 'package:stock/core/screener.dart';
 import 'package:stock/data/bar_repository.dart';
+import 'package:stock/data/report_store.dart';
+import 'package:stock/data/sina_client.dart';
 import 'package:stock/data/sync_service.dart';
 import 'package:stock/data/tushare_client.dart';
 
 /// 当前应用版本（发布新包时同步修改，与 pubspec.version 保持一致）。
-const kAppVersion = '1.0.5';
+const kAppVersion = '2.0.0';
 
 /// 更新清单候选源（并发竞速，第一个响应的胜出）。
 /// 国内网络优先命中 Gitee；jsDelivr 镜像可加速 GitHub raw。建仓库后替换为你的地址。
@@ -240,7 +243,7 @@ Future<({int total, List<ScreenRow> picked, String? dataDate})> runScreening(
         final picked = <ScreenRow>[];
         for (final hit in screenWithHits(stocks, rules)) {
           final s = hit.stock;
-          final snap = IndicatorSnapshot.fromStock(s);
+          final snap = hit.snapshot; // 筛选时已构建，直接复用
           final prevClose = s.bars[s.bars.length - 2].close;
           picked.add(ScreenRow(
             symbol: s.symbol,
@@ -255,6 +258,27 @@ Future<({int total, List<ScreenRow> picked, String? dataDate})> runScreening(
           ));
         }
         return (total: stocks.length, picked: picked, dataDate: repo.maxTradeDate());
+      } finally {
+        repo.close();
+      }
+    });
+
+/// 读回测报告缓存；无文件或文件损坏返回 null（报表不该影响选股）。
+BacktestReport? loadBacktestReport(String dbPath, {String? reportPath}) =>
+    ReportStore(reportPath ?? reportPathFor(dbPath)).load();
+
+/// 回测全部内置规则 × [kDefaultHorizons] 持有期，结果落盘后返回（后台 isolate）。
+/// 实测约 20 秒（5623 只 × 424 根）；落盘后页面秒开。
+Future<BacktestReport> runBacktest(String dbPath, {String? reportPath}) =>
+    Isolate.run(() {
+      final store = ReportStore(reportPath ?? reportPathFor(dbPath));
+      final repo = BarRepository(dbPath);
+      try {
+        final stocks = repo.loadAllStocks();
+        final report =
+            backtestAll(stocks, builtInRules, horizons: kDefaultHorizons);
+        store.save(report);
+        return report;
       } finally {
         repo.close();
       }
@@ -297,18 +321,23 @@ Future<StockDetail?> loadStockDetail(String dbPath, String symbol) async {
 
 /// 增量同步：网络等待型任务，直接在当前 isolate 跑（onProgress 才能实时回调 UI）；
 /// 库操作按交易日分批，单批几千行不会卡界面。
-/// [clientFactory] 供测试注入假客户端；生产用默认值。
+/// [clientFactory] / [sinaFactory] 供测试注入假客户端；生产用默认值。
+/// 新浪备源必须接上（AGENTS 行情口径第 6 条的降级链）：不传时 tushare 日线
+/// 一故障就原样抛出，40203 限频还会空转 5 次 65 秒。
 Future<SyncResult> runSync({
   required String dbPath,
   required String token,
   DateTime Function()? now,
   TushareClient Function(String token)? clientFactory,
+  SinaClient Function()? sinaFactory,
   void Function(String msg)? onProgress,
 }) async {
   final repo = BarRepository(dbPath);
   try {
     final client = clientFactory?.call(token) ?? TushareClient(token: token);
-    return await SyncService(client, repo, now: now).sync(onProgress: onProgress);
+    return await SyncService(client, repo, now: now,
+            sina: sinaFactory?.call() ?? SinaClient())
+        .sync(onProgress: onProgress);
   } finally {
     repo.close();
   }

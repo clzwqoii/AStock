@@ -8,6 +8,7 @@ import 'dart:math' as math;
 import 'package:flutter/material.dart';
 
 import '../app_logic.dart';
+import '../core/backtest.dart';
 import '../core/rules.dart';
 import 'colors.dart';
 import 'stock_detail_page.dart';
@@ -58,11 +59,31 @@ class LoadingDialog extends StatelessWidget {
 typedef ExportCsvFn = Future<String> Function(List<ScreenRow> rows,
     {String? dataDate, String? combo});
 
-/// 规则分组（展示用，引擎不感知）。
+/// 规则分组（展示用，引擎不感知）。「有效突破」包含两种突破模式 + 两条宽松 MA60 规则。
 const ruleGroups = <String, List<String>>{
-  '趋势': ['close_above_ma20', 'ma5_golden_ma10', 'macd_golden_cross'],
+  '趋势': [
+    'close_above_ma20',
+    'ma5_golden_ma10',
+    'macd_golden_cross',
+    'kdj_golden_cross',
+  ],
   '超买超卖': ['rsi_oversold', 'rsi_overbought'],
-  '量能 / 动量': ['volume_surge', 'pct_change_up'],
+  '量能 / 动量': [
+    'volume_surge',
+    'pct_change_up',
+    'rsi_oversold_volume',
+    'rsi_oversold_volume_loose',
+  ],
+  '年线过滤': ['ma250_up', 'near_ma250'],
+  '有效突破': [
+    'ma60_breakout_bull',
+    'ma60_breakout_confirmed',
+    'ma60_breakout_pullback',
+    'ma60_breakout_now',
+    'close_above_ma60',
+    'ma60_breakout',
+  ],
+  '中枢突破': ['pivot_breakout', 'pivot_breakout_pullback'],
 };
 
 class ScreeningPage extends StatefulWidget {
@@ -73,7 +94,9 @@ class ScreeningPage extends StatefulWidget {
     this.syncing = false,
     this.syncStatus,
     this.onOpenSettings,
+    this.onOpenBacktest,
     this.exportCsv,
+    this.backtestReport,
   });
 
   final String dbPath;
@@ -86,8 +109,15 @@ class ScreeningPage extends StatefulWidget {
   /// 侧栏「设置」按钮回调（外壳弹出设置弹框）。
   final VoidCallback? onOpenSettings;
 
+  /// 侧栏「回测对比」按钮回调（外壳切到回测页）；null 时按钮隐藏。
+  final VoidCallback? onOpenBacktest;
+
   /// CSV 导出；null 时写数据库同目录（桌面 ~/.stock、移动端沙盒）。
   final ExportCsvFn? exportCsv;
+
+  /// 回测报告缓存（外壳读一次、两页共用）。非 null 时规则列表在名字下方
+  /// 显示该规则的 10 日胜率 / 盈亏比 / 信号数；回测完成后由外壳刷新。
+  final BacktestReport? backtestReport;
 
   @override
   State<ScreeningPage> createState() => _ScreeningPageState();
@@ -104,12 +134,20 @@ class _ScreeningPageState extends State<ScreeningPage> {
   bool _sortAsc = false;
 
   /// 当前展示顺序的入选行（排序只影响展示与导出，不改引擎结果）。
-  List<ScreenRow> _rows() {
+  /// 缓存排序结果：ListView 的 itemBuilder 每渲染一行都取一次，
+  /// 现场排序会在命中数大时每行全量重排（滚动掉帧）。
+  List<ScreenRow> _sortedRows = const [];
+
+  /// [_result] / [_sortField] / [_sortAsc] 变化后重算展示顺序。
+  void _reSort() {
     final r = _result;
-    if (r == null) return const [];
-    final field = _sortField;
-    if (field == null) return r.picked;
-    return sortRows(r.picked, field, ascending: _sortAsc);
+    if (r == null) {
+      _sortedRows = const [];
+    } else if (_sortField == null) {
+      _sortedRows = r.picked;
+    } else {
+      _sortedRows = sortRows(r.picked, _sortField!, ascending: _sortAsc);
+    }
   }
 
   /// 表头点击：同列切换升降序，换列默认降序。
@@ -121,13 +159,14 @@ class _ScreeningPageState extends State<ScreeningPage> {
         _sortField = field;
         _sortAsc = false;
       }
+      _reSort();
     });
   }
 
   Future<void> _export() async {
     final r = _result;
     if (r == null || r.picked.isEmpty) return;
-    final rows = _rows();
+    final rows = _sortedRows;
     final combo = _selected.isEmpty ? '全部' : _selected.map((id) => ruleById(id).name).join(' ∧ ');
     final messenger = ScaffoldMessenger.of(context);
     try {
@@ -164,6 +203,7 @@ class _ScreeningPageState extends State<ScreeningPage> {
     try {
       final rules = [for (final id in _selected) ruleById(id)];
       _result = await widget.screenFn(widget.dbPath, rules);
+      _reSort();
     } catch (e) {
       _error = e.toString();
     } finally {
@@ -210,20 +250,24 @@ class _ScreeningPageState extends State<ScreeningPage> {
             ),
             Container(height: 1, color: const Color(0xFFE8EAEF)),
             Expanded(
-              // ponytail: 规则固定 7 条直接全量构建（组件测试与低高度屏都不会懒加载丢项）；
+              // ponytail: 规则总数固定且不大，直接全量构建（组件测试与低高度屏都不会懒加载丢项）；
               // 规则多到一屏放不下时再改回 ListView。
               child: SingleChildScrollView(
                 child: Column(
                   crossAxisAlignment: CrossAxisAlignment.start,
                   children: [
-                    for (final e in ruleGroups.entries) ...[
+                    // 分组按「组内最高 10 日胜率」降序，组内再按胜率降序
+                    for (final e in ruleGroupsSortedByWinRate(
+                        ruleGroups, widget.backtestReport)) ...[
                       Padding(
                         padding: const EdgeInsets.fromLTRB(18, 16, 18, 8),
                         child: Text(e.key.toUpperCase(),
                             style: const TextStyle(
                                 fontSize: 10, letterSpacing: 2, color: AppColors.dim, fontWeight: FontWeight.w700)),
                       ),
-                      for (final id in e.value) _switchRow(ruleById(id)),
+                      // 组内按 10 日胜率降序（无报告时保持声明顺序）
+                      for (final id in ruleIdsSortedByWinRate(e.value, widget.backtestReport))
+                        _switchRow(ruleById(id)),
                     ],
                   ],
                 ),
@@ -238,6 +282,19 @@ class _ScreeningPageState extends State<ScreeningPage> {
               child: Column(
                 crossAxisAlignment: CrossAxisAlignment.start,
                 children: [
+                  if (widget.onOpenBacktest != null) ...[
+                    OutlinedButton.icon(
+                      onPressed: widget.onOpenBacktest,
+                      icon: const Icon(Icons.query_stats_outlined, size: 16),
+                      label: const Text('回测对比', style: TextStyle(fontSize: 13)),
+                      style: OutlinedButton.styleFrom(
+                        foregroundColor: AppColors.text,
+                        side: const BorderSide(color: AppColors.border),
+                        minimumSize: const Size(double.infinity, 34),
+                      ),
+                    ),
+                    const SizedBox(height: 10),
+                  ],
                   OutlinedButton.icon(
                     onPressed: widget.onOpenSettings,
                     icon: const Icon(Icons.settings_outlined, size: 16),
@@ -258,6 +315,24 @@ class _ScreeningPageState extends State<ScreeningPage> {
         ),
       );
 
+  /// 规则名下的回测统计行：`10日 55.6% · PF1.46 · 795信号`。
+  /// 没有回测报告时返回空（不占高度），并给一句提示去哪生成。
+  Widget _statLine(Rule rule) {
+    final r = widget.backtestReport?.result(rule.id, 10);
+    if (r == null || r.count == 0) {
+      return const SizedBox.shrink();
+    }
+    return Padding(
+      padding: const EdgeInsets.only(top: 1),
+      child: Text(
+        '10日 ${(r.winRate * 100).toStringAsFixed(1)}%'
+        ' · PF ${r.profitFactor.toStringAsFixed(2)}'
+        ' · ${r.count}信号',
+        style: const TextStyle(fontSize: 9, color: AppColors.dim),
+      ),
+    );
+  }
+
   Widget _switchRow(Rule rule) => InkWell(
         onTap: () => _toggle(rule.id),
         child: Padding(
@@ -265,11 +340,20 @@ class _ScreeningPageState extends State<ScreeningPage> {
           child: Row(
             children: [
               Expanded(
-                child: Text(rule.name,
-                    style: TextStyle(
-                        fontSize: 13,
-                        color: AppColors.text,
-                        fontWeight: _selected.contains(rule.id) ? FontWeight.w600 : FontWeight.w400)),
+                child: Column(
+                  crossAxisAlignment: CrossAxisAlignment.start,
+                  mainAxisSize: MainAxisSize.min,
+                  children: [
+                    Text(rule.name,
+                        style: TextStyle(
+                            fontSize: 13,
+                            color: AppColors.text,
+                            fontWeight: _selected.contains(rule.id)
+                                ? FontWeight.w600
+                                : FontWeight.w400)),
+                    _statLine(rule),
+                  ],
+                ),
               ),
               Transform.scale(
                 scale: 0.82,
@@ -463,8 +547,8 @@ class _ScreeningPageState extends State<ScreeningPage> {
             _headerRow(wide),
             Expanded(
               child: ListView.builder(
-                itemCount: _rows().length,
-                itemBuilder: (_, i) => _row(_rows()[i], i, wide),
+                itemCount: _sortedRows.length,
+                itemBuilder: (_, i) => _row(_sortedRows[i], i, wide),
               ),
             ),
           ],

@@ -2,6 +2,7 @@ import 'dart:io';
 
 import 'package:flutter_test/flutter_test.dart';
 import 'package:sqlite3/sqlite3.dart';
+import 'package:stock/core/models.dart';
 import 'package:stock/data/bar_repository.dart';
 import 'package:stock/data/tushare_client.dart';
 
@@ -52,10 +53,28 @@ void main() {
     }
   });
 
+  test('maxTradeDate 的 MAX 查询点名 trade_date 专用索引', () {
+    // 主键 (ts_code, trade_date) 的第二列取 MAX：无专用索引时 SQLite 走
+    // 主键覆盖索引整体扫描（360 万行实测 ~80ms/次），建索引后为端点查找 ~5ms。
+    // 实测基准（2026-10-06，360 万行合成表）：80ms → 5ms，索引磁盘 ~58MB。
+    repo.upsertBars([row('000001.SZ', '20260930')]);
+    final db2 = sqlite3.open('${tmp.path}/test.db');
+    try {
+      final plan = db2
+          .select('EXPLAIN QUERY PLAN SELECT MAX(trade_date) FROM daily_bars')
+          .map((r) => r['detail'] as String)
+          .join(' | ');
+      expect(plan, contains('idx_daily_bars_trade_date'), reason: '查询计划：$plan');
+    } finally {
+      db2.dispose();
+    }
+  });
+
   test('maxTradeDate 取最大交易日，空库为 null', () {
     expect(repo.maxTradeDate(), isNull);
     repo.upsertBars([row('000001.SZ', '20260929'), row('000001.SZ', '20260930')]);
     expect(repo.maxTradeDate(), '20260930');
+    expect(repo.barCount(), 2);
   });
 
   test('loadAllStocks 按股票分组、按日期升序、按 minBars 过滤', () {
@@ -70,5 +89,127 @@ void main() {
     expect(a.bars.map((b) => b.date.day).toList(), [29, 30]);
     expect(repo.loadAllStocks(minBars: 3).map((s) => s.symbol), isEmpty);
     expect(repo.loadAllStocks(minBars: 2).map((s) => s.symbol), ['000001.SZ']);
+  });
+
+  group('loadAllStocks 的 maxBars（只取尾部 N 根）', () {
+    // 选股只需要末日快照，规则最长回看 MA250 + 回踩窗口 ≈ 300 根。
+    // 全市场 360 万行里最近 250 个交易日只有 137 万行（38%），
+    // 选股路径加载全量等于白读 62%。回测必须传 0（要全部历史）。
+    test('maxBars 只保留每只股票末尾 N 根，且仍按日期升序', () {
+      repo.upsertBars([
+        for (var d = 1; d <= 5; d++)
+          row('000001.SZ', '2026090$d'),
+      ]);
+      final t = repo.loadAllStocks(maxBars: 2).single;
+      expect(t.bars.map((b) => b.date.day).toList(), [4, 5]);
+    });
+
+    test('历史不足 maxBars 的股票不被剔除（只截断，不丢股票）', () {
+      repo.upsertBars([
+        row('000001.SZ', '20260929'),
+        row('000001.SZ', '20260930'),
+        row('600000.SH', '20260930'),
+      ]);
+      // maxBars=10 > 实际 2 根，两只都应保留
+      expect(repo.loadAllStocks(maxBars: 10).map((s) => s.symbol),
+          containsAll(<String>['000001.SZ', '600000.SH']));
+    });
+
+    test('maxBars=0 表示不截断（回测口径，默认行为不变）', () {
+      repo.upsertBars([
+        for (var d = 1; d <= 5; d++) row('000001.SZ', '2026090$d'),
+      ]);
+      expect(repo.loadAllStocks().single.bars, hasLength(5));
+      expect(repo.loadAllStocks(maxBars: 0).single.bars, hasLength(5));
+    });
+
+    test('maxBars 与 minBars 同时生效', () {
+      repo.upsertBars([
+        for (var d = 1; d <= 5; d++) row('000001.SZ', '2026090$d'),
+      ]);
+      // 截断到 3 根后不足 minBars=4 → 该股票被剔除
+      expect(repo.loadAllStocks(maxBars: 3, minBars: 4).map((s) => s.symbol), isEmpty);
+      expect(repo.loadAllStocks(maxBars: 3, minBars: 3).map((s) => s.symbol), ['000001.SZ']);
+    });
+
+    test('maxBars=1 时末日指标仍可算（选股只用最后一根）', () {
+      repo.upsertBars([
+        for (var d = 1; d <= 5; d++) row('000001.SZ', '2026090$d'),
+      ]);
+      final t = repo.loadAllStocks(maxBars: 1).single;
+      expect(t.bars.single.date.day, 5);
+    });
+  });
+
+  group('loadAllStocks 的逐行游标实现', () {
+    // 实现从 `_db.select`（一次性物化 ResultSet）换成 `prepare().selectCursor()`
+    // 流式读：全市场实测峰值 RSS 1889MB → 648MB、5.82s → 4.68s，数据逐位一致。
+    // 这里锁住游标路径特有的两件事——跨股票分组的顺序、以及语句被正确释放。
+    test('多股票多日：按代码分组、组内日期升序、组间按首次出现顺序', () {
+      repo.upsertBars([
+        // 故意乱序写入：游标依赖 ORDER BY 而非插入顺序
+        row('600000.SH', '20260930'),
+        row('000001.SZ', '20260930'),
+        row('600000.SH', '20260929'),
+        row('000001.SZ', '20260929'),
+      ]);
+      final all = repo.loadAllStocks();
+      expect(all.map((s) => s.symbol).toList(), ['000001.SZ', '600000.SH']);
+      for (final s in all) {
+        expect(s.bars.map((b) => b.date.day).toList(), [29, 30]);
+      }
+    });
+
+    test('连续多次调用结果一致（游标语句已释放，不残留/不丢行）', () {
+      repo.upsertBars([
+        for (var d = 1; d <= 5; d++) row('000001.SZ', '2026090$d'),
+        for (var d = 1; d <= 3; d++) row('600000.SH', '2026090$d'),
+      ]);
+      String shape(List<StockData> xs) => xs
+          .map((s) => '${s.symbol}:${s.bars.map((b) => b.date.day).join(",")}')
+          .join('|');
+      final first = shape(repo.loadAllStocks());
+      expect(shape(repo.loadAllStocks()), first);
+      // minBars 过滤在重复调用下仍然生效（600000.SH 只有 3 根，被剔除）
+      expect(shape(repo.loadAllStocks(minBars: 4)), '000001.SZ:1,2,3,4,5');
+      // 释放后仍能正常读别的表，说明语句没有把连接占住
+      expect(repo.stockNames(), isEmpty);
+    });
+  });
+
+  group('trade_date 解析与 DateTime.parse 完全等价', () {
+    // parseTradeDate 是手写切片（比 DateTime.parse 快约 10 倍，全市场 360 万行
+    // 实测 0.2s vs 3.1s）。oracle 取 DateTime.parse 本身，实现换写法时不得漂移。
+    // 覆盖闰年 2/29、世纪闰年、各月边界，以及越界月日的进位行为。
+    const samples = [
+      '20240101', '20240229', '20000229', '19000229', '21001231', '19991231',
+      '20260930', '20250101', '20240228', '20240301', '20260430', '20260431',
+      '19700101', '20991231', '20240615', '20241130', '20240230', '20230229',
+      '20231301', '20230001', '20230100', '20240032',
+    ];
+    test('逐位等价（含越界月日进位）', () {
+      for (final s in samples) {
+        expect(parseTradeDate(s), DateTime.parse(s), reason: s);
+      }
+    });
+
+    test('非 8 位抛 FormatException（不是静默接受）', () {
+      expect(() => parseTradeDate('2024-01-05'), throwsFormatException);
+      expect(() => parseTradeDate('202401'), throwsFormatException);
+      expect(() => parseTradeDate('2024010a'), throwsFormatException);
+    });
+
+    test('8 位但含非数字也抛 FormatException', () {
+      expect(() => parseTradeDate('2024AB01'), throwsFormatException);
+      expect(() => parseTradeDate('        '), throwsFormatException);
+    });
+  });
+
+  test('trade_date 按本地日期全字段还原（loadAllStocks 与 barsFor 同口径）', () {
+    // 锁定 YYYYMMDD → 年/月/日的完整还原；解析实现改写时防行为漂移
+    repo.upsertBars([row('000001.SZ', '20240105')]);
+    final expected = DateTime(2024, 1, 5);
+    expect(repo.loadAllStocks().single.bars.single.date, expected);
+    expect(repo.barsFor('000001.SZ').single.date, expected);
   });
 }

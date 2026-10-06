@@ -78,6 +78,13 @@ void main() {
     await tester.pump();
 
     await tester.tap(find.text('收盘价站上MA20').last);
+    await tester.pump();
+    // 新增的规则落到滚动区外，需滚动到可见再点。
+    await tester.scrollUntilVisible(
+      find.text('当日涨幅>3%').last,
+      60,
+      scrollable: find.byType(Scrollable).first,
+    );
     await tester.tap(find.text('当日涨幅>3%').last);
     await tester.pump();
     await tester.tap(find.text('开始选股'));
