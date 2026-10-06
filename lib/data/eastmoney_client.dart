@@ -1,11 +1,14 @@
 /// 东方财富公开行情接口（无需 token）。
-/// 当前只承担一件事：全市场股票代码+名称名单，作为 tushare stock_basic 限频时的降级源。
+/// 承担三件事：全市场代码+名称名单、单只名称、日K日线
+/// （日线是备源链第一顺位，见 [dailyBars]）。
 library;
 
 import 'dart:async';
 import 'dart:convert';
 
 import 'package:http/http.dart' as h;
+
+import 'tushare_client.dart';
 
 class EastmoneyClient {
   EastmoneyClient({
@@ -79,6 +82,46 @@ class EastmoneyClient {
     final body = jsonDecode(utf8.decode(res.bodyBytes)) as Map<String, dynamic>;
     final data = body['data'] as Map<String, dynamic>?;
     return data?['name'] as String?;
+  }
+
+  /// 单只股票日K（不复权·手·元→千元），一次请求拿 [beg]（`YYYYMMDD`，含）起
+  /// 全部历史——备源补数按区间下界传 [beg]，增量场景避免整段白拉。
+  /// fqt=0 是不复权口径（茅台 2026-05-20 收盘 1315.00，与 tushare 不复权
+  /// 逐位一致，2026-10-06 实测；混入前/后复权会在除权日留断层，禁改）。
+  /// 字段顺序是 开,收,高,低（不是高低收开）。北交所 secid 走 0，支持。
+  Future<List<DailyRow>> dailyBars(String tsCode, {String beg = '0'}) async {
+    final parts = tsCode.split('.');
+    final uri =
+        Uri.parse('$_hisBase/api/qt/stock/kline/get').replace(queryParameters: {
+      'secid': '${parts[1] == 'SH' ? '1' : '0'}.${parts[0]}',
+      'klt': '101',
+      'fqt': '0',
+      'beg': beg,
+      'end': '20500101',
+      'fields1': 'f1,f2,f3,f4,f5,f6',
+      'fields2': 'f51,f52,f53,f54,f55,f56,f57',
+    });
+    final res = await _http.get(uri, headers: _ua).timeout(timeout);
+    final body = jsonDecode(utf8.decode(res.bodyBytes)) as Map<String, dynamic>;
+    final klines =
+        ((body['data'] as Map<String, dynamic>?)?['klines'] as List?)
+                ?.cast<String>() ??
+            const <String>[];
+    final out = <DailyRow>[];
+    for (final k in klines) {
+      final f = k.split(',');
+      out.add(DailyRow(
+        tsCode: tsCode,
+        tradeDate: f[0].replaceAll('-', ''),
+        open: double.parse(f[1]),
+        close: double.parse(f[2]),
+        high: double.parse(f[3]),
+        low: double.parse(f[4]),
+        vol: double.parse(f[5]),
+        amount: double.parse(f[6]) / 1000, // 元 → 千元，与主源同口径
+      ));
+    }
+    return out;
   }
 
   /// 6 位代码前缀定市场：6→SH，0/3→SZ，4/8/9→BJ。

@@ -26,6 +26,53 @@ void main() {
     });
   });
 
+  group('aucByRank 与 auc 等价（聚类 bootstrap 用的 O(n log n) 版本）', () {
+    // 两个实现必须逐位一致，否则 bootstrap 的 CI 会和直接算的 AUC 对不上，
+    // 而"对不上"在几百轮重抽里极难被发现。
+    double? rank(List<double> s, List<int> y) => aucByRank(s, y);
+
+    test('同一批玩具输入上与 auc 完全一致', () {
+      const cases = <(List<double>, List<int>)>[
+        ([0.01, 0.02, 0.9, 0.95], [0, 0, 1, 1]),
+        ([0.9, 0.8, 0.7, 0.6], [0, 1, 0, 1]),
+        ([0.1, 0.4, 0.35, 0.8], [0, 0, 1, 1]),
+        ([0.5, 0.5], [1, 0]),
+        ([0.3, 0.3, 0.3, 0.7], [1, 0, 1, 0]),
+      ];
+      for (final (scores, labels) in cases) {
+        expect(rank(scores, labels), auc(scores, labels),
+            reason: 'scores=$scores labels=$labels');
+      }
+    });
+
+    test('只有一类标签时同样返回 null', () {
+      expect(aucByRank([0.9, 0.1], const [1, 1]), isNull);
+      expect(aucByRank([0.9, 0.1], const [0, 0]), isNull);
+    });
+
+    test('长度不一致抛 ArgumentError（与 auc 一致）', () {
+      expect(() => aucByRank([0.1, 0.2], const [1]), throwsArgumentError);
+    });
+
+    test('大量同分 + 随机顺序下仍与 auc 逐位一致', () {
+      // 固定种子的伪随机（不用 Random，保持测试确定性）
+      var seed = 12345;
+      int next(int m) {
+        seed = (seed * 1103515245 + 12345) & 0x7fffffff;
+        return seed % m;
+      }
+
+      final scores = <double>[];
+      final labels = <int>[];
+      for (var i = 0; i < 400; i++) {
+        // 只有 5 个取值，强制大量并列；标签交替保证两类都在
+        scores.add(next(5) / 4);
+        labels.add(i.isEven ? 0 : 1);
+      }
+      expect(aucByRank(scores, labels), closeTo(auc(scores, labels)!, 1e-12));
+    });
+  });
+
   group('LogRegModel 训练', () {
     // 一维可分的玩具数据：x>0 全是正类
     List<List<double>> separable() => [

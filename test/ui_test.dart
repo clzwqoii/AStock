@@ -137,7 +137,8 @@ Future<void> scrollTo(WidgetTester tester, Finder finder) =>
     WidgetTester tester,
     Future<
             ({int total, List<ScreenRow> picked, String? dataDate, int blockedStale,
-                int blockedCorporateAction})> Function(String, List<Rule>) screenFn,
+                int blockedCorporateAction, int blockedSuspension})>
+        Function(String, List<Rule>) screenFn,
   ) async {
     await tester.pumpWidget(MaterialApp(
       home: Scaffold(body: ScreeningPage(dbPath: dbPath, screenFn: screenFn)),
@@ -154,7 +155,7 @@ Future<void> scrollTo(WidgetTester tester, Finder finder) =>
         picked: [fakeRow('S1.SH', name: '威孚高科')],
         dataDate: '20260930',
         blockedStale: 0,
-        blockedCorporateAction: 0,
+        blockedCorporateAction: 0, blockedSuspension: 0,
       );
     });
 
@@ -210,7 +211,7 @@ Future<void> scrollTo(WidgetTester tester, Finder finder) =>
               ),
             ),
           ],
-          dataDate: '20260930', blockedStale: 0, blockedCorporateAction: 0,
+          dataDate: '20260930', blockedStale: 0, blockedCorporateAction: 0, blockedSuspension: 0,
         );
       });
       await scrollTo(tester, find.text('量比>2'));
@@ -244,7 +245,7 @@ Future<void> scrollTo(WidgetTester tester, Finder finder) =>
           picked: [fakeRow('600000.SH')],
           dataDate: '20260930',
           blockedStale: 0,
-          blockedCorporateAction: 0,
+          blockedCorporateAction: 0, blockedSuspension: 0,
         );
       });
       await scrollTo(tester, find.text('量比>2'));
@@ -269,7 +270,7 @@ Future<void> scrollTo(WidgetTester tester, Finder finder) =>
           picked: [fakeRow('S1.SH')],
           dataDate: '20260930',
           blockedStale: 0,
-          blockedCorporateAction: 0,
+          blockedCorporateAction: 0, blockedSuspension: 0,
         );
       });
 
@@ -297,6 +298,7 @@ Future<void> scrollTo(WidgetTester tester, Finder finder) =>
             dataDate: null,
             blockedStale: 0,
             blockedCorporateAction: 0,
+            blockedSuspension: 0,
           ));
       await scrollTo(tester, find.text('量比>2'));
       await tester.tap(find.text('量比>2'));
@@ -315,7 +317,7 @@ Future<void> scrollTo(WidgetTester tester, Finder finder) =>
           picked: [fakeRow('S1.SH', name: '威孚高科')],
           dataDate: '20260930',
           blockedStale: 0,
-          blockedCorporateAction: 0,
+          blockedCorporateAction: 0, blockedSuspension: 0,
         );
       });
       await tester.tap(find.text('收盘价站上MA20'));
@@ -333,7 +335,7 @@ Future<void> scrollTo(WidgetTester tester, Finder finder) =>
             picked: [fakeRow('600000.SH')],
             dataDate: '20260930',
             blockedStale: 0,
-            blockedCorporateAction: 0,
+            blockedCorporateAction: 0, blockedSuspension: 0,
           ));
       await tester.tap(find.text('收盘价站上MA20'));
       await tester.pump();
@@ -376,7 +378,7 @@ Future<void> scrollTo(WidgetTester tester, Finder finder) =>
                   picked: const <ScreenRow>[],
                   dataDate: null,
                   blockedStale: 0,
-                  blockedCorporateAction: 0,
+                  blockedCorporateAction: 0, blockedSuspension: 0,
                 ),
               ),
           ),
@@ -781,7 +783,7 @@ Future<void> scrollTo(WidgetTester tester, Finder finder) =>
             horizons: kDefaultHorizons,
           );
   
-      testWidgets('传入报告后规则名下方显示 10日胜率/PF/信号数', (tester) async {
+      testWidgets('传入报告后规则名下方显示最近一年的超额收益与基准', (tester) async {
         await tester.pumpWidget(MaterialApp(
           home: Scaffold(
             body: ScreeningPage(
@@ -791,7 +793,7 @@ Future<void> scrollTo(WidgetTester tester, Finder finder) =>
                 picked: const <ScreenRow>[],
                 dataDate: null,
                 blockedStale: 0,
-                blockedCorporateAction: 0,
+                blockedCorporateAction: 0, blockedSuspension: 0,
               ),
               backtestReport: fakeReport(),
             ),
@@ -799,10 +801,16 @@ Future<void> scrollTo(WidgetTester tester, Finder finder) =>
         ));
         await tester.pump();
   
-        // 收盘价站上MA20：10 日胜率应是 100%（序列单调上行）
-        expect(find.textContaining('10日 100.0%'), findsWidgets);
-        expect(find.textContaining('PF 0.00'), findsWidgets);
-        expect(find.textContaining('信号'), findsWidgets);
+        // 显示的是「超额 + 基准」并且**保留**原来的胜率/PF/信号数——口径变更
+        // 是补充不是替换（见 rule_stat_line_test.dart 的回归测试）。
+        expect(find.textContaining('超额'), findsWidgets);
+        expect(find.textContaining('基准'), findsWidgets);
+        expect(find.textContaining('24年'), findsWidgets);
+        expect(find.textContaining('胜率'), findsWidgets);
+        expect(find.textContaining('PF '), findsWidgets);
+        expect(find.textContaining('信号 '), findsWidgets);
+        // 本例样本只有几十个，必须标注出来，不能让弱数字冒充硬结论。
+        expect(find.textContaining('样本少'), findsWidgets);
       });
   
       testWidgets('不传报告时不显示统计行（不占高度）', (tester) async {
@@ -815,14 +823,14 @@ Future<void> scrollTo(WidgetTester tester, Finder finder) =>
                 picked: const <ScreenRow>[],
                 dataDate: null,
                 blockedStale: 0,
-                blockedCorporateAction: 0,
+                blockedCorporateAction: 0, blockedSuspension: 0,
               ),
             ),
           ),
         ));
         await tester.pump();
   
-        expect(find.textContaining('10日 '), findsNothing);
+        expect(find.textContaining('超额'), findsNothing);
         expect(find.text('收盘价站上MA20'), findsOneWidget);
       });
     });

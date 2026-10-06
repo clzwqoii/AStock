@@ -77,6 +77,17 @@ void main() {
     expect(repo.barCount(), 2);
   });
 
+  test('rowCountOnDate 返回某交易日已入库行数，无数据为 0', () {
+    repo.upsertBars([
+      row('000001.SZ', '20260929'),
+      row('600000.SH', '20260930'),
+      row('000001.SZ', '20260930'),
+    ]);
+    expect(repo.rowCountOnDate('20260929'), 1);
+    expect(repo.rowCountOnDate('20260930'), 2);
+    expect(repo.rowCountOnDate('20261001'), 0, reason: '没入库过的日期返回 0');
+  });
+
   test('loadAllStocks 按股票分组、按日期升序、按 minBars 过滤', () {
     repo.upsertBars([
       row('000001.SZ', '20260929'),

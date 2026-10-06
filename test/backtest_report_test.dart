@@ -348,23 +348,23 @@ void main() {
   
 
   group('跨年稳健判定 isRuleYearlyRobust', () {
-    BacktestStats st(double win, int count) => BacktestStats(
+    BacktestStats st(double win, int count, {double avg = 0}) => BacktestStats(
           count: count,
           winRate: win,
-          avgReturn: 0,
-          medianReturn: 0,
-          bestReturn: 0,
-          worstReturn: 0,
+          avgReturn: avg,
+          medianReturn: avg,
+          bestReturn: avg,
+          worstReturn: -avg,
           profitFactor: 1,
         );
 
-    /// 持有期 → 统计。
-    Map<int, BacktestStats> inner(Map<int, double> byH, int count, {double win = -1}) =>
-        {for (final e in byH.entries) e.key: st(win < 0 ? e.value : win, count)};
-
-    /// 造一份分年报告：[yearlyWin] 为 年→持有期→胜率；基准统一 0.5。
-    BacktestReport report(Map<int, Map<int, double>> yearlyWin,
-        {Set<int>? zeroYears, String ruleId = 'r'}) {
+    /// 造一份按**均收益**造的报告：年→规则均收益，基准均收益 [baseAvg]。
+    BacktestReport retReport(
+      Map<int, double> ruleAvg, {
+      double baseAvg = 0,
+      int count = 100,
+      String ruleId = 'r',
+    }) {
       return BacktestReport(
         generatedAt: '2026-10-05T00:00:00.000',
         horizons: const [10],
@@ -372,44 +372,95 @@ void main() {
         baseline: const {},
         results: const {},
         yearly: {
-          for (final y in yearlyWin.keys)
-            y: {ruleId: inner(yearlyWin[y]!, zeroYears?.contains(y) == true ? 0 : 100)},
+          for (final e in ruleAvg.entries)
+            e.key: {ruleId: {10: st(0.5, count, avg: e.value)}},
         },
         yearlyBaseline: {
-          for (final y in yearlyWin.keys) y: inner(yearlyWin[y]!, 100, win: 0.5),
+          for (final e in ruleAvg.entries)
+            e.key: {10: st(0.5, count, avg: baseAvg)},
         },
       );
     }
 
     test('每年都跑赢基准才算稳健', () {
-      expect(isRuleYearlyRobust(report({2024: {10: 0.6}, 2025: {10: 0.55}}), 'r'),
+      expect(isRuleYearlyRobust(retReport({2024: 1.2, 2025: 0.8}, baseAvg: 0.1), 'r'),
           isTrue);
     });
 
     test('有一年跑输就不稳健', () {
-      expect(isRuleYearlyRobust(report({2024: {10: 0.6}, 2025: {10: 0.45}}), 'r'),
+      expect(
+          isRuleYearlyRobust(
+              retReport({2024: 1.2, 2025: -0.5}, baseAvg: 0.1), 'r'),
           isFalse);
     });
 
-    test('恰好等于基准算不稳健（必须严格大于）', () {
-      expect(isRuleYearlyRobust(report({2024: {10: 0.5}, 2025: {10: 0.6}}), 'r'),
+    test('均收益恰好等于基准算不稳健（必须严格大于）', () {
+      expect(isRuleYearlyRobust(retReport({2024: 0.1, 2025: 1.0}, baseAvg: 0.1), 'r'),
           isFalse);
     });
 
     test('该年无数据（count=0）时跳过，不判负', () {
-      final r = report({2024: {10: 0.45}, 2025: {10: 0.6}},
-          zeroYears: {2024});
-      expect(isRuleYearlyRobust(r, 'x'), isTrue);
+      // 2024 年规则 count=0 → 跳过；2025 年有正超额 → 整体通过。
+      // 这条锁的是「早年算不出来的规则（如 MA250 需要 250 根）不该被
+      // 当成不稳健」，与均收益口径无关。
+      final r = BacktestReport(
+        generatedAt: '2026-10-05T00:00:00.000',
+        horizons: const [10],
+        stockCount: 1,
+        baseline: const {},
+        results: const {},
+        yearly: {
+          2024: {'r': {10: st(0.5, 0, avg: -99)}},
+          2025: {'r': {10: st(0.5, 100, avg: 1.0)}},
+        },
+        yearlyBaseline: {
+          2024: {10: st(0.5, 100, avg: 0.1)},
+          2025: {10: st(0.5, 100, avg: 0.1)},
+        },
+      );
+      expect(isRuleYearlyRobust(r, 'r'), isTrue,
+          reason: '2024 年 count=0 必须被跳过，否则均收益 −99 会被判成不稳健');
     });
 
     test('robustRuleIds 返回稳健规则 id', () {
-      final good = report({2024: {10: 0.6}, 2025: {10: 0.6}},
-          ruleId: 'rsi_oversold_volume');
+      final good = retReport({2024: 1.0, 2025: 0.9},
+          baseAvg: 0.1, ruleId: 'rsi_oversold_volume');
       expect(robustRuleIds(good, [ruleById('rsi_oversold_volume')]),
           ['rsi_oversold_volume']);
-      final bad = report({2024: {10: 0.6}, 2025: {10: 0.4}},
-          ruleId: 'rsi_oversold_volume');
+      final bad = retReport({2024: 1.0, 2025: -0.9},
+          baseAvg: 0.1, ruleId: 'rsi_oversold_volume');
       expect(robustRuleIds(bad, [ruleById('rsi_oversold_volume')]), isEmpty);
+    });
+
+    // ── 以下是判定口径从「胜率」切到「均收益超额」的回归测试 ──
+
+    test('判定看均收益超额，不看胜率：胜率低但收益高仍算稳健（熊市口径）', () {
+      // 2026 年实测：基准均收益 −0.41%，规则 +0.07%，胜率 43.5% < 基准 44.3%。
+      // 按旧口径这条规则被筛掉，实际它仍在赚钱。
+      final r = retReport({2026: 0.07}, baseAvg: -0.41);
+      expect(r.yearly[2026]!['r']![10]!.winRate, 0.5); // 胜率持平
+      expect(isRuleYearlyRobust(r, 'r'), isTrue,
+          reason: '均收益 +0.07% 高于基准 −0.41%，期望为正');
+    });
+
+    test('胜率高但均收益为负 → 不稳健（胜率单独用会两头看反）', () {
+      // 实测 close_above_ma20 2026：胜率 45.2% > 基准 44.3%，均收益 −0.25% < −0.41%
+      // 的另一个例子——这里构造更极端的：胜率碾压，均收益亏钱。
+      final r = retReport({2026: -2.0}, baseAvg: -0.41);
+      expect(isRuleYearlyRobust(r, 'r'), isFalse,
+          reason: '均收益 −2.0% 远低于基准 −0.41%，期望为负');
+    });
+
+    test('均收益恰好等于基准算不稳健（必须严格大于）', () {
+      expect(isRuleYearlyRobust(retReport({2026: 1.5}, baseAvg: 1.5), 'r'), isFalse);
+    });
+
+    test('真实报告下超额口径能筛出规则，胜率口径一条都筛不出', () {
+      // 回归背景：2026-10-06 实测 stock-backtest-report.json，胜率口径下
+      // 20 条规则 0 条通过「只看稳健」——那个开关开着是空列表。
+      // 切到超额口径后 rsi_oversold 族 4 条通过。
+      final r = retReport({2024: 1.87, 2025: 2.67, 2026: 0.48}, baseAvg: -0.41);
+      expect(isRuleYearlyRobust(r, 'r'), isTrue);
     });
   });
 
@@ -483,9 +534,11 @@ void main() {
   });
 
   group('可信判定：稳健 + 不集中，两个条件都要', () {
-    /// 造一份带集中度的报告。
+    /// 造一份带集中度的报告。[avg] 是规则均收益，基准固定 [baseAvg]——
+    /// 判定口径 2026-10-06 起看均收益超额，不再看胜率，所以 [win] 只作参考。
     BacktestReport repWith(String ruleId, double topShare, int signals,
-        {double win = 0.9, int months = 20}) {
+        {double win = 0.9, double avg = 1.5, double baseAvg = 0.1,
+        int months = 20}) {
       return BacktestReport(
         generatedAt: 'x',
         horizons: const [10],
@@ -501,10 +554,10 @@ void main() {
               stats: BacktestStats(
                 count: signals,
                 winRate: win,
-                avgReturn: 0,
-                medianReturn: 0,
-                bestReturn: 0,
-                worstReturn: 0,
+                avgReturn: avg,
+                medianReturn: avg,
+                bestReturn: avg,
+                worstReturn: -avg,
                 profitFactor: 1,
               ),
             ),
@@ -516,10 +569,10 @@ void main() {
               10: BacktestStats(
                 count: signals,
                 winRate: win,
-                avgReturn: 0,
-                medianReturn: 0,
-                bestReturn: 0,
-                worstReturn: 0,
+                avgReturn: avg,
+                medianReturn: avg,
+                bestReturn: avg,
+                worstReturn: -avg,
                 profitFactor: 1,
               ),
             },
@@ -530,10 +583,10 @@ void main() {
             10: BacktestStats(
               count: 100000,
               winRate: 0.4,
-              avgReturn: 0,
-              medianReturn: 0,
-              bestReturn: 0,
-              worstReturn: 0,
+              avgReturn: baseAvg,
+              medianReturn: baseAvg,
+              bestReturn: baseAvg,
+              worstReturn: -baseAvg,
               profitFactor: 1,
             ),
           },
@@ -584,7 +637,8 @@ void main() {
     });
 
     test('按年不稳的规则，占比再低也不可信', () {
-      final r = repWith('x', 0.10, 5000, win: 0.30);
+      // 胜率 0.9（碾压基准 0.4）但均收益 −1.0% < 基准 +0.1% → 超额为负。
+      final r = repWith('x', 0.10, 5000, win: 0.9, avg: -1.0);
       expect(isRuleYearlyRobust(r, 'x'), isFalse);
       expect(isRuleTrustworthy(r, 'x'), isFalse);
     });

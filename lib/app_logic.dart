@@ -15,12 +15,13 @@ import 'package:stock/core/score.dart';
 import 'package:stock/core/screener.dart';
 import 'package:stock/data/bar_repository.dart';
 import 'package:stock/data/report_store.dart';
+import 'package:stock/data/eastmoney_client.dart';
 import 'package:stock/data/sina_client.dart';
 import 'package:stock/data/sync_service.dart';
 import 'package:stock/data/tushare_client.dart';
 
 /// 当前应用版本（发布新包时同步修改，与 pubspec.version 保持一致）。
-const kAppVersion = '2.5.0';
+const kAppVersion = '2.5.1';
 
 /// 更新清单候选源（并发竞速，第一个响应的胜出）。
 /// 国内网络优先命中 Gitee；jsDelivr 镜像可加速 GitHub raw。建仓库后替换为你的地址。
@@ -333,7 +334,7 @@ String _stamp() {
 /// （不显示这个数，用户只会看到"入选变少了"而不知道原因）。
 Future<
         ({int total, List<ScreenRow> picked, String? dataDate, int blockedStale,
-            int blockedCorporateAction})>
+            int blockedCorporateAction, int blockedSuspension})>
     runScreening(
   String dbPath,
   List<Rule> rules,
@@ -366,8 +367,10 @@ Future<
             ret20: s.bars.length > 21
                 ? (s.last.close / s.bars[s.bars.length - 21].close - 1) * 100
                 : 0,
-            // 有 score-model.json 就走方案 B（holdout AUC 0.530）；没有就退回
-            // 方案 A。模型缺失是常态（首次安装、还没训练过），不该影响选股。
+            // 有 score-model.json 就走方案 B；没有就退回方案 A。模型缺失是常态
+            // （首次安装、还没训练过），不该影响选股。
+            // 具体 AUC 不写死在注释里——它每次重训都变，写死必然过期，
+            // 看 score-model.json 的 holdoutAuc 与 planAAuc 字段。
             score: scoreOf(
               report,
               hitRuleIds: ids,
@@ -390,6 +393,7 @@ Future<
           dataDate: repo.maxTradeDate(),
           blockedStale: screened.blockedStale,
           blockedCorporateAction: screened.blockedCorporateAction,
+          blockedSuspension: screened.blockedSuspension,
         );
       } finally {
         repo.close();
@@ -468,9 +472,9 @@ Future<StockDetail?> loadStockDetail(String dbPath, String symbol) async {
 
 /// 增量同步：网络等待型任务，直接在当前 isolate 跑（onProgress 才能实时回调 UI）；
 /// 库操作按交易日分批，单批几千行不会卡界面。
-/// [clientFactory] / [sinaFactory] 供测试注入假客户端；生产用默认值。
-/// 新浪备源必须接上（AGENTS 行情口径第 6 条的降级链）：不传时 tushare 日线
-/// 一故障就原样抛出，40203 限频还会空转 5 次 65 秒。
+/// [clientFactory] / [sinaFactory] / [eastmoneyFactory] 供测试注入假客户端；生产用默认值。
+/// 备源必须接上（AGENTS 行情口径第 6 条的降级链，东财 → 新浪）：不传时
+/// tushare 日线一故障就原样抛出，40203 限频还会空转 5 次 65 秒。
 /// [fromDate] / [rateDelay] 透传给 [SyncService.sync]：区间补拉用（见 [runBackfillSync]）。
 Future<SyncResult> runSync({
   required String dbPath,
@@ -478,6 +482,7 @@ Future<SyncResult> runSync({
   DateTime Function()? now,
   TushareClient Function(String token)? clientFactory,
   SinaClient Function()? sinaFactory,
+  EastmoneyClient Function()? eastmoneyFactory,
   void Function(String msg)? onProgress,
   String? fromDate,
   Duration rateDelay = const Duration(milliseconds: 350),
@@ -486,6 +491,7 @@ Future<SyncResult> runSync({
   try {
     final client = clientFactory?.call(token) ?? TushareClient(token: token);
     return await SyncService(client, repo, now: now,
+            eastmoney: eastmoneyFactory?.call() ?? EastmoneyClient(),
             sina: sinaFactory?.call() ?? SinaClient())
         .sync(onProgress: onProgress, fromDate: fromDate, rateDelay: rateDelay);
   } finally {
@@ -494,8 +500,8 @@ Future<SyncResult> runSync({
 }
 
 /// tushare daily 低积分限 50 次/分 → 间隔 ≥1.2s 才能整段区间不撞 40203。
-/// 撞了会被 maxAttempts=1 立刻甩进逐股新浪备源：约 33 分钟且新浪只有
-/// 400 根深度，3 年区间补不满——慢而可控好过快而断。
+/// 撞了会先等 65s 重试（最多 3 次）再降级逐股新浪备源：备源 5675 只逐股
+/// 要近 1 小时且新浪只有 400 根深度——能不进就不进，慢而可控好过快而断。
 const kBackfillRateDelay = Duration(milliseconds: 1200);
 
 /// 回补历史的同步入口：绕过水位线，强制拉 [fromDate]（`YYYYMMDD`）起
@@ -508,12 +514,20 @@ Future<SyncResult> runBackfillSync({
   DateTime Function()? now,
   TushareClient Function(String token)? clientFactory,
   SinaClient Function()? sinaFactory,
+  EastmoneyClient Function()? eastmoneyFactory,
   void Function(String msg)? onProgress,
   Duration rateDelay = kBackfillRateDelay,
 }) =>
-    runSync(dbPath: dbPath, token: token, now: now,
-        clientFactory: clientFactory, sinaFactory: sinaFactory,
-        onProgress: onProgress, fromDate: fromDate, rateDelay: rateDelay);
+    runSync(
+        dbPath: dbPath,
+        token: token,
+        now: now,
+        clientFactory: clientFactory,
+        sinaFactory: sinaFactory,
+        eastmoneyFactory: eastmoneyFactory,
+        onProgress: onProgress,
+        fromDate: fromDate,
+        rateDelay: rateDelay);
 
 /// 回补历史的注入端口（外壳字段用）；生产用 [runBackfillSync]。
 typedef RunBackfillFn = Future<SyncResult> Function({

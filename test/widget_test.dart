@@ -46,6 +46,10 @@ void main() {
 
     await tester.enterText(find.byType(TextField), 'abc123');
     await tester.tap(find.text('完成并开始'));
+    // 回调触发真实 runSync（未注入假实现）：tushare 快速失败后有 2×2s 的
+    // 网络重试 Timer，FakeAsync 里必须显式推假时钟把它们耗完，
+    // 否则测试收尾报 pending timer。
+    await tester.pump(const Duration(seconds: 6));
     await tester.pumpAndSettle();
     expect(saved, 'abc123');
     expect(find.textContaining('欢迎'), findsNothing);

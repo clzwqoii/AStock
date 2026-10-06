@@ -183,4 +183,92 @@ void main() {
       expect(isCleanSignalDay('600000.SH', seriesWithGapAt5(), 0), isTrue);
     });
   });
+
+  group('tradingDaysSincePrevBar（停牌洞要用交易日历判）', () {
+    // 仿 2024-01 的真实交易日：周二~周五 + 下周一、二（周末不在历里）
+    final cal = {
+      DateTime(2024, 1, 2), // 周二
+      DateTime(2024, 1, 3),
+      DateTime(2024, 1, 4),
+      DateTime(2024, 1, 5), // 周五
+      DateTime(2024, 1, 8), // 周一
+      DateTime(2024, 1, 9),
+    };
+
+    test('相邻交易日 → 1；跨周末 → 1（周末不是交易日，不算洞）', () {
+      // 连续 5 个交易日（周二~周五 + 周一），中间只跨了周末
+      final bars = [
+        for (final d in [
+          DateTime(2024, 1, 2),
+          DateTime(2024, 1, 3),
+          DateTime(2024, 1, 4),
+          DateTime(2024, 1, 5),
+          DateTime(2024, 1, 8),
+        ])
+          Bar(date: d, open: 10, high: 10, low: 10, close: 10, volume: 1),
+      ];
+      expect(tradingDaysSincePrevBar(bars, cal), [1, 1, 1, 1, 1],
+          reason: '周五→周一中间只有周末，不算停牌');
+    });
+
+    test('停牌 3 个交易日 → 4', () {
+      final bars = [
+        Bar(date: DateTime(2024, 1, 5), open: 10, high: 10, low: 10, close: 10, volume: 1),
+        // 1/8、1/9 之后停牌到 1/16（不在历里的日期当作非交易日）
+        Bar(date: DateTime(2024, 1, 16), open: 10, high: 10, low: 10, close: 10, volume: 1),
+      ];
+      final c2 = {...cal, DateTime(2024, 1, 15), DateTime(2024, 1, 16)};
+      // 1/5 → 1/16 之间历上有 1/8,1/9,1/15,1/16 = 4 个交易日
+      expect(tradingDaysSincePrevBar(bars, c2), [1, 4]);
+    });
+
+
+
+    test('日历为空 → 全部记 1（看不出洞，护栏失效但不误杀）', () {
+      final bars = [
+        Bar(date: DateTime(2024, 1, 2), open: 10, high: 10, low: 10, close: 10, volume: 1),
+        Bar(date: DateTime(2024, 3, 2), open: 10, high: 10, low: 10, close: 10, volume: 1),
+      ];
+      expect(tradingDaysSincePrevBar(bars, const {}), [1, 1]);
+    });
+
+    test('首根记 1（没有前一根可比）', () {
+      final one = [
+        Bar(date: DateTime(2024, 1, 2), open: 10, high: 10, low: 10, close: 10, volume: 1),
+      ];
+      expect(tradingDaysSincePrevBar(one, cal), [1]);
+    });
+  });
+
+  group('hasSuspensionGapNearby', () {
+    // gapDays[i] = 第 i 根距上一根隔了几个交易日
+    test('窗口内全是 1 → 干净', () {
+      final g = List<int>.filled(40, 1);
+      expect(hasSuspensionGapNearby(g, 39), isFalse);
+    });
+
+    test('窗口内出现 2 → 有洞', () {
+      final g = List<int>.filled(40, 1)..[30] = 2;
+      expect(hasSuspensionGapNearby(g, 39), isTrue);
+    });
+
+    test('窗口边界：只算 [t-lookback+1, t]，差一根就不算', () {
+      final g = List<int>.filled(40, 1)..[19] = 45;
+      // t=39、lookback=20 → 窗口 20..39，19 在窗外
+      expect(hasSuspensionGapNearby(g, 39), isFalse);
+      // t=38 → 窗口 19..38，19 在窗内
+      expect(hasSuspensionGapNearby(g, 38), isTrue);
+    });
+
+    test('maxGapTradingDays 可调：只挡 >3 天的洞', () {
+      final g = List<int>.filled(40, 1)..[30] = 3;
+      expect(hasSuspensionGapNearby(g, 39, maxGapTradingDays: 3), isFalse);
+      expect(hasSuspensionGapNearby(g, 39, maxGapTradingDays: 2), isTrue);
+    });
+
+    test('lookbackBars<=0 = 关护栏', () {
+      final g = List<int>.filled(40, 1)..[39] = 45;
+      expect(hasSuspensionGapNearby(g, 39, lookbackBars: 0), isFalse);
+    });
+  });
 }

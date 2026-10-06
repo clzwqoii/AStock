@@ -25,6 +25,13 @@ import 'package:stock/core/rules.dart';
 import 'package:stock/core/screener.dart';
 import 'package:stock/data/bar_repository.dart';
 
+/// 停牌护栏回溯根数（先量化再定阈值）。
+const kSuspensionLookback = 20;
+
+/// 交易日历阈值：某日全市场有至少这么多只股票有行，才算"全市场共同交易日"。
+/// 与 tool/fill_gaps.dart 同口径——节假日全市场都没行，不能被误判成个股停牌。
+const kCalendarMinRows = 4000;
+
 /// 信号日形态分桶。按「当日涨跌方向 × 收盘位置」切——
 /// 量比>1.5 是主规则的共同前提，所以差异只能来自当日 K 线的方向与收盘位置。
 enum SignalDayShape {
@@ -106,6 +113,7 @@ class _Signal {
     required this.closePos,
     required this.gap,
     required this.barsSinceGap,
+    required this.maxSuspensionGap,
     required this.bias20,
     required this.rsi14,
     required this.fresh,
@@ -120,6 +128,10 @@ class _Signal {
 
   /// 距最近一次异常跳空（除权/复牌）的 K 线根数，0 = 当天就是。
   final int barsSinceGap;
+
+  /// 信号日往前 [kSuspensionLookback] 根内最大的"停牌洞"（单位=交易日）。
+  /// 1 = 根根相邻（没有洞）。
+  final int maxSuspensionGap;
 
   /// 信号日收盘相对 MA20 的乖离（%）。
   final double bias20;
@@ -179,7 +191,8 @@ Future<void> main(List<String> args) async {
   print('');
   _freshness(stocks, rule, poolLast);
 
-  final signals = _scan(stocks, rule, forwardDays, poolLast);
+  final calendar = _tradingCalendar(stocks);
+  final signals = _scan(stocks, rule, forwardDays, poolLast, calendar);
   print('');
   _shapeSplit(signals, stocks, forwardDays, cutoff);
   print('');
@@ -190,6 +203,8 @@ Future<void> main(List<String> args) async {
   _pollutionWindow(signals, cutoff);
   print('');
   _missedDetection(signals, cutoff);
+  print('');
+  _suspensionImpact(signals, cutoff);
 }
 
 // ── 公共：池内最大交易日 ──────────────────────────────────────
@@ -412,7 +427,13 @@ void _freshness(List<StockData> stocks, Rule rule, DateTime poolLast) {
 
 // ── 3. 信号扫描 ──────────────────────────────────────────────
 
-List<_Signal> _scan(List<StockData> stocks, Rule rule, int forwardDays, DateTime poolLast) {
+List<_Signal> _scan(
+  List<StockData> stocks,
+  Rule rule,
+  int forwardDays,
+  DateTime poolLast,
+  Set<DateTime> calendar,
+) {
   final out = <_Signal>[];
   for (final stock in stocks) {
     final bars = stock.bars;
@@ -420,6 +441,9 @@ List<_Signal> _scan(List<StockData> stocks, Rule rule, int forwardDays, DateTime
     final series = IndicatorSeries.from(bars);
     // 除权污染窗口一律走 core 的同一份判定，不在工具里另写一套
     final sinceGap = barsSinceCorporateAction(stock.symbol, bars);
+    // 停牌洞要用**交易日历**判：节假日全市场一起休，停牌只有这只票缺。
+    // 只用日历日差会把每个春节/国庆都算成"停牌"。
+    final gapDays = _tradingDaysSincePrev(stock.symbol, bars, calendar);
     final lastEval = bars.length - 1 - forwardDays;
     for (var t = IndicatorSnapshot.minBars; t <= lastEval; t++) {
       if (!rule.test(series.at(t))) continue;
@@ -431,6 +455,7 @@ List<_Signal> _scan(List<StockData> stocks, Rule rule, int forwardDays, DateTime
         closePos: ind.closePos(bars[t]),
         gap: (bars[t].open / bars[t - 1].close - 1) * 100,
         barsSinceGap: sinceGap[t],
+        maxSuspensionGap: _maxGapInWindow(gapDays, t, kSuspensionLookback),
         bias20: ind.biasPctOf(bars[t].close, _meanClose(bars.sublist(0, t + 1), 20)),
         rsi14: series.at(t).rsi14,
         fresh: bars[t].date == stock.bars.last.date,
@@ -621,7 +646,78 @@ void _missedDetection(List<_Signal> signals, DateTime cutoff) {
       '真实漏检比这小。非北交所的跳空超 21% 现行护栏已经全部抓住。');
 }
 
-// ── 10. 常见过滤口径的样本内表现 ──────────────────────────────
+// ── 10. 停牌洞对信号的污染 ─────────────────────────────────
+
+/// 交易日历：某一天有 >=[kCalendarMinRows] 只股票有行，就认为是全市场共同交易日。
+/// 这样节假日（全市场都没行）不会被误判成个股停牌。
+Set<DateTime> _tradingCalendar(List<StockData> stocks) {
+  final count = <DateTime, int>{};
+  for (final s in stocks) {
+    for (final b in s.bars) {
+      count[b.date] = (count[b.date] ?? 0) + 1;
+    }
+  }
+  return {for (final e in count.entries) if (e.value >= kCalendarMinRows) e.key};
+}
+
+/// 逐日"距上一根隔了几个交易日"（1 = 相邻）。第 0 根记为 1。
+/// 用交易日历而不是日历日差：后者会把每个春节/国庆都算成停牌。
+List<int> _tradingDaysSincePrev(String tsCode, List<Bar> bars, Set<DateTime> cal) {
+  final out = List<int>.filled(bars.length, 1);
+  if (cal.isEmpty) return out;
+  for (var i = 1; i < bars.length; i++) {
+    var n = 0;
+    var d = bars[i - 1].date;
+    while (d.isBefore(bars[i].date)) {
+      d = d.add(const Duration(days: 1));
+      if (cal.contains(d)) n++;
+    }
+    out[i] = n <= 0 ? 1 : n;
+  }
+  return out;
+}
+
+int _maxGapInWindow(List<int> gapDays, int t, int lookback) {
+  final from = t - lookback + 1 < 1 ? 1 : t - lookback + 1;
+  var m = 1;
+  for (var i = from; i <= t; i++) {
+    if (gapDays[i] > m) m = gapDays[i];
+  }
+  return m;
+}
+
+void _suspensionImpact(List<_Signal> signals, DateTime cutoff) {
+  print('═══ 10. 停牌洞污染（回溯 $kSuspensionLookback 根内最大停牌天数）═══');
+  void row(String title, List<_Signal> xs) {
+    if (xs.isEmpty) return;
+    final st = BacktestStats.of([for (final s in xs) s.ret]);
+    print('  ${title.padRight(12)} 信号 ${st.count.toString().padLeft(5)}  '
+        '胜率 ${(st.winRate * 100).toStringAsFixed(1)}%  均收益 ${_pct(st.avgReturn)}  '
+        'p10 ${_pct(st.p10 ?? 0)}  最差 ${_pct(st.worstReturn, digits: 1)}');
+  }
+
+  print('全样本：');
+  for (final k in ['无洞(1天)', '小洞(2-4天)', '中洞(5-9天)', '大洞(≥10天)']) {
+    row(k, signals.where((s) => _suspBucket(s) == k).toList());
+  }
+  final recent = signals.where((s) => !s.date.isBefore(cutoff)).toList();
+  if (recent.isNotEmpty) {
+    print('近窗：');
+    for (final k in ['无洞(1天)', '小洞(2-4天)', '中洞(5-9天)', '大洞(≥10天)']) {
+      row(k, recent.where((s) => _suspBucket(s) == k).toList());
+    }
+  }
+}
+
+String _suspBucket(_Signal s) => s.maxSuspensionGap <= 1
+    ? '无洞(1天)'
+    : s.maxSuspensionGap <= 4
+        ? '小洞(2-4天)'
+        : s.maxSuspensionGap <= 9
+            ? '中洞(5-9天)'
+            : '大洞(≥10天)';
+
+// ── 11. 常见过滤口径的样本内表现 ──────────────────────────────
 
 void _variants(List<_Signal> signals, DateTime cutoff) {
   final variants = <String, bool Function(_Signal)>{

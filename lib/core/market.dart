@@ -1,16 +1,96 @@
-/// A 股交易制度层面的纯函数：涨跌停幅度与除权日识别。
+/// A 股交易制度层面的纯函数：涨跌停幅度、除权日识别、停牌洞识别。
 ///
-/// 为什么单独一个文件：这两件事都不是"指标"，而是**行情数据的口径规则**。
+/// 为什么单独一个文件：这些都不是"指标"，而是**行情数据的口径规则**——
 /// 本地库存的是**不复权**价（AGENTS.md 行情口径第 6 条），于是每个除权日
 /// 都会在价格序列上留下一个永久的价位断层：10 转 4 那天，前收 22.90 元、
 /// 今开 16.63 元，"当日跌幅 −27.4%"里没有一分钱是真实盈亏。
 /// RSI(Wilder 14) 要把这个假跌幅平滑掉要十几根 K 线，MA60 更久——
 /// 不识别它，任何"超卖/放量/金叉"规则都会在除权后连续多日拿到假信号。
 ///
-/// 与 [indicators] 的分工：那边算数值，这边判"这一天到底是不是正常交易日"。
+/// 与 [indicators] 的分工：那边算数值，这边判"这一天到底能不能信"。
 library;
 
+import 'dart:math' as math;
+
 import 'models.dart';
+
+/// 停牌护栏的默认回溯根数。与除权护栏同口径：20 根覆盖 RSI14 平滑期与 MA20 期。
+const kSuspensionLookbackBars = 20;
+
+/// 停牌护栏默认允许的最大"根间隔"。1 = 只容忍根根相邻；出现 2 就算有洞。
+///
+/// 实测依据（`tool/diag_main_rule.dart` 第 10 节，全样本主规则信号，10 日持有）：
+/// 回溯 20 根内有 2~4 天停牌洞的信号，10 日胜率 51.4%（无洞组 72.7%）、
+/// 均收益 +0.05%（无洞组 +10.56%）、**p10 −27.85%（无洞组 −9.27%）**。
+/// 伤害集中在短洞——复牌后指标是跨着洞算的，RSI 会被停牌前的价格带偏。
+const kSuspensionMaxGapTradingDays = 1;
+
+/// 逐日"距上一根隔了几个交易日"（1 = 相邻；首根记 1）。
+///
+/// 为什么必须用**交易日历**而不是日历日差：春节/国庆全市场一起休，用日历日差
+/// 会把每个长假都算成"停牌"，护栏会误杀全部股票。交易日历由 [tradingCalendar]
+/// 从同一批股票里统计出来。
+///
+/// [calendar] 为空时全部记 1（看不出洞）——护栏退化为关闭而不是误杀。
+List<int> tradingDaysSincePrevBar(List<Bar> bars, Set<DateTime> calendar) {
+  final out = List<int>.filled(bars.length, 1);
+  if (calendar.isEmpty || bars.length < 2) return out;
+  for (var i = 1; i < bars.length; i++) {
+    var n = 0;
+    var d = bars[i - 1].date;
+    while (d.isBefore(bars[i].date)) {
+      d = d.add(const Duration(days: 1));
+      if (calendar.contains(d)) n++;
+    }
+    out[i] = n <= 0 ? 1 : n;
+  }
+  return out;
+}
+
+/// 由一批日线构造交易日历：某一天有至少 [minStocks] 只股票有行，
+/// 就认为这是"全市场共同交易日"（节假日全市场都没行，不会进来）。
+///
+/// [minStocks] <= 0 时按**当日行数 ≥ 全场中位行数的一半**自动判定，
+/// 这样在股票数变化（新装机、只同步了一部分）时同样成立。
+Set<DateTime> tradingCalendar(List<StockData> stocks, {int minStocks = 0}) {
+  final count = <DateTime, int>{};
+  for (final s in stocks) {
+    for (final b in s.bars) {
+      count[b.date] = (count[b.date] ?? 0) + 1;
+    }
+  }
+  if (count.isEmpty) return const {};
+  if (minStocks <= 0) {
+    final sorted = count.values.toList()..sort();
+    minStocks = math.max(1, sorted[sorted.length ~/ 2] ~/ 2);
+  }
+  return {for (final e in count.entries) if (e.value >= minStocks) e.key};
+}
+
+/// 第 [t] 天近 [lookbackBars] 根内是否出现过停牌洞（相邻两根隔了超过
+/// [maxGapTradingDays] 个交易日）。
+///
+/// 只看信号当日不够：停牌复牌后 `IndicatorSeries` 仍把相邻两根当成相邻两天，
+/// MA/RSI 是跨着洞算的，要等 RSI14 平滑期过去才恢复——与除权护栏同一个道理。
+///
+/// [gapDays] 由 [tradingDaysSincePrevBar] 预计算（整条一次算清；回测逐日评估时
+/// 不能每天重算，那是 O(n×窗口) 与 O(n) 的差别）。
+/// `lookbackBars <= 0` 时恒为 false（护栏关闭）。
+bool hasSuspensionGapNearby(
+  List<int> gapDays,
+  int t, {
+  int lookbackBars = kSuspensionLookbackBars,
+  int maxGapTradingDays = kSuspensionMaxGapTradingDays,
+}) {
+  if (lookbackBars <= 0) return false;
+  if (t < 1 || t >= gapDays.length) return false;
+  final from = t - lookbackBars + 1 < 1 ? 1 : t - lookbackBars + 1;
+  for (var i = from; i <= t; i++) {
+    if (gapDays[i] > maxGapTradingDays) return true;
+  }
+  return false;
+}
+
 
 /// 每只股票每日价格相对前收盘的涨跌停幅度（%），按代码规则判定。
 ///

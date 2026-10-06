@@ -16,7 +16,7 @@ import 'stock_detail_page.dart';
 typedef ScreenFn =
     Future<
             ({int total, List<ScreenRow> picked, String? dataDate, int blockedStale,
-                int blockedCorporateAction})>
+                int blockedCorporateAction, int blockedSuspension})>
         Function(String dbPath, List<Rule> rules);
 
 /// 长任务加载模态（居中卡片）：大号强调色转圈 + 标题 + 可选副标题，
@@ -134,7 +134,7 @@ class _ScreeningPageState extends State<ScreeningPage> {
   bool _loading = false;
   String? _error;
   ({int total, List<ScreenRow> picked, String? dataDate, int blockedStale,
-      int blockedCorporateAction})? _result;
+      int blockedCorporateAction, int blockedSuspension})? _result;
 
   /// 当前排序列与方向；null = 引擎返回顺序。
   SortField? _sortField;
@@ -323,20 +323,24 @@ class _ScreeningPageState extends State<ScreeningPage> {
         ),
       );
 
-  /// 规则名下的回测统计行：`10日 55.6% · PF1.46 · 795信号`。
-  /// 没有回测报告时返回空（不占高度），并给一句提示去哪生成。
+  /// 规则名下的回测统计行：`2026年 +0.07% · 超额 +0.48pp · 基准 -0.41%`。
+  /// 没有回测报告、该年样本不足或当年基准缺失时返回空（不占高度）。
+  ///
+  /// 显示超额而不是胜率：熊市里胜率低于基准常常只是"赢小钱、输小钱"，
+  /// 期望仍为正（实测 2026 年 rsi_oversold 胜率低于基准但超额 +0.48pp）。
   Widget _statLine(Rule rule) {
-    final r = widget.backtestReport?.result(rule.id, 10);
-    if (r == null || r.count == 0) {
-      return const SizedBox.shrink();
-    }
+    final report = widget.backtestReport;
+    if (report == null) return const SizedBox.shrink();
+    final line = ruleStatLine(report, rule.id, 10);
+    if (line == null) return const SizedBox.shrink();
     return Padding(
       padding: const EdgeInsets.only(top: 1),
       child: Text(
-        '10日 ${(r.winRate * 100).toStringAsFixed(1)}%'
-        ' · PF ${r.profitFactor.toStringAsFixed(2)}'
-        ' · ${r.count}信号',
-        style: const TextStyle(fontSize: 9, color: AppColors.dim),
+        line.label,
+        style: TextStyle(
+          fontSize: 9,
+          color: line.excessPp >= 0 ? AppColors.dim : AppColors.down,
+        ),
       ),
     );
   }
@@ -545,12 +549,13 @@ class _ScreeningPageState extends State<ScreeningPage> {
       return _centerHint('没有股票满足所选规则');
     }
     // 内容最小宽度：列全展开不挤压，超出部分靠横向滚动（桌面窗口拖窄也不会溢出）
-    final tableW = math.max(availableW, wide ? 980.0 : 560.0);
+    final tableW = math.max(availableW, wide ? 900.0 : 560.0);
     return SingleChildScrollView(
       scrollDirection: Axis.horizontal,
       child: SizedBox(
         width: tableW,
         child: Column(
+          crossAxisAlignment: CrossAxisAlignment.stretch, // 名称列定宽后表头不再自然满宽，强制撑满
           children: [
             _headerRow(wide),
             Expanded(
@@ -590,7 +595,12 @@ class _ScreeningPageState extends State<ScreeningPage> {
           children: wide
               ? [
                   _headerCell('代码', 104, left: true),
-                  _headerCell('名称', null, left: true), // 弹性列吃剩余宽度（左对齐，宽了不空洞）
+                  _headerCell('名称', 96, left: true), // 定宽（约6个汉字，更长省略）：弹性会把宽窗口的空白全吃进名称列
+                  // 买卖决策要看的四个字段紧跟名称，不用横向滚动去找
+                  _sortableHeader('评分', 52, SortField.score),
+                  _sortableHeader('目标', 60, null),
+                  _sortableHeader('止损', 60, null),
+                  _sortableHeader('盈亏比', 50, SortField.riskReward),
                   _sortableHeader('收盘', 64, SortField.close),
                   _sortableHeader('涨跌', 64, null),
                   _sortableHeader('涨跌幅', 78, SortField.changePct),
@@ -601,10 +611,6 @@ class _ScreeningPageState extends State<ScreeningPage> {
                   _sortableHeader('量比', 56, SortField.volumeRatio),
                   _sortableHeader('成交额(万)', 84, SortField.amount), // 定宽：右对齐数字列被拉宽会留大片空白
                   _sortableHeader('MA20', 64, SortField.ma20),
-                  _sortableHeader('评分', 52, SortField.score),
-                  _sortableHeader('目标', 60, null),
-                  _sortableHeader('止损', 60, null),
-                  _sortableHeader('盈亏比', 50, SortField.riskReward),
                 ]
               : [
                   _headerCell('代码', 104, left: true),
@@ -679,8 +685,8 @@ class _ScreeningPageState extends State<ScreeningPage> {
       return width == null ? Expanded(child: padded) : SizedBox(width: width, child: padded);
     }
 
-    // 名称是弹性列（宽窄屏一致），成交额定宽；数字右对齐列不能弹性伸展
-    final nameCell = cell(row.name ?? '—', null,
+    // 名称定宽（宽表）；窄表仍是弹性列吃剩余宽度（手机上只有 4 列）
+    final nameCell = cell(row.name ?? '—', wide ? 96 : null,
         const TextStyle(fontSize: 12, color: AppColors.dim), left: true);
 
     return GestureDetector(
@@ -693,6 +699,12 @@ class _ScreeningPageState extends State<ScreeningPage> {
             ? [
                 cell(row.symbol, 104, plain.copyWith(fontWeight: FontWeight.w600), left: true),
                 nameCell,
+                cell(_scoreCell(row), 52, _scoreStyle(row)),
+                cell(row.forecast?.target?.toStringAsFixed(2) ?? '', 60,
+                    plain.copyWith(color: AppColors.red)),
+                cell(row.forecast?.stop?.toStringAsFixed(2) ?? '', 60,
+                    plain.copyWith(color: AppColors.down)),
+                cell(row.forecast?.riskReward?.toStringAsFixed(2) ?? '', 50, plain),
                 cell(_f2(row.close), 64, plain.copyWith(fontWeight: FontWeight.w600)),
                 cell(_signed(row.change), 64, changeStyle),
                 cell(_signed(row.changePct, suffix: '%'), 78, pctStyle),
@@ -705,12 +717,6 @@ class _ScreeningPageState extends State<ScreeningPage> {
                 cell(_f2(row.volumeRatio), 56, plain),
                 cell(row.amountWan.toStringAsFixed(0), 84, plain),
                 cell(_f2(row.ma20), 64, plain),
-                cell(_scoreCell(row), 52, _scoreStyle(row)),
-                cell(row.forecast?.target?.toStringAsFixed(2) ?? '', 60,
-                    plain.copyWith(color: AppColors.red)),
-                cell(row.forecast?.stop?.toStringAsFixed(2) ?? '', 60,
-                    plain.copyWith(color: AppColors.down)),
-                cell(row.forecast?.riskReward?.toStringAsFixed(2) ?? '', 50, plain),
               ]
             : [
                 cell(row.symbol, 104, plain.copyWith(fontWeight: FontWeight.w600), left: true),
@@ -769,10 +775,11 @@ class _ScreeningPageState extends State<ScreeningPage> {
           const SizedBox(width: 20),
           _sbItem('已选规则', '${_selected.length}'),
           const SizedBox(width: 20),
-          if (r != null && (r.blockedStale + r.blockedCorporateAction) > 0)
+          if (r != null &&
+              r.blockedStale + r.blockedCorporateAction + r.blockedSuspension > 0)
             _sbItem(
               '过滤假信号',
-              '${r.blockedStale + r.blockedCorporateAction}',
+              '${r.blockedStale + r.blockedCorporateAction + r.blockedSuspension}',
               color: AppColors.down,
             ),
           const Spacer(),

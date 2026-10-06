@@ -7,6 +7,7 @@ import 'package:stock/config.dart';
 import 'package:stock/core/backtest.dart';
 import 'package:stock/core/models.dart';
 import 'package:stock/core/rules.dart';
+import 'package:stock/core/score.dart';
 import 'package:stock/data/sync_service.dart';
 import 'package:stock/ui/candle_chart.dart';
 import 'package:stock/ui/colors.dart';
@@ -64,7 +65,7 @@ void main() {
               close: 18.21, change: 0.41, changePct: 2.31,
               volumeRatio: 1.8, amountWan: 8452, ma20: 18.10),
         ],
-        dataDate: '20260930', blockedStale: 0, blockedCorporateAction: 0,
+        dataDate: '20260930', blockedStale: 0, blockedCorporateAction: 0, blockedSuspension: 0,
       ),
     ));
     await tester.pump();
@@ -90,6 +91,62 @@ void main() {
     expect(find.textContaining('威孚高科'), findsOneWidget);
   });
 
+  testWidgets('结果卡片数值带标签：信号日/近20日/10日胜率/目标价/止损价，不再裸数字', (tester) async {
+    _phone(tester);
+    await tester.pumpWidget(StockApp(
+      config: AppConfig(tushareToken: '', dbPath: dbPath),
+      showOnboarding: false,
+      screenFn: (dbPath, rules) async => (
+        total: 2,
+        picked: [
+          ScreenRow(
+            symbol: '300601.SZ',
+            name: '康泰生物',
+            close: 13.58, change: 0.79, changePct: 6.18,
+            volumeRatio: 1.8, amountWan: 8452, ma20: 13.10,
+            signalDate: '2026-09-30', ret20: 5.0,
+            score: const StockScore(
+              score: 50, rawWinRate: 0.5, baselineWinRate: 0.5,
+              sampleCount: 0, hitRuleIds: [], source: 'planA',
+              lowConfidence: true, reason: '未命中任何已回测规则'),
+            forecast: const PriceForecast(
+              entry: 13.58, target: 13.23, stop: 12.77,
+              optimistic: null, riskReward: -0.43,
+              lowConfidence: true, reason: '历史平均收益为负，目标价低于买入价'),
+          ),
+        ],
+        dataDate: '20260930', blockedStale: 0, blockedCorporateAction: 0, blockedSuspension: 0,
+      ),
+    ));
+    await tester.pump();
+
+    await tester.tap(find.text('收盘价站上MA20').last);
+    await tester.pump();
+    await tester.tap(find.text('开始选股'));
+    await tester.pumpAndSettle();
+
+    await tester.scrollUntilVisible(
+      find.text('康泰生物'),
+      80,
+      scrollable: find.byType(Scrollable).first,
+    );
+
+    // 信号信息带词：信号日 + 近20日涨跌
+    expect(find.textContaining('信号 09-30'), findsOneWidget);
+    expect(find.textContaining('近20日 +5.0%'), findsOneWidget);
+    // 卡片三个带标签的指标：胜率 / 目标价 / 止损价
+    expect(find.text('10日胜率'), findsOneWidget);
+    expect(find.textContaining('50%'), findsOneWidget);
+    expect(find.text('目标价'), findsOneWidget);
+    expect(find.textContaining('13.23'), findsOneWidget);
+    expect(find.textContaining('-2.6%'), findsOneWidget);
+    expect(find.text('止损价'), findsOneWidget);
+    expect(find.textContaining('12.77'), findsOneWidget);
+    // 旧裸数字写法退役：目标/止损不再用斜杠拼接，负盈亏比不再出现
+    expect(find.textContaining('盈亏比'), findsNothing);
+    expect(find.textContaining('13.23/12.77'), findsNothing);
+  });
+
   testWidgets('移动端点击结果卡片进入个股详情（K线图 + 指标）', (tester) async {
     _phone(tester);
     seedStocks(dbPath);
@@ -105,7 +162,7 @@ void main() {
               close: 10.5, change: 0.5, changePct: 5.0,
               volumeRatio: 3.0, amountWan: 0.1, ma20: 10.025),
         ],
-        dataDate: '20260930', blockedStale: 0, blockedCorporateAction: 0,
+        dataDate: '20260930', blockedStale: 0, blockedCorporateAction: 0, blockedSuspension: 0,
       ),
     ));
     await tester.pump();
@@ -194,7 +251,10 @@ void main() {
 
     await pumpHome();
     await tester.pump();
-    expect(find.textContaining('· 60信号'), findsWidgets); // 初始统计行
+    // 统计行显示「最近一年 均收益 · 超额 · 胜率 · PF · 基准 · 信号数」：
+    // 90 根时 2024 年均收益 6.78%。年份只写后两位（24年）。
+    expect(find.textContaining('24年 6.78%'), findsWidgets); // 初始统计行
+    expect(find.textContaining('24年 7.74%'), findsNothing);
 
     await tester.tap(find.text('回测'));
     await tester.pumpAndSettle();
@@ -209,8 +269,8 @@ void main() {
     await tester.pump();
     await tester.tap(find.text('选股'));
     await tester.pumpAndSettle();
-    expect(find.textContaining('· 20信号'), findsWidgets);
-    expect(find.textContaining('· 60信号'), findsNothing);
+    expect(find.textContaining('24年 7.74%'), findsWidgets);
+    expect(find.textContaining('24年 6.78%'), findsNothing);
   });
 
   testWidgets('选股完成后规则面板自动收起，结果列表不再被面板遮住', (tester) async {
@@ -227,7 +287,7 @@ void main() {
               close: 18.21, change: 0.41, changePct: 2.31,
               volumeRatio: 1.8, amountWan: 8452, ma20: 18.10),
         ],
-        dataDate: '20260930', blockedStale: 0, blockedCorporateAction: 0,
+        dataDate: '20260930', blockedStale: 0, blockedCorporateAction: 0, blockedSuspension: 0,
       ),
     ));
     await tester.pump();
@@ -276,7 +336,7 @@ void main() {
           picked: const <ScreenRow>[],
           dataDate: '20260930',
           blockedStale: 0,
-          blockedCorporateAction: 0,
+          blockedCorporateAction: 0, blockedSuspension: 0,
         );
       },
     ));

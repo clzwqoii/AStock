@@ -168,7 +168,7 @@ class _MobileScreeningState extends State<MobileScreening> {
   bool _loading = false;
   String? _error;
   ({int total, List<ScreenRow> picked, String? dataDate, int blockedStale,
-      int blockedCorporateAction})? _result;
+      int blockedCorporateAction, int blockedSuspension})? _result;
 
   void _toggle(String id) {
     setState(() {
@@ -311,7 +311,9 @@ class _MobileScreeningState extends State<MobileScreening> {
     final msg = widget.syncMsg;
     // 护栏挡掉的"本会入选"的假信号数。只在有数时显示——静默过滤会让用户
     // 以为"规则没信号"，而这正是此前被两年前的化石票骗过的原因。
-    final blocked = (r?.blockedStale ?? 0) + (r?.blockedCorporateAction ?? 0);
+    final blocked = (r?.blockedStale ?? 0) +
+        (r?.blockedCorporateAction ?? 0) +
+        (r?.blockedSuspension ?? 0);
     return Padding(
       padding: const EdgeInsets.symmetric(horizontal: 14),
       child: Column(
@@ -330,8 +332,8 @@ class _MobileScreeningState extends State<MobileScreening> {
             Padding(
               padding: const EdgeInsets.only(top: 8, left: 4),
               child: Text(
-                '数据护栏挡掉 $blocked 只假信号（停牌/退市 ${r!.blockedStale} 只 + '
-                '除权日 ${r.blockedCorporateAction} 只）',
+                '数据护栏挡掉 $blocked 只假信号（停牌/退市 ${r!.blockedStale} + '
+                '除权日 ${r.blockedCorporateAction} + 停牌复牌 ${r.blockedSuspension}）',
                 style: const TextStyle(fontSize: 11, color: AppColors.dim),
               ),
             ),
@@ -414,18 +416,24 @@ class _MobileScreeningState extends State<MobileScreening> {
         ),
       );
 
-  /// 规则名下的回测统计行：`10日 55.6% · PF 1.46 · 795信号`。
-  /// 无报告或无信号时不占高度。
+  /// 规则名下的回测统计行：`2026年 +0.07% · 超额 +0.48pp · 基准 -0.41%`。
+  /// 无报告或该年样本不足时不占高度。
+  ///
+  /// 显示超额而不是胜率：熊市里胜率低于基准常常只是"赢小钱、输小钱"，
+  /// 期望仍为正（实测 2026 年 rsi_oversold 胜率低于基准但超额 +0.48pp）。
   Widget _statLine(Rule rule) {
-    final r = widget.backtestReport?.result(rule.id, 10);
-    if (r == null || r.count == 0) return const SizedBox.shrink();
+    final report = widget.backtestReport;
+    if (report == null) return const SizedBox.shrink();
+    final line = ruleStatLine(report, rule.id, 10);
+    if (line == null) return const SizedBox.shrink();
     return Padding(
       padding: const EdgeInsets.only(top: 2),
       child: Text(
-        '10日 ${(r.winRate * 100).toStringAsFixed(1)}%'
-        ' · PF ${r.profitFactor.toStringAsFixed(2)}'
-        ' · ${r.count}信号',
-        style: const TextStyle(fontSize: 10, color: AppColors.dim),
+        line.label,
+        style: TextStyle(
+          fontSize: 10,
+          color: line.excessPp >= 0 ? AppColors.dim : AppColors.down,
+        ),
       ),
     );
   }
@@ -515,17 +523,28 @@ class _MobileScreeningState extends State<MobileScreening> {
     ));
   }
 
-  /// 卡片上的预测行：`92·高  11.90/9.73  盈亏比7.01`
-  /// 分两部分：评分一段、价与盈亏比一段，任一段缺失就不渲染。
-  String _mobileScoreLine(ScreenRow row) {
-    final sc = row.score!;
-    final f = row.forecast!;
-    final parts = <String>['${sc.score.toStringAsFixed(0)}·${sc.tier}'];
-    final stop = f.stop?.toStringAsFixed(2);
-    parts.add('${f.target!.toStringAsFixed(2)}/${stop ?? '—'}');
-    if (f.riskReward != null) parts.add('盈亏比${f.riskReward!.toStringAsFixed(2)}');
-    return parts.join('  ');
-  }
+  /// 卡片底部三格指标的样式：标签在上、数值在下。
+  /// 数值必须带词（「50%·低」「13.23 (-2.6%)」），裸数字用户读不懂。
+  Widget _cardStat(String label, String value, Color color) => Expanded(
+        child: Column(
+          crossAxisAlignment: CrossAxisAlignment.start,
+          children: [
+            Text(label, style: const TextStyle(fontSize: 9, color: AppColors.dim)),
+            const SizedBox(height: 1),
+            Text(value,
+                maxLines: 1,
+                overflow: TextOverflow.ellipsis,
+                style: TextStyle(
+                    fontSize: 12,
+                    fontWeight: FontWeight.w700,
+                    color: color,
+                    fontFeatures: const [FontFeature.tabularFigures()])),
+          ],
+        ),
+      );
+
+  String _signedPct(double v) =>
+      '${v >= 0 ? '+' : ''}${v.toStringAsFixed(1)}%';
 
   Color _tierColor(StockScore sc) {
     if (sc.lowConfidence) return AppColors.dim;
@@ -544,62 +563,84 @@ class _MobileScreeningState extends State<MobileScreening> {
           borderRadius: BorderRadius.circular(14),
           boxShadow: [BoxShadow(color: Colors.black.withValues(alpha: 0.05), blurRadius: 10, offset: const Offset(0, 3))],
         ),
-        child: Row(
+        child: Column(
+          crossAxisAlignment: CrossAxisAlignment.start,
+          mainAxisSize: MainAxisSize.min,
           children: [
-            Expanded(
-              child: Column(
-                crossAxisAlignment: CrossAxisAlignment.start,
-                children: [
-                  Text(row.name ?? '—', style: const TextStyle(fontSize: 15, fontWeight: FontWeight.w700)),
-                  const SizedBox(height: 2),
-                  Text(row.symbol, style: const TextStyle(fontSize: 11, color: AppColors.dim)),
-                  // 信号日 + 近 20 日涨跌：主规则选出来的都是超卖票，光看当日
-                  // 涨跌会让人误以为在追强势股。信号日还能看出数据新不新
-                  // （停牌几周的票会短于数据截止日）。
-                  Text(
-                    '${row.signalDate.isEmpty ? '' : '${row.signalDate.substring(5)} · '}'
-                    '20日 ${row.ret20 >= 0 ? '+' : '-'}${row.ret20.abs().toStringAsFixed(1)}%',
-                    style: TextStyle(
-                        fontSize: 10,
-                        fontWeight: FontWeight.w700,
-                        color: row.ret20 >= 0 ? AppColors.red : AppColors.down,
-                        fontFeatures: const [FontFeature.tabularFigures()]),
-                  ),
-                ],
-              ),
-            ),
-            Column(
-              crossAxisAlignment: CrossAxisAlignment.end,
+            Row(
               children: [
-                Text(row.close.toStringAsFixed(2),
-                    style: const TextStyle(fontSize: 16, fontWeight: FontWeight.w800, fontFeatures: [FontFeature.tabularFigures()])),
-                Text(
-                  '${row.changePct >= 0 ? '+' : '-'}${row.changePct.abs().toStringAsFixed(2)}%',
-                  style: TextStyle(
-                      fontSize: 11,
-                      fontWeight: FontWeight.w700,
-                      color: row.changePct >= 0 ? AppColors.red : AppColors.down,
-                      fontFeatures: const [FontFeature.tabularFigures()]),
-                ),
-                // 评分 + 目标/止损 + 盈亏比。卡片没有表格宽裕，只放一行小字；
-                // 完整信息（样本数、命中规则、数据截止日）在详情页。
-                // 任一项缺失就整行不渲染——半行 "目标 — " 比没有更难看。
-                if (row.score?.score != null && row.forecast?.target != null)
-                  Padding(
-                    padding: const EdgeInsets.only(top: 4),
-                    child: Text(
-                      _mobileScoreLine(row),
-                      textAlign: TextAlign.right,
-                      style: TextStyle(
-                        fontSize: 10,
-                        fontWeight: FontWeight.w700,
-                        color: _tierColor(row.score!),
-                        fontFeatures: const [FontFeature.tabularFigures()],
+                Expanded(
+                  child: Column(
+                    crossAxisAlignment: CrossAxisAlignment.start,
+                    children: [
+                      Text(row.name ?? '—', style: const TextStyle(fontSize: 15, fontWeight: FontWeight.w700)),
+                      const SizedBox(height: 2),
+                      // 信号日放在代码旁边：说明该票为什么入选、数据新不新
+                      // （停牌几周的票会早于数据截止日）。
+                      Text(
+                        row.signalDate.isEmpty
+                            ? row.symbol
+                            : '${row.symbol} · 信号 ${row.signalDate.substring(5)}',
+                        style: const TextStyle(fontSize: 11, color: AppColors.dim),
                       ),
-                    ),
+                      // 近 20 日涨跌：主规则选出来的都是超卖票，光看当日涨跌
+                      // 会让人误以为在追强势股。
+                      Text(
+                        '近20日 ${row.ret20 >= 0 ? '+' : '-'}${row.ret20.abs().toStringAsFixed(1)}%',
+                        style: TextStyle(
+                            fontSize: 10,
+                            fontWeight: FontWeight.w700,
+                            color: row.ret20 >= 0 ? AppColors.red : AppColors.down,
+                            fontFeatures: const [FontFeature.tabularFigures()]),
+                      ),
+                    ],
                   ),
+                ),
+                Column(
+                  crossAxisAlignment: CrossAxisAlignment.end,
+                  children: [
+                    Text(row.close.toStringAsFixed(2),
+                        style: const TextStyle(fontSize: 16, fontWeight: FontWeight.w800, fontFeatures: [FontFeature.tabularFigures()])),
+                    Text(
+                      '${row.changePct >= 0 ? '+' : '-'}${row.changePct.abs().toStringAsFixed(2)}%',
+                      style: TextStyle(
+                          fontSize: 11,
+                          fontWeight: FontWeight.w700,
+                          color: row.changePct >= 0 ? AppColors.red : AppColors.down,
+                          fontFeatures: const [FontFeature.tabularFigures()]),
+                    ),
+                  ],
+                ),
               ],
             ),
+            // 三格带标签指标，替代旧的裸数字行「50·低 13.23/12.77 盈亏比-0.43」。
+            // 盈亏比不再单独展示：目标/止损的百分比已经表达了同样的信息。
+            // 任一数据缺失就整行不渲染——半行「目标 —」比没有更难看。
+            if (row.score?.score != null && row.forecast?.target != null)
+              Padding(
+                padding: const EdgeInsets.only(top: 8),
+                child: Row(
+                  children: [
+                    _cardStat(
+                      '10日胜率',
+                      '${row.score!.score.toStringAsFixed(0)}%·${row.score!.tier}',
+                      _tierColor(row.score!),
+                    ),
+                    _cardStat(
+                      '目标价',
+                      '${row.forecast!.target!.toStringAsFixed(2)} (${_signedPct(row.forecast!.targetPct!)})',
+                      (row.forecast!.targetPct ?? 0) >= 0 ? AppColors.red : AppColors.down,
+                    ),
+                    _cardStat(
+                      '止损价',
+                      row.forecast!.stop == null
+                          ? '—'
+                          : '${row.forecast!.stop!.toStringAsFixed(2)} (${_signedPct(row.forecast!.stopPct!)})',
+                      (row.forecast!.stopPct ?? 0) >= 0 ? AppColors.red : AppColors.down,
+                    ),
+                  ],
+                ),
+              ),
           ],
         ),
       ),

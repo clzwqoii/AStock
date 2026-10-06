@@ -60,6 +60,41 @@ double? auc(List<double> scores, List<int> labels) {
   return acc / (pos.length * neg.length);
 }
 
+/// 秩口径 AUC。与 [auc] **数值等价**（测试锁住），但 O(n log n)。
+///
+/// 为什么需要第二个实现：聚类 bootstrap 要把 AUC 算几百遍，而 [auc] 是
+/// O(n_pos × n_neg)——几十万样本乘一遍就是几十亿次比较。按天重抽必须用这个。
+///
+/// 同分取平均秩（与 [auc] 的同分记半个一致），只有一类标签时返回 null。
+double? aucByRank(List<double> scores, List<int> labels) {
+  if (scores.length != labels.length) {
+    throw ArgumentError('scores 与 labels 长度不一致');
+  }
+  final idx = List<int>.generate(scores.length, (i) => i)
+    ..sort((a, b) => scores[a].compareTo(scores[b]));
+  var rankSumPos = 0.0;
+  var nPos = 0;
+  var i = 0;
+  while (i < idx.length) {
+    var j = i;
+    while (j < idx.length && scores[idx[j]] == scores[idx[i]]) {
+      j++;
+    }
+    // 并列块的平均秩（1 起）
+    final avgRank = (i + j + 1) / 2;
+    for (var k = i; k < j; k++) {
+      if (labels[idx[k]] == 1) {
+        rankSumPos += avgRank;
+        nPos++;
+      }
+    }
+    i = j;
+  }
+  final nNeg = labels.length - nPos;
+  if (nPos == 0 || nNeg == 0) return null;
+  return (rankSumPos - nPos * (nPos + 1) / 2) / (nPos * nNeg);
+}
+
 /// 逻辑回归模型。
 ///
 /// [weights] / [bias] 是标准化后特征上的系数；[mean] / [std] 把原始特征

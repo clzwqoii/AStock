@@ -299,4 +299,116 @@ void main() {
       expect(d.blockedCorporateAction, 0);
     });
   });
+
+  group('停牌复牌护栏', () {
+    // 停牌洞必须用**全市场交易日历**判：节假日全市场一起休（不是停牌），
+    // 只有这只票缺才是停牌。所以测试池里要有一只"天天交易"的基准股来撑起日历
+    // ——生产上池子有 4776 只，日历天然是真的。
+    StockData marketFiller(String symbol) {
+      final bars = <Bar>[];
+      var d = DateTime(2024, 1, 2);
+      for (var i = 0; i < 41; i++) {
+        bars.add(Bar(
+          date: d,
+          open: 10,
+          high: 10.5,
+          low: 9.9,
+          close: 10.0,
+          volume: 100,
+        ));
+        d = _nextWorkday(d);
+      }
+      return StockData(symbol: symbol, bars: bars);
+    }
+
+    /// 第 30 根处挖一个 7 日历日洞（≈5 个交易日）来模拟停牌复牌。
+    StockData withSuspension() {
+      final bars = <Bar>[];
+      var d = DateTime(2024, 1, 2);
+      for (var i = 0; i < 41; i++) {
+        if (i == 30) d = d.add(const Duration(days: 7));
+        bars.add(Bar(
+          date: d,
+          open: 10,
+          high: 10.5,
+          low: 9.9,
+          close: i == 40 ? 10.5 : 10.0,
+          volume: i == 40 ? 300 : 100,
+        ));
+        d = _nextWorkday(d);
+      }
+      return StockData(symbol: 'SUSP', bars: bars);
+    }
+
+    StockData noSuspension() {
+      final bars = <Bar>[];
+      var d = DateTime(2024, 1, 2);
+      for (var i = 0; i < 41; i++) {
+        bars.add(Bar(
+          date: d,
+          open: 10,
+          high: 10.5,
+          low: 9.9,
+          close: i == 40 ? 10.5 : 10.0,
+          volume: i == 40 ? 300 : 100,
+        ));
+        d = _nextWorkday(d);
+      }
+      return StockData(symbol: 'CLEAN', bars: bars);
+    }
+
+    test('信号日近 20 根有 ≥2 交易日洞 → 不出信号', () {
+      final d = screenDiagnostics([marketFiller('M'), withSuspension()], [volume]);
+      // filler 永远不放量，不可能是命中；SUSP 被停牌护栏挡掉
+      expect(d.hits, isEmpty);
+      expect(d.blockedSuspension, 1);
+    });
+
+    test('关掉护栏后恢复（复现旧口径）', () {
+      final d = screenDiagnostics([marketFiller('M'), withSuspension()], [volume],
+          suspensionLookbackBars: 0);
+      expect(d.hits.map((h) => h.stock.symbol), ['SUSP']);
+      expect(d.blockedSuspension, 0);
+    });
+
+    test('没有洞的序列不受影响', () {
+      final d = screenDiagnostics([marketFiller('M'), noSuspension()], [volume]);
+      expect(d.hits.map((h) => h.stock.symbol), ['CLEAN']);
+      expect(d.blockedSuspension, 0);
+    });
+
+    test('全市场一起休市（长假）不算停牌', () {
+      // 两只票都跳过那 7 天 → 那些日子在日历里不存在 → 不是洞
+      StockData allHoliday(String symbol) {
+        final bars = <Bar>[];
+        var d = DateTime(2024, 1, 2);
+        for (var i = 0; i < 41; i++) {
+          if (i == 30) d = d.add(const Duration(days: 7));
+          bars.add(Bar(
+            date: d,
+            open: 10,
+            high: 10.5,
+            low: 9.9,
+            close: i == 40 ? 10.5 : 10.0,
+            volume: i == 40 ? 300 : 100,
+          ));
+          d = _nextWorkday(d);
+        }
+        return StockData(symbol: symbol, bars: bars);
+      }
+
+      final d =
+          screenDiagnostics([allHoliday('A'), allHoliday('B')], [volume]);
+      expect(d.blockedSuspension, 0, reason: '全市场一起休市不是停牌');
+    });
+  });
+}
+
+/// 下一个工作日（周一~周五），用于造连续交易日序列。
+DateTime _nextWorkday(DateTime d) {
+  var n = d.add(const Duration(days: 1));
+  while (n.weekday > 5) {
+    n = n.add(const Duration(days: 1));
+  }
+  return n;
 }

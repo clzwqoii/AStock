@@ -41,6 +41,8 @@ class SyncService {
     DateTime Function()? now,
     this.calendarWindowDays = 1100,
     this.retryWait = const Duration(seconds: 65),
+    this.netRetries = 2,
+    this.netRetryWait = const Duration(seconds: 2),
     this.eastmoney,
     this.tencent,
     this.sina,
@@ -49,9 +51,12 @@ class SyncService {
   final TushareClient _client;
   final BarRepository _repo;
   final DateTime Function() _now;
+
+  /// 东财：名单/名称之外还是日线备源链第一顺位（fqt=0 不复权·手，见
+  /// [EastmoneyClient.dailyBars]）；为 null 时链路里没有东财这一环。
   final EastmoneyClient? eastmoney;
 
-  /// 日线逐股备源：新浪（不复权·手，与 tushare 主源同口径）。
+  /// 日线逐股备源第二顺位：新浪（不复权·手；无成交额，只有最近 400 根）。
   /// 腾讯仅用于股票名称查询——它的日K只有前复权（与主源混用会造成历史断层），网易接口已 502，均不进日线链路。
   final TencentClient? tencent;
   final SinaClient? sina;
@@ -64,6 +69,11 @@ class SyncService {
   /// 触发 40203 限频后的等待时长。tushare 按分钟计频，65 秒确保进入下一窗口。
   final Duration retryWait;
 
+  /// 网络层抖动（超时/DNS/连接重置）的短重试次数与间隔。仅在有逐股备源时
+  /// 启用：备源（新浪）只有最近 400 根深度，一次抖动不该把整段区间甩过去。
+  final int netRetries;
+  final Duration netRetryWait;
+
   Future<T> _withRateRetry<T>(Future<T> Function() op,
       {String? label, int maxAttempts = 6}) async {
     for (var attempt = 0;; attempt++) {
@@ -73,6 +83,32 @@ class SyncService {
         if (e.code != 40203 || attempt >= maxAttempts - 1) rethrow;
         stderr.writeln('限频等待重试${label == null ? '' : ' ($label)'}: ${e.message}');
         await Future.delayed(retryWait);
+      }
+    }
+  }
+
+  /// 单日 daily 拉取，带恢复策略：40203 等 [retryWait] 穿过分钟窗口重试
+  /// （[tolerant] 时最多 3 次，否则 6 次）；网络层抖动短间隔重试最多
+  /// [netRetries] 次（仅 [tolerant] 即备源可用时）。都耗尽才抛给上层降级——
+  /// 备源慢且深度只有 400 根，能不进就不进。
+  Future<List<DailyRow>> _fetchDaily(String tradeDate,
+      {required bool tolerant}) async {
+    final maxRateAttempts = tolerant ? 3 : 6;
+    var rateAttempts = 0;
+    var netAttempts = 0;
+    for (;;) {
+      try {
+        return await _client.daily(tradeDate: tradeDate);
+      } on TushareException catch (e) {
+        rateAttempts++;
+        if (e.code != 40203 || rateAttempts >= maxRateAttempts) rethrow;
+        stderr.writeln('限频等待重试 (daily $tradeDate): ${e.message}');
+        await Future.delayed(retryWait);
+      } on Exception catch (e) {
+        if (!tolerant || netAttempts >= netRetries) rethrow;
+        netAttempts++;
+        stderr.writeln('网络异常重试 (daily $tradeDate): $e');
+        if (netRetryWait > Duration.zero) await Future.delayed(netRetryWait);
       }
     }
   }
@@ -90,6 +126,7 @@ class SyncService {
   Future<SyncResult> sync({
     int backfillDays = 250,
     Duration rateDelay = const Duration(milliseconds: 350),
+    Duration backupRateDelay = const Duration(milliseconds: 350),
     String? fromDate,
     String? toDate,
     void Function(String msg)? onProgress,
@@ -113,6 +150,9 @@ class SyncService {
     // 交易日历：低积分限频严格（如 1 次/小时），失败时退化为工作日候选；
     // 节假日会拉到空数据、不入库，下次同步自动重试（自愈）。
     List<String> candidates;
+    // 日历是否来自降级的工作日候选：降级名单里混着节假日（永远拉不到行），
+    // 缺口重试必须跳过，否则每个节假日白烧一次 tushare 配额。
+    var calendarDegraded = false;
     // 网络层异常（DNS 失败/被墙/断网）与 tushare 错误码同样要降级：
     // 真机实测过 api.tushare.pro 解析失败时整个同步中断、一格数据都没进库。
     try {
@@ -123,6 +163,7 @@ class SyncService {
           maxAttempts: 1);
       candidates = [for (final c in cal) if (c.isOpen) c.date];
     } on Exception {
+      calendarDegraded = true;
       stderr.writeln('交易日历不可用，改用工作日候选（节假日会拉到空数据并自动跳过）');
       candidates = [];
       for (var d = today.subtract(Duration(days: calendarWindowDays));
@@ -170,23 +211,31 @@ class SyncService {
     }
 
     var rows = 0;
+    var lastCompleted = -1; // targets 中最后一个成功入库的下标；-1 = 一个都没成
     try {
-      for (final d in targets) {
-        // 有逐股备源时 tushare daily 一次失败立即切换，不做 65 秒重试等待。
-        final dayRows = await _withRateRetry(() => _client.daily(tradeDate: d),
-            label: 'daily $d', maxAttempts: _hasPerStockSources ? 1 : 6);
+      for (var i = 0; i < targets.length; i++) {
+        final d = targets[i];
+        final dayRows =
+            await _fetchDaily(d, tolerant: _hasPerStockSources);
         _repo.upsertBars(dayRows);
         rows += dayRows.length;
         onProgress?.call('$d ${dayRows.length} 行');
+        lastCompleted = i;
         if (rateDelay > Duration.zero) await Future.delayed(rateDelay);
       }
     } on Exception {
       // 错误码与网络层异常（DNS/超时/连接被拒）都走逐股备源；备源为空才把异常抛给上层提示。
-      final sources = _perStockSources();
+      final remaining = targets.sublist(lastCompleted + 1);
+      final sources = _perStockSources(remaining.first);
       if (sources.isEmpty) rethrow;
       stderr.writeln(
           'tushare 日线不可用，按优先级降级：${sources.map((s) => s.$1).join(' → ')}');
-      rows += await _fillPerStock(targets, sources, onProgress, rateDelay);
+      // 备源走独立限速：新浪没有 tushare 那种 50 次/分配额，逐股请求
+      // 继承回补的 1.2s 间隔会把全程拖到 3 小时以上。
+      rows += await _fillPerStock(remaining, sources, onProgress, backupRateDelay);
+      if (!calendarDegraded) {
+        rows += await _retryMissingDates(remaining, onProgress, rateDelay);
+      }
     }
     if (needNameBackfill) {
       stderr.writeln('名单源均不可用，改用逐股行情回填名称（一次性，约 10 分钟）');
@@ -196,12 +245,43 @@ class SyncService {
         dates: targets.length, rows: rows, latestDate: _repo.maxTradeDate());
   }
 
-  bool get _hasPerStockSources => sina != null;
+  bool get _hasPerStockSources => eastmoney != null || sina != null;
 
-  /// 日线逐股备源链（按优先级）。元素为 (源名, 按股票代码拉日K)。
-  List<(String, Future<List<DailyRow>> Function(String symbol))> _perStockSources() => [
-        if (sina != null) ('新浪', (sym) => sina!.dailyBars(sym)),
-      ];
+  /// 备源补数后仍有缺口的日期，回头用 tushare 逐日重试：新浪日K只有最近
+  /// 400 根，长区间的早段它天然补不到。仅交易日历来自真实 trade_cal 时
+  /// 才进来（降级候选混着节假日，那些日期永远没有行，重试纯烧配额）。
+  /// 逐日查库跳过已补上的，幂等；tushare 仍不可用就放弃本轮剩余重试。
+  Future<int> _retryMissingDates(
+    List<String> dates,
+    void Function(String msg)? onProgress,
+    Duration rateDelay,
+  ) async {
+    var rows = 0;
+    for (final d in dates) {
+      if (_repo.rowCountOnDate(d) > 0) continue;
+      try {
+        final dayRows = await _fetchDaily(d, tolerant: true);
+        _repo.upsertBars(dayRows);
+        rows += dayRows.length;
+        onProgress?.call('补齐 $d ${dayRows.length} 行');
+      } on Exception catch (e) {
+        stderr.writeln('补齐 $d 失败，放弃本轮 tushare 缺口重试：$e');
+        break;
+      }
+      if (rateDelay > Duration.zero) await Future.delayed(rateDelay);
+    }
+    return rows;
+  }
+
+  /// 日线逐股备源链（按优先级）。东财在新浪之前：限速更宽松且无封 IP 前科、
+  /// 一次请求全历史（新浪只有最近 400 根）、有真实成交额（新浪恒 0）、支持北交所。
+  /// [minD]（区间下界，`YYYYMMDD`）只给东财用作请求起点，增量场景避免整段白拉。
+  List<(String, Future<List<DailyRow>> Function(String symbol))>
+      _perStockSources(String minD) => [
+            if (eastmoney != null)
+              ('东财', (sym) => eastmoney!.dailyBars(sym, beg: minD)),
+            if (sina != null) ('新浪', (sym) => sina!.dailyBars(sym)),
+          ];
 
   /// 逐股补数：遍历本地已有股票（空库时向东财要名单），
   /// 按优先级尝试各源——某源拉到数据即采用，无数据自动切下一源。单只失败跳过。
@@ -249,7 +329,9 @@ class SyncService {
           // 单只失败不影响整体（次日同步会按水位线自然补齐）。
         }
         done++;
-        if (done % 200 == 0) onProgress?.call('$label 备源 $done/${symbols.length}');
+        // 每 50 只报一次：200 只攒一条消息时，备源阶段会静默 5 分钟以上，
+        // 界面看起来像卡死。
+        if (done % 50 == 0) onProgress?.call('$label 备源 $done/${symbols.length}');
         if (rateDelay > Duration.zero) await Future.delayed(rateDelay);
       }
       flush(); // 收尾：最后不足一批的也要落库

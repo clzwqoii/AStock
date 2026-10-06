@@ -35,7 +35,7 @@ Future<void> _pump(WidgetTester tester, {Size size = const Size(1400, 900)}) asy
           picked: [_row()],
           dataDate: '20260930',
           blockedStale: 0,
-          blockedCorporateAction: 0,
+          blockedCorporateAction: 0, blockedSuspension: 0,
         ),
       ),
     ),
@@ -66,14 +66,19 @@ void main() {
     });
   });
 
-  testWidgets('宽布局：成交额列定宽，名称列吃剩余宽度', (tester) async {
+  testWidgets('宽布局：名称列定宽紧凑，评分/目标/止损/盈亏比紧跟名称', (tester) async {
     await _pump(tester);
 
     final nameHeader = tester.getRect(find.text('名称'));
     final nameValue = tester.getRect(find.text('名称很长很长的股票'));
     expect(nameHeader.left, closeTo(nameValue.left, 1)); // 表头与值左对齐
-    // 名称是唯一弹性列（左对齐，宽了不空洞）：单元格满宽（表头文本是收缩盒量不了列宽）
-    expect(tester.getRect(find.text('名称很长很长的股票')).width, greaterThan(120));
+    // 名称定宽（约 6 个汉字），不再弹性吃掉宽窗口的剩余宽度
+    expect(nameValue.width, lessThanOrEqualTo(80));
+    // 表头从左到右：名称 → 评分 → 目标 → 止损 → 盈亏比 → 收盘
+    final order = ['名称', '评分', '目标', '止损', '盈亏比', '收盘']
+        .map((t) => tester.getRect(find.text(t)).left)
+        .toList();
+    expect(order, equals(List<double>.from(order)..sort()), reason: '重点字段未紧跟名称列');
     // 成交额定宽 84：右对齐数字列被拉宽会留大片空白
     expect(tester.getRect(find.text('45678')).width, lessThanOrEqualTo(84));
   });
@@ -97,6 +102,7 @@ void main() {
             dataDate: '20260930',
             blockedStale: 2,
             blockedCorporateAction: 1,
+            blockedSuspension: 0,
           ),
         ),
       ),

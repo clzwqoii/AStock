@@ -46,20 +46,24 @@ Future<void> main(List<String> args) async {
             rules,
             maxLastBarLagDays: 0,
             corporateActionLookbackBars: 0,
+            suspensionLookbackBars: 0,
           )
         : screenDiagnostics(stocks, rules);
     final picked = [for (final h in screened.hits) h.stock];
     print('股票总数: ${stocks.length}（按规则 ${ids.join(' + ')} 筛选，已剔除 ST/退市/科创板）');
     if (raw) {
-      print('⚠ --raw：已关掉新鲜度与除权护栏，结果含停牌/退市化石票与除权日假信号');
+      print('⚠ --raw：已关掉新鲜度、除权与停牌护栏，结果含停牌/退市化石票、除权日假信号及停牌复牌失真信号');
     } else {
-      final blocked = screened.blockedStale + screened.blockedCorporateAction;
+      final blocked = screened.blockedStale +
+          screened.blockedCorporateAction +
+          screened.blockedSuspension;
       if (blocked == 0) {
         print('护栏：未挡掉任何本会入选的信号');
       } else {
         print('护栏：挡掉 $blocked 只本会入选的假信号'
-            '（停牌/退市化石票 ${screened.blockedStale} 只 + '
-            '除权/复牌日 ${screened.blockedCorporateAction} 只）');
+            '（停牌/退市化石票 ${screened.blockedStale} + '
+            '除权/复牌日 ${screened.blockedCorporateAction} + '
+            '停牌复牌污染 ${screened.blockedSuspension}）');
       }
     }
     print('入选 ${picked.length} 只:');

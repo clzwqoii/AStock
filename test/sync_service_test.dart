@@ -598,6 +598,416 @@ void main() {
     expect(repo.maxTradeDate(), '20260930');
   });
 
+  test('daily 40203 先等重试恢复 tushare，不直接降级新浪备源', () async {
+    // 预置本地代码：若（错误地）降级，新浪走离线 mock，不会碰真网络
+    repo.upsertBars([
+      DailyRow(
+        tsCode: '600000.SH',
+        tradeDate: '20250801',
+        open: 10, high: 10, low: 10, close: 10, vol: 1000, amount: 1,
+      ),
+    ]);
+    var dailyCalls = 0;
+    var sinaCalls = 0;
+    final tushare = TushareClient(
+      token: 'tok',
+      http: MockClient((req) async {
+        final api = (jsonDecode(req.body) as Map)['api_name'] as String;
+        if (api == 'daily') {
+          dailyCalls++;
+          if (dailyCalls == 1) {
+            return http.Response.bytes(
+              utf8.encode(jsonEncode({'code': 40203, 'msg': 'daily 频率超限'})),
+              200,
+            );
+          }
+          final td = ((jsonDecode(req.body) as Map)['params'] as Map)['trade_date'] as String;
+          return http.Response.bytes(
+            utf8.encode(jsonEncode({
+              'code': 0,
+              'data': {
+                'fields': ['ts_code', 'trade_date', 'open', 'high', 'low', 'close', 'vol', 'amount'],
+                'items': [
+                  ['S1.SH', td, 1.0, 1.0, 1.0, 1.0, 100.0, 10.0],
+                  ['S2.SZ', td, 1.0, 1.0, 1.0, 1.0, 100.0, 10.0],
+                ],
+              },
+            })),
+            200,
+          );
+        }
+        return http.Response.bytes(
+          utf8.encode(jsonEncode({
+            'code': 0,
+            'data': {'fields': ['cal_date', 'is_open'], 'items': [['20260106', '1']]},
+          })),
+          200,
+        );
+      }),
+    );
+    final sina = SinaClient(
+      http: MockClient((req) async {
+        sinaCalls++;
+        return http.Response.bytes(utf8.encode(jsonEncode([])), 200);
+      }),
+    );
+    final r = await SyncService(tushare, repo,
+            now: () => DateTime(2026, 1, 8, 18), retryWait: Duration.zero, sina: sina)
+        .sync(backfillDays: 1, rateDelay: Duration.zero);
+    expect(dailyCalls, 2, reason: '40203 应等待重试而不是一次失败就降级');
+    expect(sinaCalls, 0, reason: 'tushare 恢复后不应进新浪备源');
+    expect(r.rows, 2);
+  });
+
+  test('daily 网络抖动先短重试恢复，不直接降级新浪备源', () async {
+    repo.upsertBars([
+      DailyRow(
+        tsCode: '600000.SH',
+        tradeDate: '20250801',
+        open: 10, high: 10, low: 10, close: 10, vol: 1000, amount: 1,
+      ),
+    ]);
+    var dailyCalls = 0;
+    var sinaCalls = 0;
+    final tushare = TushareClient(
+      token: 'tok',
+      http: MockClient((req) async {
+        final api = (jsonDecode(req.body) as Map)['api_name'] as String;
+        if (api == 'daily') {
+          dailyCalls++;
+          if (dailyCalls == 1) throw const SocketException('Connection reset');
+          final td = ((jsonDecode(req.body) as Map)['params'] as Map)['trade_date'] as String;
+          return http.Response.bytes(
+            utf8.encode(jsonEncode({
+              'code': 0,
+              'data': {
+                'fields': ['ts_code', 'trade_date', 'open', 'high', 'low', 'close', 'vol', 'amount'],
+                'items': [
+                  ['S1.SH', td, 1.0, 1.0, 1.0, 1.0, 100.0, 10.0],
+                  ['S2.SZ', td, 1.0, 1.0, 1.0, 1.0, 100.0, 10.0],
+                ],
+              },
+            })),
+            200,
+          );
+        }
+        return http.Response.bytes(
+          utf8.encode(jsonEncode({
+            'code': 0,
+            'data': {'fields': ['cal_date', 'is_open'], 'items': [['20260106', '1']]},
+          })),
+          200,
+        );
+      }),
+    );
+    final sina = SinaClient(
+      http: MockClient((req) async {
+        sinaCalls++;
+        return http.Response.bytes(utf8.encode(jsonEncode([])), 200);
+      }),
+    );
+    final r = await SyncService(tushare, repo,
+            now: () => DateTime(2026, 1, 8, 18), retryWait: Duration.zero, sina: sina)
+        .sync(backfillDays: 1, rateDelay: Duration.zero);
+    expect(dailyCalls, 2, reason: '网络抖动应短重试恢复而不是一次失败就降级');
+    expect(sinaCalls, 0, reason: 'tushare 恢复后不应进新浪备源');
+    expect(r.rows, 2);
+  });
+
+  test('新浪备源用独立限速，不继承回补的 1200ms 级间隔', () async {
+    repo.upsertBars([
+      DailyRow(
+        tsCode: '600000.SH',
+        tradeDate: '20250801',
+        open: 10, high: 10, low: 10, close: 10, vol: 1000, amount: 1,
+      ),
+    ]);
+    final tushare = TushareClient(
+      token: 'tok',
+      http: MockClient((req) async {
+        final api = (jsonDecode(req.body) as Map)['api_name'] as String;
+        if (api == 'daily') {
+          return http.Response.bytes(
+            utf8.encode(jsonEncode({'code': 40203, 'msg': 'daily 频率超限'})),
+            200,
+          );
+        }
+        return http.Response.bytes(
+          utf8.encode(jsonEncode({
+            'code': 0,
+            'data': {'fields': ['cal_date', 'is_open'], 'items': [['20260106', '1']]},
+          })),
+          200,
+        );
+      }),
+    );
+    final sina = SinaClient(
+      http: MockClient((req) async => http.Response.bytes(
+            utf8.encode(jsonEncode([
+              {
+                'day': '2026-01-06',
+                'open': '10.0', 'high': '10.6', 'low': '10.0', 'close': '10.5',
+                'volume': '920000',
+              }
+            ])),
+            200,
+          )),
+    );
+    final sw = Stopwatch()..start();
+    await SyncService(tushare, repo,
+            now: () => DateTime(2026, 1, 8, 18), retryWait: Duration.zero, sina: sina)
+        .sync(backfillDays: 1, rateDelay: const Duration(seconds: 5));
+    sw.stop();
+    expect(sw.elapsed, lessThan(const Duration(seconds: 4)),
+        reason: '备源逐股补数不该继承 tushare 的限速间隔（新浪无 50 次/分限制）');
+  });
+
+  test('备源进度每 50 只刷新一次', () async {
+    // 预置 55 只本地股票：旧实现每 200 只才报一次进度，55 只一条都不报
+    repo.upsertBars([
+      for (var i = 0; i < 55; i++)
+        DailyRow(
+          tsCode: '${600000 + i}.SH',
+          tradeDate: '20250801',
+          open: 10, high: 10, low: 10, close: 10, vol: 1000, amount: 1,
+        ),
+    ]);
+    final tushare = TushareClient(
+      token: 'tok',
+      http: MockClient((req) async {
+        final api = (jsonDecode(req.body) as Map)['api_name'] as String;
+        if (api == 'daily') {
+          return http.Response.bytes(
+            utf8.encode(jsonEncode({'code': 40203, 'msg': 'daily 频率超限'})),
+            200,
+          );
+        }
+        return http.Response.bytes(
+          utf8.encode(jsonEncode({
+            'code': 0,
+            'data': {'fields': ['cal_date', 'is_open'], 'items': [['20260106', '1']]},
+          })),
+          200,
+        );
+      }),
+    );
+    final sina = SinaClient(
+      http: MockClient((req) async => http.Response.bytes(
+            utf8.encode(jsonEncode([
+              {
+                'day': '2026-01-06',
+                'open': '10.0', 'high': '10.6', 'low': '10.0', 'close': '10.5',
+                'volume': '920000',
+              }
+            ])),
+            200,
+          )),
+    );
+    final msgs = <String>[];
+    await SyncService(tushare, repo,
+            now: () => DateTime(2026, 1, 8, 18), retryWait: Duration.zero, sina: sina)
+        .sync(backfillDays: 1, rateDelay: Duration.zero,
+            backupRateDelay: Duration.zero, onProgress: msgs.add);
+    expect(msgs, contains('新浪 备源 50/55'));
+    expect(msgs.last, '新浪 备源完成：55 只，55 行');
+  });
+
+  test('新浪只补到近期 400 根：缺口日期回头用 tushare 补齐', () async {
+    // 区间 3 天：20260101、20260102、20260105。tushare 在 20260102 连续限频
+    // 逼降级；新浪（模拟 400 根深度）只返回 20260105——20260102 成为缺口，
+    // 应回头用 tushare 补上（第 4 次 daily 调用时恢复）。
+    repo.upsertBars([
+      DailyRow(
+        tsCode: '600000.SH',
+        tradeDate: '20250801',
+        open: 10, high: 10, low: 10, close: 10, vol: 1000, amount: 1,
+      ),
+    ]);
+    final attempts = <String, int>{};
+    var sinaCalls = 0;
+    final tushare = TushareClient(
+      token: 'tok',
+      http: MockClient((req) async {
+        final body = jsonDecode(req.body) as Map<String, dynamic>;
+        final api = body['api_name'] as String;
+        http.Response resp(List<String> fields, List<List<dynamic>> items) =>
+            http.Response.bytes(
+              utf8.encode(jsonEncode({
+                'code': 0,
+                'data': {'fields': fields, 'items': items},
+              })),
+              200,
+            );
+        if (api == 'trade_cal') {
+          return resp(['cal_date', 'is_open'], [
+            ['20260101', '1'],
+            ['20260102', '1'],
+            ['20260105', '1'],
+          ]);
+        }
+        if (api == 'stock_basic') return resp(['ts_code', 'name'], []);
+        final td = (body['params'] as Map)['trade_date'] as String;
+        attempts[td] = (attempts[td] ?? 0) + 1;
+        if (td == '20260102' && attempts[td]! <= 3) {
+          return http.Response.bytes(
+            utf8.encode(jsonEncode({'code': 40203, 'msg': 'daily 频率超限'})),
+            200,
+          );
+        }
+        return resp(
+          ['ts_code', 'trade_date', 'open', 'high', 'low', 'close', 'vol', 'amount'],
+          [
+            ['S1.SH', td, 1.0, 1.0, 1.0, 1.0, 100.0, 10.0],
+            ['S2.SZ', td, 1.0, 1.0, 1.0, 1.0, 100.0, 10.0],
+          ],
+        );
+      }),
+    );
+    final sina = SinaClient(
+      http: MockClient((req) async {
+        sinaCalls++;
+        return http.Response.bytes(
+          utf8.encode(jsonEncode([
+            {
+              'day': '2026-01-05',
+              'open': '10.0', 'high': '10.6', 'low': '10.0', 'close': '10.5',
+              'volume': '920000',
+            }
+          ])),
+          200,
+        );
+      }),
+    );
+    final r = await SyncService(tushare, repo,
+            now: () => DateTime(2026, 1, 6, 18), retryWait: Duration.zero, sina: sina)
+        .sync(fromDate: '20260101', toDate: '20260105', rateDelay: Duration.zero);
+    expect(sinaCalls, 3, reason: '确实走过新浪备源（本地 3 只代码逐股各一次）');
+    expect(repo.rowCountOnDate('20260102'), 2,
+        reason: '新浪补不到的缺口日期应回头用 tushare 补齐');
+    expect(repo.maxTradeDate(), '20260105');
+    expect(r.rows, 7, reason: '2（tushare 首日）+ 3（新浪逐股）+ 2（回头补齐）');
+  });
+
+  test('日线备源顺序：东财优先，拉到数据不再试新浪', () async {
+    repo.upsertBars([
+      DailyRow(
+        tsCode: '600000.SH',
+        tradeDate: '20250801',
+        open: 10, high: 10, low: 10, close: 10, vol: 1000, amount: 1,
+      ),
+    ]);
+    var sinaCalls = 0;
+    final tushare = TushareClient(
+      token: 'tok',
+      http: MockClient((req) async {
+        final api = (jsonDecode(req.body) as Map)['api_name'] as String;
+        if (api == 'daily') {
+          return http.Response.bytes(
+            utf8.encode(jsonEncode({'code': 40203, 'msg': 'daily 频率超限'})),
+            200,
+          );
+        }
+        return http.Response.bytes(
+          utf8.encode(jsonEncode({
+            'code': 0,
+            'data': {'fields': ['cal_date', 'is_open'], 'items': [['20260106', '1']]},
+          })),
+          200,
+        );
+      }),
+    );
+    final em = EastmoneyClient(
+      http: MockClient((req) async => http.Response.bytes(
+            utf8.encode(jsonEncode({
+              'data': {
+                'code': '600000',
+                // 开,收,高,低,量(手),额(元)
+                'klines': ['2026-01-06,10.0,10.5,10.6,10.0,9200,9700000.00'],
+              },
+            })),
+            200,
+          )),
+    );
+    final sina = SinaClient(
+      http: MockClient((req) async {
+        sinaCalls++;
+        return http.Response.bytes(utf8.encode(jsonEncode([])), 200);
+      }),
+    );
+    await SyncService(tushare, repo,
+            now: () => DateTime(2026, 1, 8, 18),
+            retryWait: Duration.zero,
+            eastmoney: em,
+            sina: sina)
+        .sync(backfillDays: 1, rateDelay: Duration.zero, backupRateDelay: Duration.zero);
+    expect(sinaCalls, 0, reason: '东财在链首且拉到了数据，不应再走新浪');
+    expect(repo.maxTradeDate(), '20260106');
+    final bar = repo.loadAllStocks().firstWhere((s) => s.symbol == '600000.SH').bars.last;
+    expect(bar.volume, 9200, reason: '东财量已是手');
+    expect(bar.close, 10.5);
+    expect(bar.amount, 9700, reason: '东财成交额元→千元，新浪恒 0——这是它排前面的原因之一');
+  });
+
+  test('东财备源无数据时自动落新浪', () async {
+    repo.upsertBars([
+      DailyRow(
+        tsCode: '600000.SH',
+        tradeDate: '20250801',
+        open: 10, high: 10, low: 10, close: 10, vol: 1000, amount: 1,
+      ),
+    ]);
+    var sinaCalls = 0;
+    final tushare = TushareClient(
+      token: 'tok',
+      http: MockClient((req) async {
+        final api = (jsonDecode(req.body) as Map)['api_name'] as String;
+        if (api == 'daily') {
+          return http.Response.bytes(
+            utf8.encode(jsonEncode({'code': 40203, 'msg': 'daily 频率超限'})),
+            200,
+          );
+        }
+        return http.Response.bytes(
+          utf8.encode(jsonEncode({
+            'code': 0,
+            'data': {'fields': ['cal_date', 'is_open'], 'items': [['20260106', '1']]},
+          })),
+          200,
+        );
+      }),
+    );
+    final em = EastmoneyClient(
+      http: MockClient((req) async => http.Response.bytes(
+            utf8.encode(jsonEncode({'data': null})),
+            200,
+          )),
+    );
+    final sina = SinaClient(
+      http: MockClient((req) async {
+        sinaCalls++;
+        return http.Response.bytes(
+          utf8.encode(jsonEncode([
+            {
+              'day': '2026-01-06',
+              'open': '10.0', 'high': '10.6', 'low': '10.0', 'close': '10.5',
+              'volume': '920000',
+            }
+          ])),
+          200,
+        );
+      }),
+    );
+    final r = await SyncService(tushare, repo,
+            now: () => DateTime(2026, 1, 8, 18),
+            retryWait: Duration.zero,
+            eastmoney: em,
+            sina: sina)
+        .sync(backfillDays: 1, rateDelay: Duration.zero, backupRateDelay: Duration.zero);
+    expect(sinaCalls, greaterThan(0), reason: '东财无数据必须落到新浪');
+    expect(r.rows, greaterThan(0));
+    expect(repo.maxTradeDate(), '20260106');
+  });
+
   test('stock_basic 网络层失败 → 走东财名单；东财也挂则回填名称，不中断', () async {
     var emCalls = 0;
     final client = TushareClient(

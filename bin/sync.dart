@@ -16,6 +16,7 @@ import 'dart:io';
 
 import 'package:stock/config.dart';
 import 'package:stock/data/bar_repository.dart';
+import 'package:stock/data/eastmoney_client.dart';
 import 'package:stock/data/sina_client.dart';
 import 'package:stock/data/sync_service.dart';
 import 'package:stock/data/tushare_client.dart';
@@ -73,7 +74,7 @@ Future<void> main(List<String> args) async {
   final sw = Stopwatch()..start();
   try {
     final r = await SyncService(TushareClient(token: config.tushareToken), repo,
-            sina: SinaClient())
+            sina: SinaClient(), eastmoney: EastmoneyClient())
         .sync(backfillDays: backfillDays, fromDate: fromDate, toDate: toDate);
     print('数据库: $dbPath');
     print('上次同步至: ${syncedBefore ?? '（空库）'}（$barsBefore 行）');

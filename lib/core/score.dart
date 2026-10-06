@@ -184,9 +184,12 @@ StockScore scoreOf(
   // 方案 B：有模型且维度对得上就用它。
   //
   // 为什么值得替：方案 A 对「同一条规则」下的所有股票给出**同一个分**，
-  // 实测 holdout AUC 只有 0.512（≈随机）。方案 B 用 rsi14 等连续特征区分
-  // 规则内部的强弱，holdout AUC 0.530。两者的分数口径一致（0~100），
-  // 所以这里可以直接替换，UI 与 CSV 都不用改。
+  // 实测 holdout 上方案 A 的 AUC ≈0.51（≈随机），方案 B 用 rsi14 等连续特征
+  // 区分规则内部的强弱，也只到 0.54 左右。**具体数值不写死在注释里**——每次
+  // 重训都变，写在 `score-model.json` 的 holdoutAuc / planAAuc 里。
+  // 两者的分数口径一致（0~100），所以这里可以直接原地替换，UI 与 CSV 都不用改。
+  // 能不能替换由 tool/train_score.dart 的**按天聚类 bootstrap**判定，
+  // 不由 AUC 的绝对高低判定。
   if (model != null) {
     try {
       if (snapshot == null) {

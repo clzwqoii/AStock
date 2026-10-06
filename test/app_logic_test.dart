@@ -7,6 +7,7 @@ import 'package:http/testing.dart';
 import 'package:stock/app_logic.dart';
 import 'package:stock/core/rules.dart';
 import 'package:stock/data/bar_repository.dart';
+import 'package:stock/data/eastmoney_client.dart';
 import 'package:stock/data/sina_client.dart';
 import 'package:stock/data/tushare_client.dart';
 
@@ -232,6 +233,75 @@ void main() {
     expect(r.dates, 4);
     expect(dailySeen, contains('20260928'));
     expect([for (final d in dailySeen) if (d.compareTo('20260926') < 0) d], isEmpty);
+  });
+
+  test('runBackfillSync 透传东财备源：tushare daily 故障时用注入的东财补上区间', () async {
+    // 回补是最容易撞 40203 的入口（1.2s/日 × 三年 ≈ 700 次），降级链必须
+    // 在这条路径上同样可注入、且真的接上——否则测试只能打到真实网络，
+    // 生产里「回补不进备源」这类回归无处可测。
+    seedStocks(dbPath);
+    final tushare = TushareClient(
+      token: 'tok',
+      http: MockClient((req) async {
+        final api =
+            (jsonDecode(req.body) as Map<String, dynamic>)['api_name'] as String;
+        if (api == 'daily') {
+          return http.Response.bytes(
+            utf8.encode(jsonEncode({'code': 50000, 'msg': '接口异常'})),
+            200,
+          );
+        }
+        return http.Response.bytes(
+          utf8.encode(jsonEncode({
+            'code': 0,
+            'data': api == 'trade_cal'
+                ? {
+                    'fields': ['cal_date', 'is_open'],
+                    'items': [
+                      ['20261005', '1'],
+                    ],
+                  }
+                : {
+                    'fields': ['ts_code', 'name'],
+                    'items': [
+                      ['S1.SH', '测试一'],
+                      ['S2.SZ', '测试二'],
+                    ],
+                  },
+          })),
+          200,
+        );
+      }),
+    );
+    final eastmoney = EastmoneyClient(
+      http: MockClient((req) async => http.Response.bytes(
+          utf8.encode(jsonEncode({
+            'data': {
+              'klines': ['2026-10-05,10.0,10.5,10.6,10.0,920,920000.00'],
+            },
+          })),
+          200)),
+    );
+    final sina = SinaClient(
+      http: MockClient((req) async =>
+          http.Response.bytes(utf8.encode(jsonEncode({'day': []})), 200)),
+    );
+
+    final r = await runBackfillSync(
+      dbPath: dbPath,
+      token: 'tok',
+      fromDate: '20261005',
+      now: () => DateTime(2026, 10, 5, 18),
+      clientFactory: (_) => tushare,
+      eastmoneyFactory: () => eastmoney,
+      sinaFactory: () => sina,
+      rateDelay: Duration.zero,
+    );
+
+    expect(r.rows, 2, reason: '两只股票的 20261005 都该由东财备源补上');
+    final repo = BarRepository(dbPath);
+    expect(repo.rowCountOnDate('20261005'), 2);
+    repo.close();
   });
 }
 

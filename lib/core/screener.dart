@@ -45,6 +45,7 @@ List<StockData> screen(
   int minBars = IndicatorSnapshot.minBars,
   int maxLastBarLagDays = kMaxLastBarLagDays,
   int corporateActionLookbackBars = kCorporateActionLookbackBars,
+  int suspensionLookbackBars = kSuspensionLookbackBars,
 }) =>
     [
       for (final h in screenWithHits(
@@ -53,6 +54,7 @@ List<StockData> screen(
         minBars: minBars,
         maxLastBarLagDays: maxLastBarLagDays,
         corporateActionLookbackBars: corporateActionLookbackBars,
+        suspensionLookbackBars: suspensionLookbackBars,
       ))
         h.stock
     ];
@@ -70,6 +72,7 @@ List<ScreenHit> screenWithHits(
   int minBars = IndicatorSnapshot.minBars,
   int maxLastBarLagDays = kMaxLastBarLagDays,
   int corporateActionLookbackBars = kCorporateActionLookbackBars,
+  int suspensionLookbackBars = kSuspensionLookbackBars,
 }) =>
     screenDiagnostics(
       stocks,
@@ -77,9 +80,10 @@ List<ScreenHit> screenWithHits(
       minBars: minBars,
       maxLastBarLagDays: maxLastBarLagDays,
       corporateActionLookbackBars: corporateActionLookbackBars,
+      suspensionLookbackBars: suspensionLookbackBars,
     ).hits;
 
-/// [screenWithHits] 的带统计版本：除命中外，还带回被两个护栏**挡掉的入选数**。
+/// [screenWithHits] 的带统计版本：除命中外，还带回三个护栏各**挡掉的入选数**。
 ///
 /// 为什么要这个数：护栏是**静默**起作用的，用户只会看到"入选变少了"，
 /// 不知道为什么。实测主规则 2026-09-30 关护栏能选出 4 只，其中 2 只是两年前
@@ -91,17 +95,25 @@ List<ScreenHit> screenWithHits(
 /// "过滤了好多"的错觉。
 ///
 /// 只有一个实现，[screenWithHits] 与 [screen] 都走这里，避免两条路径分叉。
-({List<ScreenHit> hits, int blockedStale, int blockedCorporateAction}) screenDiagnostics(
+({List<ScreenHit> hits,
+  int blockedStale,
+  int blockedCorporateAction,
+  int blockedSuspension}) screenDiagnostics(
   List<StockData> stocks,
   List<Rule> rules, {
   int minBars = IndicatorSnapshot.minBars,
   int maxLastBarLagDays = kMaxLastBarLagDays,
   int corporateActionLookbackBars = kCorporateActionLookbackBars,
+  int suspensionLookbackBars = kSuspensionLookbackBars,
 }) {
   if (rules.isEmpty) {
     throw ArgumentError('至少选择一条规则');
   }
   final poolLast = _poolLastDate(stocks);
+  // 停牌洞要用全市场交易日历判（节假日全市场一起休，只有停牌是个股缺），
+  // 日历从同一个池子统计，一次算清。
+  final calendar = tradingCalendar(stocks);
+  var blockedSuspension = 0;
   final hits = <ScreenHit>[];
   var blockedStale = 0, blockedCorporateAction = 0;
   for (final stock in stocks) {
@@ -126,6 +138,16 @@ List<ScreenHit> screenWithHits(
       if (_matchesAll(stock, rules)) blockedCorporateAction++;
       continue;
     }
+    // 护栏三：停牌复牌后的指标污染窗口（MA/RSI 跨着洞算）。
+    final gapDays = tradingDaysSincePrevBar(bars, calendar);
+    if (hasSuspensionGapNearby(
+      gapDays,
+      bars.length - 1,
+      lookbackBars: suspensionLookbackBars,
+    )) {
+      if (_matchesAll(stock, rules)) blockedSuspension++;
+      continue;
+    }
     final snap = IndicatorSnapshot.fromStock(stock);
     final matched = [for (final r in rules) if (r.test(snap)) r.id];
     if (matched.length == rules.length) hits.add(ScreenHit(stock, matched, snap));
@@ -133,7 +155,8 @@ List<ScreenHit> screenWithHits(
   return (
     hits: hits,
     blockedStale: blockedStale,
-    blockedCorporateAction: blockedCorporateAction
+    blockedCorporateAction: blockedCorporateAction,
+    blockedSuspension: blockedSuspension,
   );
 }
 

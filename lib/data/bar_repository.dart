@@ -88,6 +88,13 @@ class BarRepository {
     return r.first['n'] as int;
   }
 
+  /// 某交易日的日线行数（备源补数后判断哪些日期仍是缺口）。
+  int rowCountOnDate(String tradeDate) {
+    final r = _db.select(
+        'SELECT COUNT(*) AS n FROM daily_bars WHERE trade_date = ?', [tradeDate]);
+    return r.first['n'] as int;
+  }
+
   /// 股票代码 → 名称（低积分下 stocks 表可能为空，调用方需降级显示）。
   Map<String, String> stockNames() => {
         for (final r in _db.select('SELECT ts_code, name FROM stocks'))

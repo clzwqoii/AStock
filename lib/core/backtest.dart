@@ -61,6 +61,7 @@ class RuleProfile {
     required this.signalCount,
     required this.monthsWithSignals,
     required this.topMonthShare,
+    this.topMonth,
   });
 
   final int signalCount;
@@ -69,6 +70,13 @@ class RuleProfile {
   /// 最大单月信号数 / 总信号数，取值 (0, 1]。
   final double topMonthShare;
 
+  /// 占比最高的那个月，`yyyyMM`（如 [202402] = 2024 年 2 月）。
+  ///
+  /// 用于在 UI 上点名具体月份——只说"集中"没用，用户需要知道该避开
+  /// 哪一段行情。旧报告没有这个字段，读成 null（未知），此时退回到
+  /// 笼统的"集中单月"，**不猜月份**。
+  final int? topMonth;
+
   static const empty =
       RuleProfile(signalCount: 0, monthsWithSignals: 0, topMonthShare: 0);
 
@@ -76,6 +84,7 @@ class RuleProfile {
         'signalCount': signalCount,
         'monthsWithSignals': monthsWithSignals,
         'topMonthShare': topMonthShare,
+        if (topMonth != null) 'topMonth': topMonth,
       };
 
   factory RuleProfile.fromJson(Map<String, dynamic> json) {
@@ -85,6 +94,7 @@ class RuleProfile {
       monthsWithSignals: json['monthsWithSignals'] as int,
       // 旧报告没有这个字段：读成 0（= 未知），避免把 null 当"不集中"
       topMonthShare: (raw as num?)?.toDouble() ?? 0,
+      topMonth: (json['topMonth'] as num?)?.toInt(),
     );
   }
 }
@@ -340,20 +350,27 @@ BacktestResult backtestRule(
   Rule rule, {
   required int forwardDays,
   int corporateActionLookbackBars = kCorporateActionLookbackBars,
+  int suspensionLookbackBars = kSuspensionLookbackBars,
 }) {
   if (forwardDays <= 0) {
     throw ArgumentError('forwardDays 必须为正，实际 $forwardDays');
   }
+  final calendar = tradingCalendar(stocks);
   final outcomes = <SignalOutcome>[];
   for (final stock in stocks) {
     final bars = stock.bars;
     if (evaluableDays(bars.length, forwardDays) == 0) continue;
     final series = IndicatorSeries.from(bars);
     final sinceGap = barsSinceCorporateAction(stock.symbol, bars);
+    final gapDays = tradingDaysSincePrevBar(bars, calendar);
     final lastEval = bars.length - 1 - forwardDays;
     for (var t = IndicatorSnapshot.minBars; t <= lastEval; t++) {
       if (corporateActionLookbackBars > 0 &&
           sinceGap[t] < corporateActionLookbackBars) {
+        continue;
+      }
+      if (hasSuspensionGapNearby(gapDays, t,
+          lookbackBars: suspensionLookbackBars)) {
         continue;
       }
       if (!rule.test(series.at(t))) continue;
@@ -378,19 +395,26 @@ Baseline baseline(
   List<StockData> stocks, {
   required int forwardDays,
   int corporateActionLookbackBars = kCorporateActionLookbackBars,
+  int suspensionLookbackBars = kSuspensionLookbackBars,
 }) {
   if (forwardDays <= 0) {
     throw ArgumentError('forwardDays 必须为正，实际 $forwardDays');
   }
+  final calendar = tradingCalendar(stocks);
   final returns = <double>[];
   for (final stock in stocks) {
     final bars = stock.bars;
     if (evaluableDays(bars.length, forwardDays) == 0) continue;
     final sinceGap = barsSinceCorporateAction(stock.symbol, bars);
+    final gapDays = tradingDaysSincePrevBar(bars, calendar);
     final lastEval = bars.length - 1 - forwardDays;
     for (var t = IndicatorSnapshot.minBars; t <= lastEval; t++) {
       if (corporateActionLookbackBars > 0 &&
           sinceGap[t] < corporateActionLookbackBars) {
+        continue;
+      }
+      if (hasSuspensionGapNearby(gapDays, t,
+          lookbackBars: suspensionLookbackBars)) {
         continue;
       }
       returns.add((bars[t + forwardDays].close / bars[t].close - 1) * 100);
@@ -586,6 +610,7 @@ BacktestReport backtestAll(
   List<Rule> rules, {
   required List<int> horizons,
   int corporateActionLookbackBars = kCorporateActionLookbackBars,
+  int suspensionLookbackBars = kSuspensionLookbackBars,
 }) {
   if (horizons.isEmpty) throw ArgumentError('horizons 不能为空');
   final hs = [...horizons]..sort();
@@ -612,18 +637,25 @@ BacktestReport backtestAll(
   }
   final baseFlat = [for (final h in hs) baseTapes[h]!];
 
+  // 停牌洞要用全市场交易日历判（节假日全市场一起休，只有停牌是个股缺）。
+  final calendar = tradingCalendar(stocks);
   for (final stock in stocks) {
     final bars = stock.bars;
     // 可评估日统一取最大持有期的范围，保证三个持有期覆盖同一批交易日、彼此可比。
     if (bars.length < IndicatorSnapshot.minBars + maxH) continue;
     final series = IndicatorSeries.from(bars);
-    // 除权/复牌护栏：污染日整日跳过——基准与信号一并剔除，两侧始终覆盖
-    // 同一批可评估日（否则"信号从干净日里选、基准还含污染日"会失真）。
+    // 除权/复牌 + 停牌两个护栏：污染日整日跳过——基准与信号一并剔除，
+    // 两侧始终覆盖同一批可评估日（否则"信号从干净日里选、基准还含污染日"会失真）。
     final sinceGap = barsSinceCorporateAction(stock.symbol, bars);
+    final gapDays = tradingDaysSincePrevBar(bars, calendar);
     final lastEval = bars.length - 1 - maxH;
     for (var t = IndicatorSnapshot.minBars; t <= lastEval; t++) {
       if (corporateActionLookbackBars > 0 &&
           sinceGap[t] < corporateActionLookbackBars) {
+        continue;
+      }
+      if (hasSuspensionGapNearby(gapDays, t,
+          lookbackBars: suspensionLookbackBars)) {
         continue;
       }
       final from = bars[t].close;
@@ -771,13 +803,24 @@ class Tape {
       return const RuleProfile(signalCount: 0, monthsWithSignals: 0, topMonthShare: 0);
     }
     var top = 0;
-    for (final v in _byMonth.values) {
-      if (v > top) top = v;
+    int? topMonth;
+    for (final e in _byMonth.entries) {
+      if (e.value > top) {
+        top = e.value;
+        // monthKey 形如 '2024-02' → 202402。
+        final parts = e.key.split('-');
+        if (parts.length == 2) {
+          final y = int.tryParse(parts[0]);
+          final m = int.tryParse(parts[1]);
+          if (y != null && m != null) topMonth = y * 100 + m;
+        }
+      }
     }
     return RuleProfile(
       signalCount: _count,
       monthsWithSignals: _byMonth.length,
       topMonthShare: top / _count,
+      topMonth: topMonth,
     );
   }
 
@@ -953,17 +996,35 @@ List<MapEntry<String, List<String>>> ruleGroupsSortedByWinRate(
   return entries;
 }
 
-/// 规则是否「跨年稳健」：在**每一个有数据的年份**，10 日胜率都跑赢该年的无条件基准。
+/// 规则是否「跨年稳健」：在**每一个有数据的年份**，10 日**均收益**都跑赢该年的无条件基准。
 ///
 /// 全样本均值会把"只有某一年特别 high"的规则抬上来，所以拿它当筛选条件比按全样本
 /// 胜率排序更可靠。某一年没有可用数据（如 MA250 需要 250 根，早年算不出来）时跳过该年，
 /// 不视为不稳健——但也因此不能算"验证过"。
+///
+/// ## 为什么用均收益而不是胜率（2026-10-06 口径变更）
+///
+/// 实测证据（`tool/audit_rules.dart` + `~/.stock/stock-backtest-report.json`）：
+/// 基准均收益 2025 年 +1.72%（牛）、2026 年 −0.41%（熊）。在熊市里
+/// **胜率低于基准常常不代表失效**——它可能只是"赢小钱、输小钱"，期望仍为正。
+/// `rsi_oversold` 2026 年胜率 43.5% < 基准 44.3%（旧口径判它失效），
+/// 均收益却 +0.07% > 基准 −0.41%（按超额它仍然可用）。
+///
+/// 反向也成立：胜率碾压而均收益为负的规则同样要筛掉。所以判定改看均收益。
+///
+/// **这次变更顺带修了一个一直存在的 bug**：胜率口径下，真实报告里 20 条规则
+/// **0 条**通过「只看稳健规则」——那个开关打开就是空列表。超额口径下有 4 条
+/// （rsi_oversold_volume / rsi_oversold_volume_loose / rsi_oversold /
+/// ma60_breakout_pullback）。
+///
+/// 注：规则列表的**排序**仍用胜率（`ruleIdsSortedByWinRate`），那是纯排序选择，
+/// 不涉及"能不能用"的判断，两者不必一致。
 bool isRuleYearlyRobust(BacktestReport report, String ruleId, {int horizon = 10}) {
   for (final y in report.yearly.keys) {
     final st = report.yearly[y]?[ruleId]?[horizon];
     final base = report.yearlyBaseline[y]?[horizon];
     if (st == null || base == null || st.count == 0) continue;
-    if (st.winRate <= base.winRate) return false;
+    if (st.avgReturn <= base.avgReturn) return false;
   }
   return true;
 }
@@ -1001,6 +1062,150 @@ List<String> robustRuleIds(BacktestReport? report, List<Rule> rules) {
     for (final r in rules)
       if (isRuleYearlyRobust(report, r.id)) r.id
   ];
+}
+
+/// 某一年要至少这么多信号，"这一年的均收益"才算数。
+///
+/// 太少时一两个极端值就能把均值拉飞——实测 `ma60_breakout_now` 全样本只有
+/// 1 个信号、均收益 −3.15%，拿它代表"现在还能不能用"毫无意义。
+const kRuleStatLineMinSamples = 500;
+
+/// 规则名下的统计行数据（UI 只负责画，不做口径判断）。
+class RuleStatLine {
+  const RuleStatLine({
+    required this.year,
+    required this.avgReturn,
+    required this.baselineReturn,
+    required this.winRate,
+    required this.baselineWinRate,
+    required this.profitFactor,
+    required this.count,
+    required this.concentrated,
+    required this.topMonthShare,
+    required this.topMonth,
+    required this.smallSample,
+  });
+
+  /// 取数与展示用的**最近一年**（样本够的那年）。
+  final int year;
+
+  /// 该年均收益（%）。
+  final double avgReturn;
+
+  /// 同年同持有期的无条件基准均收益（%）。
+  final double baselineReturn;
+
+  final double winRate;
+  final double baselineWinRate;
+  final double profitFactor;
+  final int count;
+
+  /// 信号是否挤在单月（复用 [isRuleSignalConcentrated] 的判据）。
+  final bool concentrated;
+
+  final double topMonthShare;
+
+  /// 占比最高的那个月（`yyyyMM`）；null = 旧报告读不出。
+  final int? topMonth;
+
+  /// 样本数低于 [kRuleStatLineMinSamples]——数字仍显示，但明确标注不够硬。
+  final bool smallSample;
+
+  /// 相对同年基准的收益超额（百分点）。
+  double get excessPp => avgReturn - baselineReturn;
+
+  /// 画在规则名下面的一行。
+  ///
+  /// ## 为什么以超额开头，但胜率/PF/信号数一个都不少
+  ///
+  /// 口径是**超额收益**而不是胜率，这一点是被实测逼出来的：2026 年基准均收益
+  /// −0.41%，此时"胜率低于基准"常常只是赢小钱、输小钱，期望仍为正。
+  /// `rsi_oversold` 2026 年胜率 43.5% 低于基准 44.3%（旧口径判它失效），
+  /// 均收益却 +0.07% 高于基准 −0.41%——按超额它仍然可用。
+  ///
+  /// 但这**不等于**把胜率/PF/信号数删掉：它们各自回答不同的问题（赢的次数 /
+  /// 赚赔幅度 / 样本量），全都还有参考价值。三项都保留，超额与基准是**新增**的
+  /// 两段。第一版只显示超额、把这三项拿掉，是交付缺陷——口径变更应该是补充，
+  /// 不是替换。
+  /// 年份只写后两位（`25年` 不是 `2025年`）——这一行已经要放七段数字，
+  /// 手机上宽度有限，全写会把「信号集中单月」这类告警挤出视野。
+  String get yearLabel => '${year % 100}年';
+
+  /// 信号集中标记：**点名具体月份**（`24年2月`），而不是笼统的"集中单月"。
+  ///
+  /// 只说"集中"没用——用户需要知道该避开哪一段行情。实测
+  /// `rsi_oversold_volume` 有 65% 的信号来自 2024-02 那个月，看到月份
+  /// 才知道那不是常态。旧报告读不出月份时退回笼统说法，**不猜**。
+  String get concentratedLabel {
+    final m = topMonth;
+    if (m == null) return '集中单月';
+    return '${m ~/ 100 % 100}年${m % 100}月';
+  }
+
+  String get label {
+    final tail = [
+      if (concentrated) concentratedLabel,
+      if (smallSample) '样本少',
+    ].join(' · ');
+    return '$yearLabel ${_pct(avgReturn)} · 超额 ${_pp(excessPp)}'
+        ' · 胜率 ${(winRate * 100).toStringAsFixed(1)}%'
+        ' · PF ${profitFactor.toStringAsFixed(2)}'
+        ' · 基准 ${_pct(baselineReturn)}'
+        ' · 信号 $count${tail.isEmpty ? '' : ' · $tail'}';
+  }
+
+  static String _pct(double v) => '${v.toStringAsFixed(2)}%';
+
+  static String _pp(double v) => '${v >= 0 ? '+' : ''}${v.toStringAsFixed(2)}pp';
+}
+
+/// 取某规则该持有期的统计行数据；无年度数据或当年基准缺失时返回 null。
+///
+/// 取「最近一个样本够的年份」而不是「最新的一年」：新规则/新数据往往只有
+/// 几十个样本，直接用会把噪声当结论（[kRuleStatLineMinSamples]）。
+/// 当年基准缺失（如该年无任何可评估日）返回 null——宁可没有这行，
+/// 也不拿全样本基准冒充当年基准，那正是把牛市数字套到熊市上的错误。
+RuleStatLine? ruleStatLine(
+  BacktestReport report,
+  String ruleId,
+  int horizon,
+) {
+  // 两轮：先只要样本够的年份；一个都没有（刚上线的新规则）则退回
+  // 「最近有数据的一年」并标 smallSample。直接返回 null 会让整行消失，
+  // 用户看到的是"这条规则什么统计都没有"，比显示一个标注过的弱数字更糟。
+  for (final minSamples in [kRuleStatLineMinSamples, 1]) {
+    var bestYear = 0;
+    BacktestStats? bestStats, bestBase;
+    for (final y in report.yearly.keys) {
+      final st = report.yearly[y]?[ruleId]?[horizon];
+      final base = report.yearlyBaseline[y]?[horizon];
+      if (st == null || base == null) continue;
+      if (st.count < minSamples) continue;
+      if (base.count == 0) continue;
+      if (y > bestYear) {
+        bestYear = y;
+        bestStats = st;
+        bestBase = base;
+      }
+    }
+    if (bestStats == null || bestBase == null) continue;
+
+    final profile = report.profileOf(ruleId, horizon);
+    return RuleStatLine(
+      year: bestYear,
+      avgReturn: bestStats.avgReturn,
+      baselineReturn: bestBase.avgReturn,
+      winRate: bestStats.winRate,
+      baselineWinRate: bestBase.winRate,
+      profitFactor: bestStats.profitFactor,
+      count: bestStats.count,
+      concentrated: isRuleSignalConcentrated(report, ruleId, horizon: horizon),
+      topMonthShare: profile.topMonthShare,
+      topMonth: profile.topMonth,
+      smallSample: bestStats.count < kRuleStatLineMinSamples,
+    );
+  }
+  return null;
 }
 
 /// 回测报告的历史快照（月度跟踪用）。
