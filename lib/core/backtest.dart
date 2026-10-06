@@ -49,6 +49,11 @@ class BacktestStats {
     required this.bestReturn,
     required this.worstReturn,
     required this.profitFactor,
+    this.p10,
+    this.p25,
+    this.p75,
+    this.p90,
+    this.stdDev,
   });
 
   /// 全空统计（该年/该持有期无任何样本）。[BacktestStats.of] 对空列表也返回同一组值，
@@ -81,6 +86,11 @@ class BacktestStats {
       bestReturn: xs.reduce(math.max),
       worstReturn: xs.reduce(math.min),
       profitFactor: (gain == 0 || loss == 0) ? 0 : gain / loss,
+      p10: _percentile(xs, 0.10),
+      p25: _percentile(xs, 0.25),
+      p75: _percentile(xs, 0.75),
+      p90: _percentile(xs, 0.90),
+      stdDev: _stdDev(xs),
     );
   }
 
@@ -94,6 +104,18 @@ class BacktestStats {
   /// 盈亏比 = 盈利总额 / 亏损总额；任一侧为 0 时返回 0（未定义，不外推）。
   final double profitFactor;
 
+  /// 收益分布的 10/25/75/90 分位（%）。用于买卖预测价：
+  /// 止损取 p10、乐观目标取 p75、中性目标用 [avgReturn]。
+  /// **旧报告没有这些字段，读回为 null** —— UI 必须据此隐藏止损/目标列，
+  /// 而不是把 null 当 0 显示成"止损价 0 元"。
+  final double? p10;
+  final double? p25;
+  final double? p75;
+  final double? p90;
+
+  /// 收益样本标准差（%，样本方差 n-1）。空统计为 null。
+  final double? stdDev;
+
   Map<String, dynamic> toJson() => {
         'count': count,
         'winRate': winRate,
@@ -102,6 +124,11 @@ class BacktestStats {
         'bestReturn': bestReturn,
         'worstReturn': worstReturn,
         'profitFactor': profitFactor,
+        'p10': p10,
+        'p25': p25,
+        'p75': p75,
+        'p90': p90,
+        'stdDev': stdDev,
       };
 
   factory BacktestStats.fromJson(Map<String, dynamic> json) => BacktestStats(
@@ -112,7 +139,31 @@ class BacktestStats {
         bestReturn: (json['bestReturn'] as num).toDouble(),
         worstReturn: (json['worstReturn'] as num).toDouble(),
         profitFactor: (json['profitFactor'] as num).toDouble(),
+        // 分位数是后加的字段；旧报告缺失时读成 null（不抛），由 UI 降级隐藏。
+        p10: (json['p10'] as num?)?.toDouble(),
+        p25: (json['p25'] as num?)?.toDouble(),
+        p75: (json['p75'] as num?)?.toDouble(),
+        p90: (json['p90'] as num?)?.toDouble(),
+        stdDev: (json['stdDev'] as num?)?.toDouble(),
       );
+}
+
+/// 样本标准差（n-1）。单样本或空列表返回 0（离散度未定义）。
+double _stdDev(List<double> xs) =>
+    xs.isEmpty ? 0 : _stdDevOfSorted([...xs]..sort(), xs.reduce((a, b) => a + b));
+
+/// 样本标准差（n-1）。[sum] 为调用方已有的总和（[Tape] 累加了 sum，
+/// 不必为算方差再走一遍求均值）。单样本返回 0。
+double _stdDevOfSorted(List<double> sorted, double sum) {
+  final n = sorted.length;
+  if (n < 2) return 0;
+  final m = sum / n;
+  var acc = 0.0;
+  for (final x in sorted) {
+    final d = x - m;
+    acc += d * d;
+  }
+  return math.sqrt(acc / (n - 1));
 }
 
 /// 同一起点集合、同一时间窗内的无条件收益基准。
@@ -137,6 +188,14 @@ class Baseline {
   double get winRate => stats.winRate;
   double get avgReturn => stats.avgReturn;
   double get medianReturn => stats.medianReturn;
+  double get bestReturn => stats.bestReturn;
+  double get worstReturn => stats.worstReturn;
+  double get profitFactor => stats.profitFactor;
+  double? get p10 => stats.p10;
+  double? get p25 => stats.p25;
+  double? get p75 => stats.p75;
+  double? get p90 => stats.p90;
+  double? get stdDev => stats.stdDev;
 
   Map<String, dynamic> toJson() => {'forwardDays': forwardDays, ...stats.toJson()};
 
@@ -178,6 +237,11 @@ class BacktestResult {
   double get bestReturn => stats.bestReturn;
   double get worstReturn => stats.worstReturn;
   double get profitFactor => stats.profitFactor;
+  double? get p10 => stats.p10;
+  double? get p25 => stats.p25;
+  double? get p75 => stats.p75;
+  double? get p90 => stats.p90;
+  double? get stdDev => stats.stdDev;
 
   Map<String, dynamic> toJson() => {
         'ruleId': ruleId,
@@ -256,6 +320,26 @@ double _median(List<double> xs) {
   final s = [...xs]..sort();
   final mid = s.length ~/ 2;
   return s.length.isOdd ? s[mid] : (s[mid - 1] + s[mid]) / 2;
+}
+
+/// 分位数（[p] ∈ [0,1]，线性插值，与 numpy.percentile 默认口径一致）。
+///
+/// 用途：止损价取 p10、乐观目标取 p75。空列表返回 0 由调用方（[BacktestStats.of]）
+/// 在上层挡掉，这里只契约非空。
+double _percentile(List<double> xs, double p) {
+  if (xs.isEmpty) return 0;
+  return _percentileOfSorted([...xs]..sort(), p);
+}
+
+/// [ _percentile ] 的已排序版本：调用方手上已经有序列时不重复排序。
+double _percentileOfSorted(List<double> s, double p) {
+  final n = s.length;
+  if (n == 1) return s[0];
+  final pos = p * (n - 1);
+  final lo = pos.floor();
+  final hi = pos.ceil();
+  if (lo == hi) return s[lo];
+  return s[lo] + (s[hi] - s[lo]) * (pos - lo);
 }
 
 
@@ -555,6 +639,7 @@ class Tape {
 
   BacktestStats overall() {
     if (_count == 0) return BacktestStats.empty;
+    final sorted = _sortedUnion;
     return BacktestStats(
       count: _count,
       winRate: _wins / _count,
@@ -563,8 +648,40 @@ class Tape {
       bestReturn: _best!,
       worstReturn: _worst!,
       profitFactor: (_gain == 0 || _loss == 0) ? 0 : _gain / _loss,
+      p10: _percentileOfSorted(sorted, 0.10),
+      p25: _percentileOfSorted(sorted, 0.25),
+      p75: _percentileOfSorted(sorted, 0.75),
+      p90: _percentileOfSorted(sorted, 0.90),
+      stdDev: _stdDevOfSorted(sorted, _sum),
     );
   }
+
+  /// 全样本的有序收益序列。各年份桶在 [_sortedYears] 首次访问时已各自有序，
+  /// 这里做一次多路归并得到全局有序序列，分位数才能直接按位置取值。
+  /// 只在收尾统计时算一次并缓存（`Tape` 的其余路径不碰它）。
+  late final List<double> _sortedUnion = () {
+    if (_count == 0) return const <double>[];
+    final ys = _sortedYears;
+    if (ys.length == 1) return _byYear[ys.first]!;
+    final out = List<double>.filled(_count, 0);
+    final cursor = List<int>.filled(ys.length, 0);
+    for (var i = 0; i < _count; i++) {
+      var bestSeg = -1;
+      var bestVal = double.infinity;
+      for (var k = 0; k < ys.length; k++) {
+        final bucket = _byYear[ys[k]]!;
+        final c = cursor[k];
+        if (c >= bucket.length) continue;
+        if (bucket[c] < bestVal) {
+          bestVal = bucket[c];
+          bestSeg = k;
+        }
+      }
+      out[i] = bestVal;
+      cursor[bestSeg]++;
+    }
+    return out;
+  }();
 
   /// 有序列表的单遍统计：与旧 `_statsOfRange` 逐位一致（同一批值、同一求和顺序）。
   BacktestStats _statsOfSorted(List<double> sorted) {
@@ -593,6 +710,11 @@ class Tape {
       bestReturn: best,
       worstReturn: worst,
       profitFactor: (gain == 0 || loss == 0) ? 0 : gain / loss,
+      p10: _percentileOfSorted(sorted, 0.10),
+      p25: _percentileOfSorted(sorted, 0.25),
+      p75: _percentileOfSorted(sorted, 0.75),
+      p90: _percentileOfSorted(sorted, 0.90),
+      stdDev: _stdDevOfSorted(sorted, sum),
     );
   }
 

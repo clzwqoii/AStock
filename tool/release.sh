@@ -30,9 +30,12 @@ step "1/7 校验版本号"
 grep -q "^version: $VERSION+" pubspec.yaml || { echo "pubspec.yaml 版本号需为 $VERSION"; exit 1; }
 grep -q "kAppVersion = '$VERSION'" lib/app_logic.dart || { echo "lib/app_logic.dart 的 kAppVersion 需为 '$VERSION'"; exit 1; }
 grep -q "\"version\": \"$VERSION\"" update.json || { echo "update.json 版本号需为 $VERSION"; exit 1; }
-# 应用内下载需要安装包直链；Windows 包产出后同样补 windows 字段
+# 应用内下载需要安装包直链；Windows 包产出后同样补 windows 字段。
+# macOS 主直链是 **zip**（assets.macos）——应用内自替换走 updater.sh 解压替换，
+# dmg 仍要产出（给手动分发与首装），但只在 assets.macos_dmg 里留一条兜底。
 grep -q "download/v$VERSION/AStock-$VERSION-Android.apk" update.json || { echo "update.json 缺少 v$VERSION 的安卓包直链（assets 字段）"; exit 1; }
-grep -q "download/v$VERSION/AStock-$VERSION-macOS.dmg" update.json || { echo "update.json 缺少 v$VERSION 的 macOS 包直链（assets 字段）"; exit 1; }
+grep -q "download/v$VERSION/AStock-$VERSION-macOS.zip" update.json || { echo "update.json 缺少 v$VERSION 的 macOS zip 直链（assets.macos，自替换用）"; exit 1; }
+grep -q "download/v$VERSION/AStock-$VERSION-macOS.dmg" update.json || { echo "update.json 缺少 v$VERSION 的 macOS dmg 直链（assets.macos_dmg，手动分发用）"; exit 1; }
 echo "版本号一致: $VERSION"
 
 step "2/7 清理临时副本并构建 Android"
@@ -40,8 +43,15 @@ rm -rf build/dmg
 flutter build apk --release --build-name="$VERSION"
 cp build/app/outputs/flutter-apk/app-release.apk "/tmp/AStock-$VERSION-Android.apk"
 
-step "3/7 构建 macOS 并打 dmg"
+step "3/7 构建 macOS，打 zip（应用内自替换）与 dmg（手动分发）"
 flutter build macos --release
+
+# zip 供应用内自替换：updater.sh 用 `ditto -x -k` 解压，再用 `ditto` 就位。
+# 必须用 zip -y（保留符号链接）而非 ditto -c -k：后者在 macOS 临时目录下会报
+# "Cannot get the real path for source"。解压侧仍用 ditto——签名保真靠它。
+rm -f "/tmp/AStock-$VERSION-macOS.zip"
+(cd build/macos/Build/Products/Release && zip -qry -y "/tmp/AStock-$VERSION-macOS.zip" ASTock.app)
+
 mkdir -p build/dmg
 cp -R build/macos/Build/Products/Release/ASTock.app build/dmg/
 ln -sf /Applications build/dmg/Applications
@@ -51,7 +61,7 @@ cp "build/A股选股台.dmg" "/tmp/AStock-$VERSION-macOS.dmg"
 
 if [[ $DRY_RUN == 1 ]]; then
   step "dry-run 结束：未推送、未创建发行版"
-  echo "产物: build/app/outputs/flutter-apk/app-release.apk, build/A股选股台.dmg"
+  echo "产物: build/app/outputs/flutter-apk/app-release.apk, /tmp/AStock-$VERSION-macOS.zip, build/A股选股台.dmg"
   exit 0
 fi
 
@@ -70,7 +80,7 @@ sed -n "/^## $VERSION/,/^## /p" RELEASE_NOTES.md | sed '$d' > "$NOTES"
 [[ -s "$NOTES" ]] || printf 'A股规则选股 %s（四端通用）。详见仓库 README。\n' "$VERSION" > "$NOTES"
 gh release delete "$TAG" --repo "$GH_REPO" -y 2>/dev/null || true
 gh release create "$TAG" --repo "$GH_REPO" --title "$TAG · A股规则选股工具（四端）" \
-  --notes-file "$NOTES" "/tmp/AStock-$VERSION-macOS.dmg" "/tmp/AStock-$VERSION-Android.apk"
+  --notes-file "$NOTES" "/tmp/AStock-$VERSION-macOS.zip" "/tmp/AStock-$VERSION-macOS.dmg" "/tmp/AStock-$VERSION-Android.apk"
 rm -f "$NOTES"
 
 step "6/7 Gitee 发行版"
@@ -120,7 +130,7 @@ rel = post_json(f"{base}/releases?access_token={token}", {
 })
 rid = rel["id"]
 print(f"Gitee 发行版已创建 id={rid}: https://gitee.com/{owner_repo}/releases")
-for f in [f"/tmp/AStock-{version}-macOS.dmg", f"/tmp/AStock-{version}-Android.apk"]:
+for f in [f"/tmp/AStock-{version}-macOS.zip", f"/tmp/AStock-{version}-macOS.dmg", f"/tmp/AStock-{version}-Android.apk"]:
     post_file(f"{base}/releases/{rid}/attach_files", f, {"access_token": token, "name": pathlib.Path(f).name})
     print(f"已上传 {pathlib.Path(f).name}")
 PY

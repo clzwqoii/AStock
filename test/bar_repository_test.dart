@@ -141,6 +141,61 @@ void main() {
     });
   });
 
+  group('loadAllStocks 的 excludeSpecialStocks（剔除 ST / 退市 / 科创板）', () {
+    // 选股口径：ST、*ST、S*ST、PT*、退市整理、以及科创板（688/689）不进选股池。
+    // 名称含「退」的两类写法都在真实库里（退市XX 为主流，XX退 为退市整理期个股）。
+    void seedMixed() {
+      repo.upsertStocks(const [
+        (tsCode: '600000.SH', name: '浦发银行'), // 正常主板
+        (tsCode: '600001.SH', name: 'ST龙韵'),
+        (tsCode: '600002.SH', name: '*ST美谷'),
+        (tsCode: '600003.SH', name: 'S*ST前锋'),
+        (tsCode: '600004.SH', name: 'PT水仙'),
+        (tsCode: '600005.SH', name: '退市博天'),
+        (tsCode: '600006.SH', name: '广道退'),
+        (tsCode: '688001.SH', name: '华兴源创'),
+        (tsCode: '689009.SH', name: '九号公司-WD'), // CDR，与科创板同门槛
+      ]);
+      repo.upsertBars([
+        for (final ts in [
+          '600000.SH', '600001.SH', '600002.SH', '600003.SH', '600004.SH',
+          '600005.SH', '600006.SH', '688001.SH', '689009.SH',
+        ])
+          row(ts, '20260930'),
+      ]);
+    }
+
+    test('开启时剔除 ST/*ST/S*ST/PT*/退市与科创板，其余原样保留', () {
+      seedMixed();
+      expect(repo.loadAllStocks(excludeSpecialStocks: true).map((s) => s.symbol), ['600000.SH']);
+    });
+
+    test('关闭（默认）时一只都不剔除，回测口径不受影响', () {
+      seedMixed();
+      expect(repo.loadAllStocks(), hasLength(9));
+      expect(repo.loadAllStocks(excludeSpecialStocks: false), hasLength(9));
+    });
+
+    test('与 minBars 过滤同时生效', () {
+      seedMixed();
+      expect(repo.loadAllStocks(excludeSpecialStocks: true, minBars: 2), isEmpty);
+      expect(repo.loadAllStocks(minBars: 2).map((s) => s.symbol), hasLength(9));
+    });
+
+    test('名单缺失（stocks 表为空）时只按代码剔科创板，不误杀其它股票', () {
+      // 低积分下名单可能为空：名称类过滤无从谈起，但主板仍要能选。
+      repo.upsertBars([row('600000.SH', '20260930'), row('688001.SH', '20260930')]);
+      expect(repo.loadAllStocks(excludeSpecialStocks: true).map((s) => s.symbol), ['600000.SH']);
+    });
+
+    test('名称含 ST 的正常股票不被误杀（只在标记位上匹配，不做子串搜索）', () {
+      // 若实现误用 name LIKE '%ST%'，会把这类名字一并剔除。
+      repo.upsertStocks(const [(tsCode: '600007.SH', name: 'HOST服务')]);
+      repo.upsertBars([row('600007.SH', '20260930')]);
+      expect(repo.loadAllStocks(excludeSpecialStocks: true).map((s) => s.symbol), ['600007.SH']);
+    });
+  });
+
   group('loadAllStocks 的逐行游标实现', () {
     // 实现从 `_db.select`（一次性物化 ResultSet）换成 `prepare().selectCursor()`
     // 流式读：全市场实测峰值 RSS 1889MB → 648MB、5.82s → 4.68s，数据逐位一致。

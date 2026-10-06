@@ -3,6 +3,7 @@
 // 关键：backtestAll 统一用「最大持有期」的可评估范围，好让三个持有期覆盖同一批
 // 交易日、彼此可比；因此只在最大持有期上，它才与逐规则调 backtestRule 的数目相等。
 
+import 'dart:math' as math;
 import 'dart:io';
 
 import 'package:flutter_test/flutter_test.dart';
@@ -48,6 +49,52 @@ void main() {
         expect(viaAll.avgReturn, closeTo(viaOne.avgReturn, 1e-12));
         expect(viaAll.medianReturn, closeTo(viaOne.medianReturn, 1e-12));
         expect(viaAll.profitFactor, closeTo(viaOne.profitFactor, 1e-12));
+      }
+    });
+
+
+    test('分位数：Tape 快路径与从 outcomes 重算逐位一致', () {
+      // backtestAll 走 Tape 的手工统计，backtestRule 走 BacktestStats.of
+      // 参考路径。两条路必须给出同一组分位数——这条测试就是为抓住
+      // “手工构造 BacktestStats 漏了新字段”这类回归。
+      final stocks = [up, flat];
+      final report = backtestAll(stocks, rules, horizons: kDefaultHorizons);
+      final maxH = kDefaultHorizons.reduce((a, b) => a > b ? a : b);
+      for (final r in rules) {
+        final viaAll = report.result(r.id, maxH)!;
+        final viaOne = backtestRule(stocks, r, forwardDays: maxH);
+        final reason = '${r.id}@$maxH';
+        expect(viaAll.p10, isNotNull, reason: reason);
+        expect(viaAll.p10, closeTo(viaOne.p10!, 1e-9), reason: reason);
+        expect(viaAll.p25, closeTo(viaOne.p25!, 1e-9), reason: reason);
+        expect(viaAll.p75, closeTo(viaOne.p75!, 1e-9), reason: reason);
+        expect(viaAll.p90, closeTo(viaOne.p90!, 1e-9), reason: reason);
+        expect(viaAll.stdDev, closeTo(viaOne.stdDev!, 1e-9), reason: reason);
+      }
+    });
+
+    test('分位数：基准与分年统计同样非空且单调', () {
+      final stocks = [up, flat];
+      final report = backtestAll(stocks, rules, horizons: kDefaultHorizons);
+      for (final h in kDefaultHorizons) {
+        final b = report.baseline[h]!;
+        expect(b.p10, isNotNull, reason: 'baseline@$h');
+        expect(b.worstReturn, lessThanOrEqualTo(b.p10!), reason: 'baseline@$h');
+        expect(b.p10!, lessThanOrEqualTo(b.p25!), reason: 'baseline@$h');
+        expect(b.p25!, lessThanOrEqualTo(b.p75!), reason: 'baseline@$h');
+        expect(b.p75!, lessThanOrEqualTo(b.p90!), reason: 'baseline@$h');
+        expect(b.p90!, lessThanOrEqualTo(b.bestReturn), reason: 'baseline@$h');
+      }
+      for (final y in report.yearly.keys) {
+        for (final r in rules) {
+          for (final h in kDefaultHorizons) {
+            final s = report.yearly[y]![r.id]![h]!;
+            if (s.count == 0) continue;
+            expect(s.p10, isNotNull, reason: '${r.id}@$h/$y');
+            expect(s.p75, isNotNull, reason: '${r.id}@$h/$y');
+            expect(s.p10!, lessThanOrEqualTo(s.p75!), reason: '${r.id}@$h/$y');
+          }
+        }
       }
     });
 
@@ -563,6 +610,81 @@ void main() {
       final r = reportWith({'c': 0.9, 'd': 0.3, 'a': 0.6, 'b': 0.5, 'e': 0.5});
       ruleGroupsSortedByWinRate(groups, r);
       expect(groups.keys.toList(), ['趋势', '量能', '年线']);
+    });
+  });
+  
+  group('分位数与离散度（评分/买卖价的原料）', () {
+    test('p10/p25/p75/p90/stdDev 落在正确位置', () {
+      final s = BacktestStats.of(<double>[
+        -10, -5, -2, 0, 1, 2, 3, 4, 5, 8,
+        10, 15, 20, 25, 30, 35, 40, 45, 50, 100,
+      ]);
+      // 线性插值分位数（numpy.percentile 默认口径），期望值由 /tmp oracle 算出：
+      // p10=-2.3, p25=1.75, p75=31.25, p90=45.50000000000001
+      expect(s.p10, closeTo(-2.3, 1e-9));
+      expect(s.p25, closeTo(1.75, 1e-9));
+      expect(s.p75, closeTo(31.25, 1e-9));
+      expect(s.p90, closeTo(45.5, 1e-9));
+      // 样本标准差（n-1，Dart math 用样本方差）
+      final xs = <double>[-10, -5, -2, 0, 1, 2, 3, 4, 5, 8, 10, 15, 20, 25, 30, 35, 40, 45, 50, 100];
+      final m = xs.reduce((a, b) => a + b) / xs.length;
+      final v = xs.map((x) => (x - m) * (x - m)).reduce((a, b) => a + b) / (xs.length - 1);
+      expect(s.stdDev, closeTo(math.sqrt(v), 1e-9));
+    });
+
+    test('单样本时分位数都等于该样本本身，stdDev=0', () {
+      final s = BacktestStats.of(<double>[7.5]);
+      expect(s.p10, closeTo(7.5, 1e-9));
+      expect(s.p25, closeTo(7.5, 1e-9));
+      expect(s.p75, closeTo(7.5, 1e-9));
+      expect(s.p90, closeTo(7.5, 1e-9));
+      expect(s.stdDev, closeTo(0, 1e-12));
+    });
+
+    test('两样本时分位数落在两端之间（线性插值，不是取端点）', () {
+      final s = BacktestStats.of(<double>[-3, 9]);
+      expect(s.p10, closeTo(-1.8, 1e-9));
+      expect(s.p25, closeTo(0, 1e-9));
+      expect(s.p75, closeTo(6, 1e-9));
+      expect(s.p90, closeTo(7.8, 1e-9));
+    });
+
+    test('空统计的分位数字段有降级值而非抛异常', () {
+      final s = BacktestStats.empty;
+      expect(s.count, 0);
+      expect(s.p10, isNull);
+      expect(s.p90, isNull);
+      expect(s.stdDev, isNull);
+    });
+
+    test('旧报告 JSON 无分位数字段 → 读成 null 而不是抛异常', () {
+      // 2026-10-06 之前的报告没有分位数字段。加载必须降级，否则选股页直接崩。
+      final legacy = <String, dynamic>{
+        'count': 3,
+        'winRate': 0.5,
+        'avgReturn': 1.0,
+        'medianReturn': 1.0,
+        'bestReturn': 2.0,
+        'worstReturn': -1.0,
+        'profitFactor': 1.5,
+      };
+      final s = BacktestStats.fromJson(legacy);
+      expect(s.count, 3);
+      expect(s.avgReturn, closeTo(1.0, 1e-9));
+      expect(s.p10, isNull);
+      expect(s.p25, isNull);
+      expect(s.p75, isNull);
+      expect(s.p90, isNull);
+      expect(s.stdDev, isNull);
+    });
+
+    test('新报告 JSON 往返分位数一致', () {
+      final s = BacktestStats.of(<double>[-10, -5, 1, 4, 20]);
+      final back = BacktestStats.fromJson(s.toJson());
+      expect(back.p10, closeTo(s.p10!, 1e-12));
+      expect(back.p75, closeTo(s.p75!, 1e-12));
+      expect(back.p90, closeTo(s.p90!, 1e-12));
+      expect(back.stdDev, closeTo(s.stdDev!, 1e-12));
     });
   });
 }

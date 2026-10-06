@@ -5,6 +5,7 @@ import 'dart:convert';
 
 import 'package:flutter_test/flutter_test.dart';
 import 'package:stock/app_logic.dart';
+import 'package:stock/core/score.dart';
 
 ScreenRow row(
   String symbol, {
@@ -68,6 +69,78 @@ void main() {
     });
   });
 
+
+  group('按评分/盈亏比排序', () {
+    ScreenRow r(String s, double score) {
+      final f = score < 0
+          ? null
+          : PriceForecast(
+              entry: 10,
+              target: 12,
+              stop: 9,
+              optimistic: null,
+              riskReward: score > 100 ? null : score / 20,
+              lowConfidence: false,
+              reason: '',
+            );
+      return ScreenRow(
+        symbol: s,
+        name: s,
+        close: 10,
+        change: 0,
+        changePct: 0,
+        volumeRatio: 1,
+        amountWan: 1,
+        ma20: 9,
+        score: StockScore(
+          score: score < 0 ? 0 : score,
+          rawWinRate: 0.5,
+          baselineWinRate: 0.5,
+          sampleCount: 100,
+          hitRuleIds: const ['x'],
+          lowConfidence: false,
+          reason: '',
+        ),
+        forecast: f,
+      );
+    }
+
+    // 辅助：给 scoreOf 造一个带分位数的最小报告
+    test('评分降序', () {
+      final rows = [r('低', 40), r('高', 92), r('中', 75)];
+      expect(sortRows(rows, SortField.score).map((e) => e.symbol).toList(), ['高', '中', '低']);
+      expect(sortRows(rows, SortField.score, ascending: true).map((e) => e.symbol).toList(),
+          ['低', '中', '高']);
+    });
+
+    test('起伏序时空值（无盈亏比）恒沉底，不随升降序翻到顶部', () {
+      final rows = [r('无', -1), r('低', 40), r('高', 92)];
+      expect(sortRows(rows, SortField.riskReward).map((e) => e.symbol).toList(),
+          ['高', '低', '无']);
+      expect(sortRows(rows, SortField.riskReward, ascending: true).map((e) => e.symbol).toList(),
+          ['低', '高', '无'],
+          reason: '升序就是数值小的在前，但空值仍必须在底部——'
+              '一行“暂无数据”浮到第一名比不显示更糟');
+    });
+
+    test('无评分的行（score=null）在评分排序里沉底', () {
+      final bare = ScreenRow(
+        symbol: '裸',
+        name: '裸',
+        close: 10,
+        change: 0,
+        changePct: 0,
+        volumeRatio: 1,
+        amountWan: 1,
+        ma20: 9,
+      );
+      final rows = [bare, r('高', 92)];
+      expect(sortRows(rows, SortField.score).map((e) => e.symbol).toList(), ['高', '裸']);
+      expect(sortRows(rows, SortField.score, ascending: true).map((e) => e.symbol).toList(),
+          ['高', '裸']);
+    });
+  });
+
   group('rowsToCsv', () {
     test('说明行 + 表头 + 行内容，涨跌带正负号，列序与表头一致', () {
       final csv = rowsToCsv([
@@ -90,6 +163,30 @@ void main() {
 
     test('空结果只出说明行与表头', () {
       expect(rowsToCsv(const []).trim().split('\n').length, 2);
+    });
+
+
+    test('withScore: true 追加评分与预测价列，且默认关闭', () {
+      final r = row('600000.SH', close: 10, name: '浦发银行');
+      // 默认：列序与旧版逐字节一致（下游解析脚本不能错位）
+      final plain = rowsToCsv([r], dataDate: '20260930');
+      expect(plain.trim().split('\n')[1],
+          '代码,名称,收盘,涨跌,涨跌幅%,量比,成交额(万),MA20,数据截至,规则组合');
+
+      final withScore = rowsToCsv([r], dataDate: '20260930', withScore: true);
+      final ls = withScore.trim().split('\n');
+      expect(ls[1],
+          '代码,名称,收盘,涨跌,涨跌幅%,量比,成交额(万),MA20,数据截至,规则组合,'
+          '评分,档位,目标价,止损价,盈亏比,样本数');
+    });
+
+    test('withScore: true 时无评分/预测价写空串而不是 null 或 0', () {
+      final csv = rowsToCsv([row('A', close: 10)], withScore: true);
+      final cells = csv.trim().split('\n').last.split(',');
+      // 原 10 列 + 6 列新列 = 16
+      expect(cells.length, 16);
+      expect(cells[10], '', reason: '无报告时评分必须留空，不能写 0 分');
+      expect(cells[12], '', reason: '无目标价时留空');
     });
 
     test('name 为 null 显示空字段而不是 null', () {

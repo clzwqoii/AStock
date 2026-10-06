@@ -14,8 +14,11 @@ import '../update_download.dart'
         assetUrlFor,
         downloadUpdatePackage,
         installUpdatePackage,
+        selfUpdateRunnerFor,
+        supportsInAppSelfUpdate,
         DownloadPackageFn,
-        InstallPackageFn;
+        InstallPackageFn,
+        SelfUpdateRunner;
 import 'colors.dart';
 import 'onboarding.dart' show LaunchUrlFn, defaultLaunchUrl, kTushareRegisterUrl;
 import 'screening_page.dart' show LoadingDialog;
@@ -39,6 +42,7 @@ Future<void> showCheckUpdateDialog(
   CheckUpdateFn? checkFn,
   DownloadPackageFn? downloadFn,
   InstallPackageFn? installFn,
+  SelfUpdateRunner? selfUpdateFn,
   LaunchUrlFn? launchUrl,
 }) async {
   final navigator = Navigator.of(context, rootNavigator: true);
@@ -65,6 +69,7 @@ Future<void> showCheckUpdateDialog(
     return;
   }
   final next = info; // 非空局部：闭包里要用，闭包不继承可空局部变量的提升
+  final selfUpdating = supportsInAppSelfUpdate(); // macOS：替换+重启，无需手工
   await showDialog<void>(
     context: context,
     builder: (_) => AlertDialog(
@@ -81,8 +86,9 @@ Future<void> showCheckUpdateDialog(
               next,
               downloadFn: downloadFn,
               installFn: installFn,
+              selfUpdate: selfUpdateFn,
             ),
-            child: const Text('下载并安装'),
+            child: Text(selfUpdating ? '下载并自动安装' : '下载并安装'),
           )
         else
           FilledButton(
@@ -112,17 +118,23 @@ Future<void> _resultDialog(BuildContext context, String title, String body) {
 }
 
 /// 应用内下载（进度弹框）→ 按平台触发安装。
-/// 安卓最后一步由系统安装器确认；macOS/Windows 打开安装包后由系统接管。
+///
+/// - **macOS**：下载 zip → 交给原生 updater.sh 替换本 app → 自动重启。
+///   全程无手工操作，安装包由脚本在装成功后删除。
+/// - **安卓**：下载 apk → 拉起系统安装器，最后一步由系统确认。
+/// - **Windows 等**：下载后打开安装包，由用户自己点（暂不支持自替换）。
 Future<void> _downloadAndInstall(
   BuildContext context,
   UpdateInfo info, {
   DownloadPackageFn? downloadFn,
   InstallPackageFn? installFn,
+  SelfUpdateRunner? selfUpdate,
 }) async {
   final navigator = Navigator.of(context, rootNavigator: true);
   final messenger = ScaffoldMessenger.of(context);
   final url = assetUrlFor(info)!;
   final fileName = Uri.parse(url).pathSegments.last;
+  final runner = selfUpdate ?? selfUpdateRunnerFor();
   var received = 0;
   var lastPercent = -1;
   int? total;
@@ -170,17 +182,39 @@ Future<void> _downloadAndInstall(
       },
     );
     navigator.pop(); // 关进度框
+
+    // 自替换路径（macOS）：确认后交给原生脚本接管，App 随即退出并自动重启。
+    // 安装包由 updater.sh 在替换成功后删除——用户无需手动清理。
+    if (runner != null) {
+      if (!context.mounted) return;
+      final ok = await _confirmSelfUpdate(context, info.latestVersion);
+      if (ok != true) return;
+      try {
+        // 这一调用不返回：原生侧启完脚本就 exit(0)。
+        await runner(file.path);
+      } catch (e) {
+        if (!context.mounted) return;
+        await _resultDialog(context, '更新失败', '$e');
+      }
+      return;
+    }
+
     await (installFn ?? installUpdatePackage)(file.path);
     if (!context.mounted) return;
     if (Platform.isAndroid) {
-      // 系统安装器已盖在 App 上，用 SnackBar 即可，避免盖回弹框
-      messenger.showSnackBar(
-          const SnackBar(content: Text('已打开系统安装器，确认后即完成更新')));
+      // 系统安装器已盖在 App 上，用 SnackBar 即可，避免盖回弹框。
+      // 文案要说清两件事：①最后确认由系统提供（去不掉）；②装完系统会结束
+      // 本进程，下次打开会提示「已更新到新版本」（Android 11+ 不可能自动重启）。
+      messenger.showSnackBar(const SnackBar(
+        content: Text('已打开系统安装器，点「安装」完成更新；'
+            '安装后重新打开应用即可看到新版本'),
+        duration: Duration(seconds: 5),
+      ));
     } else {
       await _resultDialog(
         context,
         '下载完成',
-        '安装包已在系统打开：${file.path}\n按提示完成安装（macOS 挂载 dmg 后拖入「应用程序」）。',
+        '安装包已在系统打开：${file.path}\n按提示完成安装。',
       );
     }
   } catch (e) {
@@ -189,6 +223,34 @@ Future<void> _downloadAndInstall(
     await _resultDialog(context, '下载失败', '$e');
   }
 }
+
+/// 自替换前的最后确认。返回 true = 继续安装。
+///
+/// 明确告知三件事：会退出 App、会自动重启、安装包会自动删除。
+/// 自替换是不可撤销的动作（App 会被关掉），所以必须让用户知情。
+Future<bool?> _confirmSelfUpdate(BuildContext context, String version) =>
+    showDialog<bool>(
+      context: context,
+      builder: (_) => AlertDialog(
+        title: Text('安装 $version'),
+        content: const Text(
+          '即将自动替换并重启应用。\n\n'
+          '· 应用会先退出几秒\n'
+          '· 替换完成后自动重新打开\n'
+          '· 下载的安装包在安装成功后自动删除\n\n'
+          '若替换失败，会自动回滚到当前版本。',
+          style: TextStyle(fontSize: 13, height: 1.6),
+        ),
+        actions: [
+          TextButton(
+              onPressed: () => Navigator.pop(context, false), child: const Text('取消')),
+          FilledButton(
+            onPressed: () => Navigator.pop(context, true),
+            child: const Text('安装并重启'),
+          ),
+        ],
+      ),
+    );
 
 Future<void> _defaultWriteConfig(String path, String content) async {
   final file = File(path);
@@ -212,6 +274,7 @@ class SettingsPage extends StatelessWidget {
     this.checkUpdate,
     this.downloadPackage,
     this.installPackage,
+    this.selfUpdate,
   });
 
   final String initialToken;
@@ -235,6 +298,10 @@ class SettingsPage extends StatelessWidget {
   /// 更新包下载/安装端口；测试注入假实现，生产用 update_download 默认值。
   final DownloadPackageFn? downloadPackage;
   final InstallPackageFn? installPackage;
+
+  /// macOS 自替换端口（下载 zip 后交给原生 updater.sh）。
+  /// 不透传它，macOS 的自更新路径在测试里只能打到真的 MethodChannel。
+  final SelfUpdateRunner? selfUpdate;
 
   @override
   Widget build(BuildContext context) {
@@ -340,6 +407,7 @@ class SettingsPage extends StatelessWidget {
                 checkFn: checkUpdate,
                 downloadFn: downloadPackage,
                 installFn: installPackage,
+                selfUpdateFn: selfUpdate,
                 launchUrl: launchUrl,
               ),
               icon: const Icon(Icons.system_update_alt, size: 16),

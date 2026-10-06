@@ -7,6 +7,7 @@ import 'package:flutter/material.dart';
 import '../app_logic.dart';
 import '../core/backtest.dart';
 import '../core/rules.dart';
+import '../core/score.dart';
 import 'colors.dart';
 import 'onboarding.dart' show LaunchUrlFn;
 import 'stock_detail_page.dart';
@@ -477,6 +478,25 @@ class _MobileScreeningState extends State<MobileScreening> {
     ));
   }
 
+  /// 卡片上的预测行：`92·高  11.90/9.73  盈亏比7.01`
+  /// 分两部分：评分一段、价与盈亏比一段，任一段缺失就不渲染。
+  String _mobileScoreLine(ScreenRow row) {
+    final sc = row.score!;
+    final f = row.forecast!;
+    final parts = <String>['${sc.score.toStringAsFixed(0)}·${sc.tier}'];
+    final stop = f.stop?.toStringAsFixed(2);
+    parts.add('${f.target!.toStringAsFixed(2)}/${stop ?? '—'}');
+    if (f.riskReward != null) parts.add('盈亏比${f.riskReward!.toStringAsFixed(2)}');
+    return parts.join('  ');
+  }
+
+  Color _tierColor(StockScore sc) {
+    if (sc.lowConfidence) return AppColors.dim;
+    if (sc.tier == '高') return AppColors.red;
+    if (sc.tier == '中') return AppColors.text;
+    return AppColors.down;
+  }
+
   Widget _card(ScreenRow row) => GestureDetector(
         onTap: () => _openDetail(row),
         child: Container(
@@ -512,6 +532,23 @@ class _MobileScreeningState extends State<MobileScreening> {
                       color: row.changePct >= 0 ? AppColors.red : AppColors.down,
                       fontFeatures: const [FontFeature.tabularFigures()]),
                 ),
+                // 评分 + 目标/止损 + 盈亏比。卡片没有表格宽裕，只放一行小字；
+                // 完整信息（样本数、命中规则、数据截止日）在详情页。
+                // 任一项缺失就整行不渲染——半行 "目标 — " 比没有更难看。
+                if (row.score?.score != null && row.forecast?.target != null)
+                  Padding(
+                    padding: const EdgeInsets.only(top: 4),
+                    child: Text(
+                      _mobileScoreLine(row),
+                      textAlign: TextAlign.right,
+                      style: TextStyle(
+                        fontSize: 10,
+                        fontWeight: FontWeight.w700,
+                        color: _tierColor(row.score!),
+                        fontFeatures: const [FontFeature.tabularFigures()],
+                      ),
+                    ),
+                  ),
               ],
             ),
           ],

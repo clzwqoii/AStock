@@ -10,6 +10,7 @@ import '../app_logic.dart';
 import '../core/backtest.dart';
 import '../config.dart';
 import '../net_diag.dart';
+import '../update_notice.dart';
 import 'backtest_page.dart';
 import 'colors.dart';
 import 'mobile_home.dart';
@@ -28,6 +29,7 @@ class StockApp extends StatefulWidget {
     this.persistToken,
     this.launchUrl,
     this.showOnboarding = true,
+    this.updateNoticeCheck,
   });
 
   final AppConfig config;
@@ -53,6 +55,10 @@ class StockApp extends StatefulWidget {
 
   /// 是否在无 token 时弹出首次启动引导（测试可关）。
   final bool showOnboarding;
+
+  /// 启动时判断「上次启动后是否装过更新」；返回 true 则弹一次提示。
+  /// 测试注入假实现，生产用 [checkUpdateNotice]（读 build 号比对）。
+  final Future<bool> Function()? updateNoticeCheck;
 
   @override
   State<StockApp> createState() => _StockAppState();
@@ -95,9 +101,39 @@ class _StockAppState extends State<StockApp> {
       }
     });
     _startSync();
+    _maybeShowUpdateNotice();
     if (widget.showOnboarding && widget.config.tushareToken.isEmpty) {
       WidgetsBinding.instance.addPostFrameCallback((_) => _openOnboarding());
     }
+  }
+
+  /// 冷启动时若发现 build 号变了（说明中间装过更新），提示一次。
+  ///
+  /// 主要为安卓而做：Android 11+ 替换安装会由系统结束旧进程，收不到任何
+  /// 安装完成事件，「装完自动重启」在技术上不成立——只能等下次冷启动，
+  /// 靠 build 号比对来告诉用户「更新已生效」（见 lib/update_notice.dart）。
+  ///
+  /// 刻意排在引导页之前：首次启动 build 号无记录，不提示。
+  Future<void> _maybeShowUpdateNotice() async {
+    final check = widget.updateNoticeCheck ??
+        () => checkUpdateNotice(configPath: _configPath);
+    bool updated;
+    try {
+      updated = await check();
+    } catch (_) {
+      return; // 检测失败绝不挡启动
+    }
+    if (!updated || !mounted) return;
+    // 等首帧跑完再弹，否则会在 build 期间插对话框导致布局异常。
+    WidgetsBinding.instance.addPostFrameCallback((_) {
+      if (!mounted) return;
+      final ctx = _navigatorKey.currentContext;
+      if (ctx == null) return;
+      ScaffoldMessenger.of(ctx).showSnackBar(const SnackBar(
+        content: Text('已更新到新版本'),
+        duration: Duration(seconds: 4),
+      ));
+    });
   }
 
   /// 首次启动引导：保存 token 后写配置并立即开始同步。

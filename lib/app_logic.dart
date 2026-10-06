@@ -9,6 +9,7 @@ import 'package:http/http.dart' as h;
 import 'package:stock/core/backtest.dart';
 import 'package:stock/core/models.dart';
 import 'package:stock/core/rules.dart';
+import 'package:stock/core/score.dart';
 import 'package:stock/core/screener.dart';
 import 'package:stock/data/bar_repository.dart';
 import 'package:stock/data/report_store.dart';
@@ -17,7 +18,7 @@ import 'package:stock/data/sync_service.dart';
 import 'package:stock/data/tushare_client.dart';
 
 /// 当前应用版本（发布新包时同步修改，与 pubspec.version 保持一致）。
-const kAppVersion = '2.0.0';
+const kAppVersion = '2.1.0';
 
 /// 更新清单候选源（并发竞速，第一个响应的胜出）。
 /// 国内网络优先命中 Gitee；jsDelivr 镜像可加速 GitHub raw。建仓库后替换为你的地址。
@@ -130,6 +131,8 @@ class ScreenRow {
     required this.amountWan,
     required this.ma20,
     this.matchedRules = const [],
+    this.score,
+    this.forecast,
   });
 
   final String symbol;
@@ -143,23 +146,49 @@ class ScreenRow {
 
   /// 命中的规则名（可多条；组合选股时按勾选顺序展示）。CLI/旧调用方可能为空。
   final List<String> matchedRules;
+
+  /// 评分（0~100）。无回测报告时为 null——UI 必须显示"评分不可用"，
+  /// 不能把 null 当 0 分展示成"最差"。
+  final StockScore? score;
+
+  /// 买卖预测价；分位数据缺失时其内部字段为 null，由 UI 隐藏对应列。
+  final PriceForecast? forecast;
 }
 
 /// 结果表可排序列（与工作台表头一一对应；点表头切换升降序）。
-enum SortField { close, changePct, volumeRatio, amount, ma20 }
+enum SortField { close, changePct, volumeRatio, amount, ma20, score, riskReward }
 
 /// 按 [field] 排序（默认降序）；同值保持入参顺序（稳定排序，表头重复点击不抖动）。
 /// 返回新列表，不改 [rows]。
 List<ScreenRow> sortRows(List<ScreenRow> rows, SortField field, {bool ascending = false}) {
+  double? nullableValue(ScreenRow r) => switch (field) {
+        SortField.score => r.score?.score,
+        SortField.riskReward => r.forecast?.riskReward,
+        _ => null,
+      };
   double value(ScreenRow r) => switch (field) {
         SortField.close => r.close,
         SortField.changePct => r.changePct,
         SortField.volumeRatio => r.volumeRatio,
         SortField.amount => r.amountWan,
         SortField.ma20 => r.ma20,
+        SortField.score => r.score?.score ?? double.negativeInfinity,
+        SortField.riskReward => r.forecast?.riskReward ?? double.negativeInfinity,
       };
+  final nullable = field == SortField.score || field == SortField.riskReward;
   final decorated = [for (var i = 0; i < rows.length; i++) (v: rows[i], i: i)];
   decorated.sort((a, b) {
+    // 可空列的空值**恒沉底**，与升降序无关。
+    // 曾经用负无穷当哨兵，结果降序沉底、升序浮顶——一行"暂无数据"爬到
+    // 第一名比不显示更糟，所以这里显式判空。
+    if (nullable) {
+      final an = nullableValue(a.v);
+      final bn = nullableValue(b.v);
+      if (an == null || bn == null) {
+        if (an == null && bn == null) return a.i.compareTo(b.i);
+        return an == null ? 1 : -1;
+      }
+    }
     final c = value(a.v).compareTo(value(b.v));
     if (c != 0) return ascending ? c : -c;
     return a.i.compareTo(b.i);
@@ -175,14 +204,18 @@ String _csvCell(Object? v) {
 
 /// 选股结果 → CSV 文本（UTF-8 文本，导出时由 [exportRowsCsv] 加 BOM 以便 Excel 识别中文）。
 /// 第一行是说明行（含数据日期与规则组合），第二行起是表头与数据，列序与工作台表头一致。
-String rowsToCsv(List<ScreenRow> rows, {String? dataDate, String? combo}) {
+String rowsToCsv(List<ScreenRow> rows, {String? dataDate, String? combo, bool withScore = false}) {
+  // 列序：默认与旧版逐字节一致。新列只追加在最后，且要显式传 [withScore]
+  // 才有——CSV 是被外部脚本消费的格式，"突然多出六列"会让它们整行错位。
+  const scoreHeader = ',评分,档位,目标价,止损价,盈亏比,样本数';
   final buf = StringBuffer()
     ..writeln('# A股选股结果（不复权·手）'
         '${dataDate == null ? '' : '  数据截至 $dataDate'}'
         '${combo == null || combo.isEmpty ? '' : '  规则：$combo'}')
-    ..writeln('代码,名称,收盘,涨跌,涨跌幅%,量比,成交额(万),MA20,数据截至,规则组合');
+    ..writeln('代码,名称,收盘,涨跌,涨跌幅%,量比,成交额(万),MA20,数据截至,规则组合'
+        '${withScore ? scoreHeader : ''}');
   for (final r in rows) {
-    buf.writeln([
+    final cells = [
       _csvCell(r.symbol),
       _csvCell(r.name ?? ''),
       r.close.toStringAsFixed(2),
@@ -193,7 +226,21 @@ String rowsToCsv(List<ScreenRow> rows, {String? dataDate, String? combo}) {
       r.ma20.toStringAsFixed(2),
       _csvCell(dataDate ?? ''),
       _csvCell(combo ?? ''),
-    ].join(','));
+    ];
+    if (withScore) {
+      final sc = r.score;
+      final f = r.forecast;
+      cells.addAll([
+        // 无数据一律写空串：写 0 会被下游读成"0 分/最差"，比留空危险得多。
+        sc == null ? '' : sc.score.toStringAsFixed(1),
+        sc == null ? '' : sc.tier,
+        f?.target == null ? '' : f!.target!.toStringAsFixed(2),
+        f?.stop == null ? '' : f!.stop!.toStringAsFixed(2),
+        f?.riskReward == null ? '' : f!.riskReward!.toStringAsFixed(2),
+        sc == null ? '' : sc.sampleCount.toString(),
+      ]);
+    }
+    buf.writeln(cells.join(','));
   }
   return buf.toString();
 }
@@ -241,10 +288,12 @@ Future<({int total, List<ScreenRow> picked, String? dataDate})> runScreening(
         final stocks = repo.loadAllStocks();
         final names = repo.stockNames();
         final picked = <ScreenRow>[];
+        final report = loadBacktestReport(dbPath);
         for (final hit in screenWithHits(stocks, rules)) {
           final s = hit.stock;
           final snap = hit.snapshot; // 筛选时已构建，直接复用
           final prevClose = s.bars[s.bars.length - 2].close;
+          final ids = hit.matchedRuleIds;
           picked.add(ScreenRow(
             symbol: s.symbol,
             name: names[s.symbol],
@@ -254,7 +303,14 @@ Future<({int total, List<ScreenRow> picked, String? dataDate})> runScreening(
             volumeRatio: snap.volumeRatio,
             amountWan: s.last.amount / 10,
             ma20: snap.ma20,
-            matchedRules: [for (final id in hit.matchedRuleIds) ruleById(id).name],
+            matchedRules: [for (final id in ids) ruleById(id).name],
+            score: scoreOf(report, hitRuleIds: ids, horizon: kScoreHorizon),
+            forecast: priceForecast(
+              report,
+              close: snap.close,
+              hitRuleIds: ids,
+              horizon: kScoreHorizon,
+            ),
           ));
         }
         return (total: stocks.length, picked: picked, dataDate: repo.maxTradeDate());

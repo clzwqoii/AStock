@@ -4,6 +4,7 @@ import 'package:flutter/foundation.dart';
 import 'package:flutter/material.dart';
 import 'package:flutter_test/flutter_test.dart';
 import 'package:stock/app_logic.dart';
+import 'package:stock/core/score.dart';
 import 'package:stock/config.dart';
 import 'package:stock/core/backtest.dart';
 import 'package:stock/core/models.dart';
@@ -41,6 +42,49 @@ Future<void> scrollTo(WidgetTester tester, Finder finder) =>
     tester.scrollUntilVisible(finder, 60, scrollable: find.byType(Scrollable).first);
 
   group('StockApp 启动自动同步', () {
+    testWidgets('检测到上次更新过：启动即提示「已更新到新版本」', (tester) async {
+      await tester.pumpWidget(StockApp(
+        config: AppConfig(tushareToken: '', dbPath: dbPath),
+        showOnboarding: false,
+        runSyncFn: ({required dbPath, required token, onProgress}) async =>
+            const SyncResult(dates: 0, rows: 0),
+        updateNoticeCheck: () async => true,
+      ));
+      await tester.pump();
+      await tester.pumpAndSettle();
+
+      expect(find.textContaining('已更新到新版本'), findsOneWidget);
+    });
+
+    testWidgets('没有更新过（首次/普通启动）：不弹提示', (tester) async {
+      await tester.pumpWidget(StockApp(
+        config: AppConfig(tushareToken: '', dbPath: dbPath),
+        showOnboarding: false,
+        runSyncFn: ({required dbPath, required token, onProgress}) async =>
+            const SyncResult(dates: 0, rows: 0),
+        updateNoticeCheck: () async => false,
+      ));
+      await tester.pump();
+      await tester.pumpAndSettle();
+
+      expect(find.textContaining('已更新到新版本'), findsNothing);
+    });
+
+    testWidgets('更新检测抛异常：不影响启动（不崩溃、不提示）', (tester) async {
+      await tester.pumpWidget(StockApp(
+        config: AppConfig(tushareToken: '', dbPath: dbPath),
+        showOnboarding: false,
+        runSyncFn: ({required dbPath, required token, onProgress}) async =>
+            const SyncResult(dates: 0, rows: 0),
+        updateNoticeCheck: () async => throw StateError('读配置失败'),
+      ));
+      await tester.pump();
+      await tester.pumpAndSettle();
+
+      expect(tester.takeException(), isNull);
+      expect(find.textContaining('已更新到新版本'), findsNothing);
+    });
+
     testWidgets('有 token 时启动即自动同步一次，状态显示在选股页', (tester) async {
       var calls = 0;
       String? usedToken;
@@ -113,6 +157,85 @@ Future<void> scrollTo(WidgetTester tester, Finder finder) =>
     expect(find.textContaining('威孚高科'), findsOneWidget);
     expect(find.textContaining('入选'), findsOneWidget);
   });
+
+
+    testWidgets('结果表头含评分/目标/止损/盈亏比，点评分可按评分排序', (tester) async {
+      await pumpWith(tester, (dbPath, rules) async {
+        return (
+          total: 1,
+          picked: [
+            ScreenRow(
+              symbol: '600000.SH',
+              name: '浦发银行',
+              close: 10.0,
+              change: 0.2,
+              changePct: 2.0,
+              volumeRatio: 3.0,
+              amountWan: 120.0,
+              ma20: 9.8,
+              score: StockScore(
+                score: 90.4,
+                rawWinRate: 0.904,
+                baselineWinRate: 0.50,
+                sampleCount: 7496,
+                hitRuleIds: const ['rsi_oversold_volume'],
+                lowConfidence: false,
+                reason: '',
+              ),
+              forecast: PriceForecast(
+                entry: 10.0,
+                target: 11.9,
+                stop: 9.73,
+                optimistic: 13.0,
+                riskReward: 7.01,
+                lowConfidence: false,
+                reason: '',
+              ),
+            ),
+          ],
+          dataDate: '20260930',
+        );
+      });
+      await scrollTo(tester, find.text('量比>2'));
+      await tester.tap(find.text('量比>2'));
+      await tester.pump();
+      await tester.tap(find.text('开始选股'));
+      await tester.pumpAndSettle();
+
+      // 四个新表头
+      for (final h in const ['评分', '目标', '止损', '盈亏比']) {
+        expect(find.text(h), findsOneWidget, reason: '表头缺 $h');
+      }
+      // 评分按档位显示「90·高」，价位与盈亏比取两位小数
+      expect(find.text('90·高'), findsOneWidget);
+      expect(find.text('11.90'), findsOneWidget);
+      expect(find.text('9.73'), findsOneWidget);
+      expect(find.text('7.01'), findsOneWidget);
+
+      // 点评分表头切换排序，不应崩
+      await scrollTo(tester, find.text('评分'));
+      await tester.tap(find.text('评分'));
+      await tester.pumpAndSettle();
+      expect(find.text('评分'), findsOneWidget);
+      expect(tester.takeException(), isNull);
+    });
+
+    testWidgets('无回测数据时新列留空，不显示 0 分或 0.00 价位', (tester) async {
+      await pumpWith(tester, (dbPath, rules) async {
+        return (total: 1, picked: [fakeRow('600000.SH')], dataDate: '20260930');
+      });
+      await scrollTo(tester, find.text('量比>2'));
+      await tester.tap(find.text('量比>2'));
+      await tester.pump();
+      await tester.tap(find.text('开始选股'));
+      await tester.pumpAndSettle();
+      // fakeRow 不带 score/forecast：评分与四个价位列都必须为空。
+      // 写成 0 会被读成「0 分/目标价 0 元」，比留空危险得多。
+      for (final bad in const ['0·低', '0.00']) {
+        expect(find.text(bad), findsNothing, reason: '无数据时不该出现 $bad');
+      }
+      expect(find.text('—'), findsOneWidget, reason: '只剩名称缺失那一处占位符');
+    });
 
     testWidgets('多选两条规则=组合选股，副标题展示组合条件', (tester) async {
       List<Rule>? passedRules;
@@ -326,7 +449,7 @@ Future<void> scrollTo(WidgetTester tester, Finder finder) =>
       // 与宿主机解耦：强制按 macOS 取直链（foundation 不变量在测试体末检查，须在体内恢复）
       debugDefaultTargetPlatformOverride = TargetPlatform.macOS;
       try {
-        String? installedPath;
+        String? selfUpdatedPath;
         await tester.pumpWidget(MaterialApp(
           home: Scaffold(
             body: SettingsPage(
@@ -335,25 +458,37 @@ Future<void> scrollTo(WidgetTester tester, Finder finder) =>
               checkUpdate: () async => UpdateInfo(
                 latestVersion: '9.9.9',
                 downloadUrl: 'https://example.com/releases',
-                assets: const {'macos': 'https://example.com/AStock-9.9.9-macOS.dmg'},
+                // 桌面自替换走 zip，不是 dmg（契约见 self_update_flow_test.dart）：
+                // macOS 端下载 zip 后由原生逻辑替换应用包，dmg 只是给人手动装的。
+                assets: const {'macos': 'https://example.com/AStock-9.9.9-macOS.zip'},
               ),
               downloadPackage: (url, fileName, {onProgress, client, saveDir}) async {
                 onProgress?.call(50, 100);
                 onProgress?.call(100, 100);
                 return File('${tmp.path}/$fileName')..writeAsStringSync('pkg');
               },
-              installPackage: (path) async => installedPath = path,
+              // macOS 走原生自替换，不再走 installPackage（那条是 dmg 时代的路径）。
+              // 注入假 runner，否则测试会打到不存在的 MethodChannel。
+              selfUpdate: (zipPath) async => selfUpdatedPath = zipPath,
             ),
           ),
         ));
         await tester.pump();
         await tester.tap(find.text('检查更新'));
         await tester.pumpAndSettle();
-        await tester.tap(find.text('下载并安装'));
+        // macOS 走自替换，按钮文案与其它端区分（明确告知会自动装并重启）
+        expect(find.text('下载并自动安装'), findsOneWidget);
+        await tester.tap(find.text('下载并自动安装'));
+        await tester.pumpAndSettle();
+        // 自替换路径多一道确认（应用要退出几秒，不能默认就动手）
+        await tester.tap(find.text('安装并重启'));
         await tester.pumpAndSettle();
 
-        expect(installedPath, endsWith('AStock-9.9.9-macOS.dmg'));
-        expect(find.text('下载完成'), findsOneWidget);
+        expect(selfUpdatedPath, endsWith('AStock-9.9.9-macOS.zip'),
+            reason: 'macOS 自替换要的是 zip：dmg 挂载后要用户手动拖拽，'
+                'zip 才能被 updater.sh 直接解压替换');
+        // 自替换成功后 App 随即退出，这里断言不到"安装完成"弹框，
+        // 只确认脚本被调起且拿到的是 zip 路径。
       } finally {
         debugDefaultTargetPlatformOverride = null;
       }

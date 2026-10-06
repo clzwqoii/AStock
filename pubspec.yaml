@@ -16,7 +16,7 @@ publish_to: 'none' # Remove this line if you wish to publish to pub.dev
 # https://developer.apple.com/library/archive/documentation/General/Reference/InfoPlistKeyReference/Articles/CoreFoundationKeys.html
 # In Windows, build-name is used as the major, minor, and patch parts
 # of the product and file versions while build-number is used as the build suffix.
-version: 2.0.0+10
+version: 2.1.0+11
 
 environment:
   sdk: ^3.13.5
@@ -42,6 +42,7 @@ dependencies:
   open_filex: ^4.0.3
   path_provider: ^2.1.6
   url_launcher: ^6.3.3
+  package_info_plus: ^10.2.2
 
 dev_dependencies:
   flutter_test:
@@ -64,6 +65,12 @@ flutter:
   # included with your application, so that you can use the icons in
   # the material Icons class.
   uses-material-design: true
+
+  # 自更新脚本：Swift 侧从 flutter_assets 读出、拷到临时目录再执行。
+  # 走 asset 而不是改 Xcode Copy Files 阶段：不必手工编辑 project.pbxproj，
+  # 升级 Flutter 时也不会冲突。行为由 test/updater_script_test.dart 锁定。
+  assets:
+    - macos/Runner/updater.sh
 
   # To add assets to your application, add an assets section, like this:
   # assets:

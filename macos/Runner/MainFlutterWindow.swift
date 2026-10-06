@@ -3,6 +3,7 @@ import FlutterMacOS
 
 class MainFlutterWindow: NSWindow {
   private var menuChannel: FlutterMethodChannel?
+  private var selfUpdateHandler: SelfUpdateHandler?
 
   override func awakeFromNib() {
     let flutterViewController = FlutterViewController()
@@ -19,6 +20,12 @@ class MainFlutterWindow: NSWindow {
       binaryMessenger: flutterViewController.engine.binaryMessenger
     )
     buildMainMenu()
+
+    // 自更新：下载完成后由原生唤起 updater.sh 替换本 app 并重启
+    selfUpdateHandler = SelfUpdateHandler()
+    selfUpdateHandler?.register(with: flutterViewController.engine.binaryMessenger,
+                                viewController: flutterViewController)
+
     super.awakeFromNib()
   }
 

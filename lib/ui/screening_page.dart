@@ -589,6 +589,10 @@ class _ScreeningPageState extends State<ScreeningPage> {
                   _sortableHeader('量比', 56, SortField.volumeRatio),
                   _sortableHeader('成交额(万)', null, SortField.amount), // 弹性列吃剩余宽度
                   _sortableHeader('MA20', 64, SortField.ma20),
+                  _sortableHeader('评分', 52, SortField.score),
+                  _sortableHeader('目标', 60, null),
+                  _sortableHeader('止损', 60, null),
+                  _sortableHeader('盈亏比', 50, SortField.riskReward),
                 ]
               : [
                   _headerCell('代码', 104, left: true),
@@ -683,6 +687,12 @@ class _ScreeningPageState extends State<ScreeningPage> {
                 cell(_f2(row.volumeRatio), 56, plain),
                 cell(row.amountWan.toStringAsFixed(0), null, plain), // 弹性列吃剩余宽度
                 cell(_f2(row.ma20), 64, plain),
+                cell(_scoreCell(row), 52, _scoreStyle(row)),
+                cell(row.forecast?.target?.toStringAsFixed(2) ?? '', 60,
+                    plain.copyWith(color: AppColors.red)),
+                cell(row.forecast?.stop?.toStringAsFixed(2) ?? '', 60,
+                    plain.copyWith(color: AppColors.down)),
+                cell(row.forecast?.riskReward?.toStringAsFixed(2) ?? '', 50, plain),
               ]
             : [
                 cell(row.symbol, 104, plain.copyWith(fontWeight: FontWeight.w600), left: true),
@@ -696,6 +706,32 @@ class _ScreeningPageState extends State<ScreeningPage> {
   }
 
   String _f2(double v) => v.toStringAsFixed(2);
+
+  /// 评分单元格文案。用户选的是 A/B/C 分档，所以数字后面跟档位字。
+  ///
+  /// 无评分时返回**空串**而不是 '—'：表格里 '—' 是"名称缺失"的占位符，
+  /// 新列再返一回会让按文本查找的自动化测试与依赖语义的代码都分不清
+  /// 到底是哪个字段缺了。空单元格本身就是"无数据"的标准表示。
+  String _scoreCell(ScreenRow row) {
+    final sc = row.score;
+    if (sc == null) return '';
+    return '${sc.score.toStringAsFixed(0)}·${sc.tier}';
+  }
+
+  /// 按档位上色，让"高/中/低"在扫视时就能分辨。
+  TextStyle _scoreStyle(ScreenRow row) {
+    final sc = row.score;
+    final base = TextStyle(
+        fontSize: 12.5, fontFeatures: const [FontFeature.tabularFigures()]);
+    if (sc == null) return base.copyWith(color: AppColors.dim);
+    if (sc.lowConfidence) return base.copyWith(color: AppColors.dim);
+    final color = sc.tier == '高'
+        ? AppColors.red
+        : sc.tier == '中'
+            ? AppColors.text
+            : AppColors.down;
+    return base.copyWith(color: color, fontWeight: FontWeight.w700);
+  }
 
   String _signed(double v, {String suffix = ''}) =>
       '${v >= 0 ? '+' : '-'}${v.abs().toStringAsFixed(2)}$suffix';
