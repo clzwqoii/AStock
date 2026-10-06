@@ -139,14 +139,22 @@ List<ScreenHit> screenWithHits(
       continue;
     }
     // 护栏三：停牌复牌后的指标污染窗口（MA/RSI 跨着洞算）。
-    final gapDays = tradingDaysSincePrevBar(bars, calendar);
-    if (hasSuspensionGapNearby(
-      gapDays,
-      bars.length - 1,
-      lookbackBars: suspensionLookbackBars,
-    )) {
-      if (_matchesAll(stock, rules)) blockedSuspension++;
-      continue;
+    // 性能优化：仅当护栏开启时才算，且只算尾部窗口（省去历史白算）。
+    // 窗口起点走 [lookbackWindowStart]，与判定函数共用同一处定义。
+    if (suspensionLookbackBars > 0) {
+      final gapDays = tradingDaysSincePrevBar(
+        bars,
+        calendar,
+        startFrom: lookbackWindowStart(bars.length - 1, suspensionLookbackBars),
+      );
+      if (hasSuspensionGapNearby(
+        gapDays,
+        bars.length - 1,
+        lookbackBars: suspensionLookbackBars,
+      )) {
+        if (_matchesAll(stock, rules)) blockedSuspension++;
+        continue;
+      }
     }
     final snap = IndicatorSnapshot.fromStock(stock);
     final matched = [for (final r in rules) if (r.test(snap)) r.id];

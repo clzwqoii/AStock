@@ -31,11 +31,21 @@ const kSuspensionMaxGapTradingDays = 1;
 /// 会把每个长假都算成"停牌"，护栏会误杀全部股票。交易日历由 [tradingCalendar]
 /// 从同一批股票里统计出来。
 ///
+/// [startFrom] 之后（含）的下标才真正算；更早的下标保留 1（=「看不出洞」）。
+/// 这个参数只为**省掉历史白算**（[screener] 只看尾部那条停牌窗口）：
+/// 调用方不得读取 `startFrom` 之前的下标——那里恒为 1，会把停牌读成"没停牌"。
+/// 起点一律用 [lookbackWindowStart] 算，别自己减。
+///
 /// [calendar] 为空时全部记 1（看不出洞）——护栏退化为关闭而不是误杀。
-List<int> tradingDaysSincePrevBar(List<Bar> bars, Set<DateTime> calendar) {
+List<int> tradingDaysSincePrevBar(
+  List<Bar> bars,
+  Set<DateTime> calendar, {
+  int startFrom = 1,
+}) {
   final out = List<int>.filled(bars.length, 1);
   if (calendar.isEmpty || bars.length < 2) return out;
-  for (var i = 1; i < bars.length; i++) {
+  final start = math.max(1, startFrom);
+  for (var i = start; i < bars.length; i++) {
     var n = 0;
     var d = bars[i - 1].date;
     while (d.isBefore(bars[i].date)) {
@@ -67,6 +77,17 @@ Set<DateTime> tradingCalendar(List<StockData> stocks, {int minStocks = 0}) {
   return {for (final e in count.entries) if (e.value >= minStocks) e.key};
 }
 
+/// 「近 [lookbackBars] 根」污染窗口的起点：第 [t] 天（含）往前数，下限 1
+/// （首根没有前一日可比，不能判跳空/停牌）。
+///
+/// **窗口定义只有这一处**：[hasSuspensionGapNearby] 与 [isCleanSignalDay] 用它取
+/// 判定区间，[screener] 用它决定 [tradingDaysSincePrevBar] 从哪根开始算洞。
+/// 各写一遍公式，一旦漂移就是静默漏判——护栏挡不住污染日，却不报错。
+int lookbackWindowStart(int t, int lookbackBars) {
+  final from = t - lookbackBars + 1;
+  return from < 1 ? 1 : from;
+}
+
 /// 第 [t] 天近 [lookbackBars] 根内是否出现过停牌洞（相邻两根隔了超过
 /// [maxGapTradingDays] 个交易日）。
 ///
@@ -84,7 +105,7 @@ bool hasSuspensionGapNearby(
 }) {
   if (lookbackBars <= 0) return false;
   if (t < 1 || t >= gapDays.length) return false;
-  final from = t - lookbackBars + 1 < 1 ? 1 : t - lookbackBars + 1;
+  final from = lookbackWindowStart(t, lookbackBars);
   for (var i = from; i <= t; i++) {
     if (gapDays[i] > maxGapTradingDays) return true;
   }
@@ -147,7 +168,7 @@ bool isCleanSignalDay(
 }) {
   if (lookbackBars <= 0) return true;
   if (t < 1 || t >= bars.length) return true; // 无前一日可判，不静默丢信号
-  final from = t - lookbackBars + 1 < 1 ? 1 : t - lookbackBars + 1;
+  final from = lookbackWindowStart(t, lookbackBars);
   for (var i = from; i <= t; i++) {
     if (isCorporateActionGap(tsCode, bars[i - 1], bars[i])) return false;
   }

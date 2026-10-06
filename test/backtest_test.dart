@@ -240,6 +240,50 @@ void main() {
     });
   });
 
+  group('Tape（分年/全样本统计依赖桶有序）', () {
+    test('乱序插入后 statsOfYear 的中位数与分位数按已排序序列取值', () {
+      final t = Tape();
+      // 故意乱序插入：桶若不排序，中位数会取到插入序第 3 个 10.0 而不是 0.0
+      for (final v in [3.0, -1.0, 10.0, 0.0, -5.0]) {
+        t.add(v, 2024);
+      }
+      final s = t.statsOfYear(2024);
+      // oracle = 手算排序后序列 [-5, -1, 0, 3, 10]
+      expect(s.count, 5);
+      expect(s.medianReturn, 0);
+      expect(s.p10, closeTo(-3.4, 1e-9)); // pos=0.4 → -5 + (−1−(−5))×0.4
+      expect(s.p90, closeTo(7.2, 1e-9)); // pos=3.6 → 3 + (10−3)×0.6
+      expect(s.bestReturn, 10);
+      expect(s.worstReturn, -5);
+    });
+
+    test('全样本中位数按跨年归并取值，与整体排序一致', () {
+      final t = Tape();
+      for (final v in [5.0, -3.0, 7.0]) {
+        t.add(v, 2023);
+      }
+      for (final v in [4.0, -8.0, 1.0, 2.0]) {
+        t.add(v, 2024);
+      }
+      // oracle：7 个样本整体排序后 [-8, -3, 1, 2, 4, 5, 7] → 第 4 个 = 2
+      final s = t.overall();
+      expect(s.count, 7);
+      expect(s.medianReturn, 2);
+    });
+
+    test('统计之后再 add 直接断言失败（不得静默把已排序的桶写乱）', () {
+      final t1 = Tape();
+      t1.add(1.0, 2024);
+      t1.statsOfYear(2024); // 首次统计即排序并缓存
+      expect(() => t1.add(2.0, 2024), throwsA(isA<AssertionError>()));
+
+      final t2 = Tape();
+      t2.add(1.0, 2024);
+      t2.overall(); // 全样本统计也会触发 _ensureSorted
+      expect(() => t2.add(2.0, 2024), throwsA(isA<AssertionError>()));
+    });
+  });
+
   group('baseline 无条件基准', () {
     test('同一时间窗内逐日前瞻收益的分布', () {
       final b = baseline([stockOfCloses(_upCloses)], forwardDays: forward);

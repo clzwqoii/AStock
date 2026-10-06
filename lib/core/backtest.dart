@@ -136,27 +136,32 @@ class BacktestStats {
 
   factory BacktestStats.of(List<double> xs) {
     if (xs.isEmpty) return empty;
-    var gain = 0.0, loss = 0.0;
+    final n = xs.length;
+    var gain = 0.0, loss = 0.0, sum = 0.0;
+    var winCount = 0;
     for (final x in xs) {
+      sum += x;
       if (x > 0) {
         gain += x;
+        winCount++;
       } else if (x < 0) {
         loss += -x;
       }
     }
+    final sorted = [...xs]..sort();
     return BacktestStats(
-      count: xs.length,
-      winRate: xs.where((x) => x > 0).length / xs.length,
-      avgReturn: xs.reduce((a, b) => a + b) / xs.length,
-      medianReturn: _median(xs),
-      bestReturn: xs.reduce(math.max),
-      worstReturn: xs.reduce(math.min),
+      count: n,
+      winRate: winCount / n,
+      avgReturn: sum / n,
+      medianReturn: _medianOfSorted(sorted),
+      bestReturn: sorted.last,
+      worstReturn: sorted.first,
       profitFactor: (gain == 0 || loss == 0) ? 0 : gain / loss,
-      p10: _percentile(xs, 0.10),
-      p25: _percentile(xs, 0.25),
-      p75: _percentile(xs, 0.75),
-      p90: _percentile(xs, 0.90),
-      stdDev: _stdDev(xs),
+      p10: _percentileOfSorted(sorted, 0.10),
+      p25: _percentileOfSorted(sorted, 0.25),
+      p75: _percentileOfSorted(sorted, 0.75),
+      p90: _percentileOfSorted(sorted, 0.90),
+      stdDev: _stdDevOfSorted(sorted, sum),
     );
   }
 
@@ -214,9 +219,6 @@ class BacktestStats {
       );
 }
 
-/// 样本标准差（n-1）。单样本或空列表返回 0（离散度未定义）。
-double _stdDev(List<double> xs) =>
-    xs.isEmpty ? 0 : _stdDevOfSorted([...xs]..sort(), xs.reduce((a, b) => a + b));
 
 /// 样本标准差（n-1）。[sum] 为调用方已有的总和（[Tape] 累加了 sum，
 /// 不必为算方差再走一遍求均值）。单样本返回 0。
@@ -423,23 +425,18 @@ Baseline baseline(
   return Baseline(forwardDays: forwardDays, returns: returns);
 }
 
-double _median(List<double> xs) {
-  if (xs.isEmpty) return 0;
-  final s = [...xs]..sort();
+/// 中位数。**入参必须已排序**（调用方手上已有有序序列，避免重复排序）。
+double _medianOfSorted(List<double> s) {
+  if (s.isEmpty) return 0;
   final mid = s.length ~/ 2;
   return s.length.isOdd ? s[mid] : (s[mid - 1] + s[mid]) / 2;
 }
 
-/// 分位数（[p] ∈ [0,1]，线性插值，与 numpy.percentile 默认口径一致）。
-///
-/// 用途：止损价取 p10、乐观目标取 p75。空列表返回 0 由调用方（[BacktestStats.of]）
-/// 在上层挡掉，这里只契约非空。
-double _percentile(List<double> xs, double p) {
-  if (xs.isEmpty) return 0;
-  return _percentileOfSorted([...xs]..sort(), p);
-}
 
-/// [ _percentile ] 的已排序版本：调用方手上已经有序列时不重复排序。
+
+/// 分位数（[p] ∈ [0,1]，线性插值，与 numpy.percentile 默认口径一致）。
+/// **入参必须已排序**（调用方手上已有有序序列，不重复排序）；
+/// 用途：止损价取 p10、乐观目标取 p75。
 double _percentileOfSorted(List<double> s, double p) {
   final n = s.length;
   if (n == 1) return s[0];
@@ -660,17 +657,19 @@ BacktestReport backtestAll(
       }
       final from = bars[t].close;
       final year = bars[t].date.year;
-      final mk = '${bars[t].date.year}-${bars[t].date.month.toString().padLeft(2, '0')}';
       // 前瞻收益每个持有期只算一次：原来基准桶与信号桶各算一遍。
       final fwdByH = [for (final h in hs) (bars[t + h].close / from - 1) * 100];
       for (var i = 0; i < baseFlat.length; i++) {
-        baseFlat[i].add(fwdByH[i], year, monthKey: mk);
+        // 基准 tape 不需要 profile()，不记 monthKey（免去千万次 map 更新）。
+        baseFlat[i].add(fwdByH[i], year);
       }
       // 逐条规则判定：绝大多数规则在标量条件就返回 false，不碰 Tape。
       final snap = series.at(t);
+      String? mk;
       var k = 0;
       for (final r in rules) {
         if (r.test(snap)) {
+          mk ??= '${bars[t].date.year}-${bars[t].date.month.toString().padLeft(2, '0')}';
           for (var i = 0; i < hs.length; i++) {
             sigFlat[k + i].add(fwdByH[i], year, monthKey: mk);
           }
@@ -760,6 +759,7 @@ class Tape {
   double? _best, _worst;
 
   void add(double value, int year, {String? monthKey}) {
+    assert(_sortedYearsCache == null, 'Tape.add 不得在统计之后调用（桶已被就地排序）');
     (_byYear[year] ??= []).add(value);
     if (monthKey != null) _byMonth[monthKey] = (_byMonth[monthKey] ?? 0) + 1;
     // 顺序敏感的统计量按插入序累积，与旧实现的收尾单遍统计逐位一致。
@@ -780,19 +780,26 @@ class Tape {
   /// 出现过的年份（= 桶键，读取 O(年份数)，无需独立集合）。
   Iterable<int> get years => _byYear.keys;
 
-  /// 年份升序；首次访问时顺带把各年桶原地排序（收尾只发生一次）。
-  late final List<int> _sortedYears = () {
+  List<int>? _sortedYearsCache;
+
+  /// 年份升序；首次调用时把各年桶原地排序（收尾只发生一次）。
+  ///
+  /// 排序是**就地副作用**：调过本方法后不得再 [add]（只有收尾阶段调用，天然满足）。
+  /// 返回的年份列表给多路归并当段索引，逐日路径不要调用。
+  List<int> _ensureSorted() {
+    final cached = _sortedYearsCache;
+    if (cached != null) return cached;
     final ys = _byYear.keys.toList()..sort();
     for (final y in ys) {
       _byYear[y]!.sort();
     }
-    return ys;
-  }();
+    return _sortedYearsCache = ys;
+  }
 
   BacktestStats statsOfYear(int year) {
     final bucket = _byYear[year];
     if (bucket == null) return BacktestStats.empty;
-    bucket.sort(); // 已被 _sortedYears 排过时是 O(n) 已序扫描
+    _ensureSorted(); // 桶必须有序：_statsOfSorted 按位置取中位数与分位数
     return _statsOfSorted(bucket);
   }
 
@@ -843,12 +850,12 @@ class Tape {
     );
   }
 
-  /// 全样本的有序收益序列。各年份桶在 [_sortedYears] 首次访问时已各自有序，
+  /// 全样本的有序收益序列。各年份桶在 [_ensureSorted] 首次调用时已各自有序，
   /// 这里做一次多路归并得到全局有序序列，分位数才能直接按位置取值。
   /// 只在收尾统计时算一次并缓存（`Tape` 的其余路径不碰它）。
   late final List<double> _sortedUnion = () {
     if (_count == 0) return const <double>[];
-    final ys = _sortedYears;
+    final ys = _ensureSorted();
     if (ys.length == 1) return _byYear[ys.first]!;
     final out = List<double>.filled(_count, 0);
     final cursor = List<int>.filled(ys.length, 0);
@@ -912,7 +919,7 @@ class Tape {
   double _medianOfUnion() {
     if (_count == 0) return 0;
     if (_count == 1) return _byYear.values.first[0];
-    final ys = _sortedYears;
+    final ys = _ensureSorted();
     final segCount = ys.length;
     // 奇数取第 (n~/2) 位；偶数取第 (n~/2 - 1) 与 (n~/2) 位的均值。
     final wantHi = _count ~/ 2;

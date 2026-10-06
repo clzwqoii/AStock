@@ -222,7 +222,17 @@ void main() {
       expect(tradingDaysSincePrevBar(bars, c2), [1, 4]);
     });
 
-
+    test('startFrom 仅计算指定下标之后的停牌洞（前面保留默认 1）', () {
+      final bars = [
+        Bar(date: DateTime(2024, 1, 2), open: 10, high: 10, low: 10, close: 10, volume: 1),
+        Bar(date: DateTime(2024, 1, 5), open: 10, high: 10, low: 10, close: 10, volume: 1), // gap=3
+        Bar(date: DateTime(2024, 1, 8), open: 10, high: 10, low: 10, close: 10, volume: 1), // gap=1
+      ];
+      // 不传 startFrom 时：[1, 3, 1]
+      expect(tradingDaysSincePrevBar(bars, cal), [1, 3, 1]);
+      // 传 startFrom=2 时：只算 bars[2]，bars[1] 保留初始 1 → [1, 1, 1]
+      expect(tradingDaysSincePrevBar(bars, cal, startFrom: 2), [1, 1, 1]);
+    });
 
     test('日历为空 → 全部记 1（看不出洞，护栏失效但不误杀）', () {
       final bars = [

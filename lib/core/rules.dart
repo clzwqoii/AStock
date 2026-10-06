@@ -329,7 +329,6 @@ class IndicatorSeries {
     required this.d,
     required this.j,
     required this.rsi14,
-    required this.pivot,
   });
 
   /// 从完整日线序列构造。[bars] 少于 [IndicatorSnapshot.minBars] 根时各字段仍会算出来，
@@ -351,7 +350,6 @@ class IndicatorSeries {
       d: kd.d,
       j: kd.j,
       rsi14: ind.rsiSeries(closes, 14),
-      pivot: ind.pivotSeries(bars, kPivotLookbackBars),
     );
   }
 
@@ -373,8 +371,9 @@ class IndicatorSeries {
   final List<double?> rsi14;
 
   /// 箱体上沿 / 中枢宽度 / 中枢方向的逐日序列（见 [ind.pivotSeries]）。
-  /// 整条只算一次：逐日评规则时每天重建前缀会让单股退化成 O(len²)。
-  final ind.PivotSeries pivot;
+  /// 惰性构建：仅中枢规则（经 [IndicatorSnapshot.pivotWindow]）读取。
+  /// 主力规则及绝大多数规则不需要，急切构建白占 IndicatorSeries 55% 的耗时。
+  late final ind.PivotSeries pivot = ind.pivotSeries(bars, kPivotLookbackBars);
 
   int get length => bars.length;
 
