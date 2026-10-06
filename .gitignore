@@ -52,3 +52,4 @@ app.*.map.json
 
 # AI 编辑器/助手的本地状态目录（各机器生成，不随仓库分发）
 .trae/
+.codebuddy/

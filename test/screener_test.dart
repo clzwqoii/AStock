@@ -321,12 +321,12 @@ void main() {
       return StockData(symbol: symbol, bars: bars);
     }
 
-    /// 第 30 根处挖一个 7 日历日洞（≈5 个交易日）来模拟停牌复牌。
-    StockData withSuspension() {
+    /// 第 [holeAt] 根处挖一个 7 日历日洞（≈5 个交易日）来模拟停牌复牌。
+    StockData withSuspension({int holeAt = 30}) {
       final bars = <Bar>[];
       var d = DateTime(2024, 1, 2);
       for (var i = 0; i < 41; i++) {
-        if (i == 30) d = d.add(const Duration(days: 7));
+        if (i == holeAt) d = d.add(const Duration(days: 7));
         bars.add(Bar(
           date: d,
           open: 10,
@@ -374,6 +374,22 @@ void main() {
     test('没有洞的序列不受影响', () {
       final d = screenDiagnostics([marketFiller('M'), noSuspension()], [volume]);
       expect(d.hits.map((h) => h.stock.symbol), ['CLEAN']);
+      expect(d.blockedSuspension, 0);
+    });
+
+    // 41 根序列、回溯 20 根 → 判定区间 = [41-20, 40] = [21, 40]。
+    // 这两条锁住窗口的两端：护栏只算尾部窗口，起点偏一根就是静默漏判/误杀。
+    test('洞落在窗口最老那一根（index = len − 回溯根数）→ 仍拦下', () {
+      final d = screenDiagnostics([marketFiller('M'), withSuspension(holeAt: 21)],
+          [volume]);
+      expect(d.hits, isEmpty);
+      expect(d.blockedSuspension, 1);
+    });
+
+    test('洞在窗口外一根（index = len − 回溯根数 − 1）→ 不算污染，正常入选', () {
+      final d = screenDiagnostics([marketFiller('M'), withSuspension(holeAt: 20)],
+          [volume]);
+      expect(d.hits.map((h) => h.stock.symbol), ['SUSP']);
       expect(d.blockedSuspension, 0);
     });
 
