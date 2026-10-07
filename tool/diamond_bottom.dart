@@ -203,6 +203,42 @@ List<_Trade> _runOne(
   ];
 }
 
+/// 检测在突破日 [breakIndex] 之后，是否在 1~[pullbackMaxDays] 天内完成回踩颈线位且阳线再启动。
+///
+/// 形态时序（严格消除前视偏差）：
+/// 1. 突破日后逐日向后看，不提前预知未来；
+/// 2. 期间若最低价深破颈线位（< neck * (1 - kNeckBreakTol)），形态破坏，返回 null；
+/// 3. 若探底触及颈线位附近（low <= neck * 1.01）视为回踩；
+/// 4. 回踩确认后的首根阳线（收盘重回颈线位上方），即为「阳线再启动」的真正进场日，返回其下标。
+int? findDiamondEntry(
+  List<Bar> bars,
+  int breakIndex,
+  double neck, {
+  int pullbackMaxDays = 10,
+}) {
+  var pulledBack = false;
+  final maxEnd = (breakIndex + pullbackMaxDays < bars.length)
+      ? breakIndex + pullbackMaxDays
+      : bars.length - 1;
+
+  for (var k = breakIndex + 1; k <= maxEnd; k++) {
+    final b = bars[k];
+    // 深破颈线位：假突破 / 破位，形态失效，不产生开仓
+    if (b.low < neck * (1 - kNeckBreakTol)) {
+      return null;
+    }
+    // 回踩颈线位附近（容差 1%）
+    if (b.low <= neck * (1 + 0.01)) {
+      pulledBack = true;
+    }
+    // 回踩确认后的阳线再启动进场日
+    if (pulledBack && b.close > b.open && b.close >= neck) {
+      return k;
+    }
+  }
+  return null;
+}
+
 /// 全市场扫一遍，收集 (lookback, mult, hold) → 交易列表 与 同批可评估日的基准。
 Map<String, Object> _scan(List<StockData> stocks) {
   final trades = <String, List<_Trade>>{};
@@ -264,26 +300,19 @@ Map<String, Object> _scan(List<StockData> stocks) {
           vol += bars[k].volume;
         }
         if (vol <= 0 || bars[t].volume / (vol / 5) < 1.2) continue;
-        // 再启动：阳线
+        // 突破日放量阳线
         if (bars[t].close <= bars[t].open) continue;
-        // 回踩不破：突破后 1~10 日内最低价不得深破颈线位
-        var pulledBack = false;
-        var broke = false;
-        for (var k = t + 1; k <= t + 10 && k < bars.length; k++) {
-          if (bars[k].low <= neck * (1 + 0.01)) pulledBack = true;
-          if (bars[k].low < neck * (1 - kNeckBreakTol)) {
-            broke = true;
-            break;
-          }
-        }
-        if (broke || !pulledBack) continue;
+
+        // 回踩不破且阳线再启动时进场（消除前视偏差：以再启动日进场，非突破日买入）
+        final entryIdx = findDiamondEntry(bars, t, neck);
+        if (entryIdx == null) continue;
 
         for (final m in _targetMults) {
           for (final h in _holds) {
             for (final mode in _ExitMode.values) {
               trades
                   .putIfAbsent('$lb|$m|$h|${mode.name}', () => <_Trade>[])
-                  .addAll(_runOne(stock.symbol, bars, t, neck, m, h, mode,
+                  .addAll(_runOne(stock.symbol, bars, entryIdx, neck, m, h, mode,
                       hist: hist, volRatio: volRatio));
             }
           }
@@ -313,6 +342,21 @@ void _selfTest() {
     final c = 10.5 + (i + 1) * 0.3;
     bars.add(b(d0.add(Duration(days: 22 + i)), c - 0.1, c + 0.2, c - 0.3, c, 150));
   }
+
+  // 0) 形态时序测试（消除前视偏差）：
+  // 突破日 20，回踩日 21（最低 9.8 触及颈线且未破 9.7），阳线再启动日 22
+  final entry = findDiamondEntry(bars, 20, 10.0);
+  assert(entry == 22, '突破后回踩再启动应在第 22 根进场，实际 $entry');
+
+  // 0b) 回踩深破颈线位（最低 9.4 < 9.7）应判失效不进场
+  final brokeBars = <Bar>[...bars];
+  brokeBars[21] = b(brokeBars[21].date, 9.5, 9.6, 9.4, 9.5, 80);
+  assert(findDiamondEntry(brokeBars, 20, 10.0) == null, '深破颈线位形态应失效不进场');
+
+  // 0c) 未触及回踩区（最低一直 > 10.1）不应判进场
+  final noPullBars = <Bar>[...bars];
+  noPullBars[21] = b(noPullBars[21].date, 10.3, 10.5, 10.2, 10.4, 80);
+  assert(findDiamondEntry(noPullBars, 20, 10.0) == null, '未回踩颈线位不应判进场');
 
   // 1) 目标位 = 颈线 × 2 必须在某根被触及
   final t = 20;

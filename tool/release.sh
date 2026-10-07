@@ -106,8 +106,13 @@ body = notes_file.split(head, 1)[1].split("\n## ", 1)[0].strip() if head in note
 def post_json(url, data):
     req = urllib.request.Request(url, data=json.dumps(data).encode(), headers={"Content-Type": "application/json"})
     req.add_header("Authorization", f"token {token}")
-    with urllib.request.urlopen(req, timeout=30) as r:
-        return json.loads(r.read())
+    for attempt in range(3):
+        try:
+            with urllib.request.urlopen(req, timeout=30) as r:
+                return json.loads(r.read())
+        except Exception:
+            if attempt == 2: raise
+            import time; time.sleep(2)
 
 def post_file(url, path, fields):
     boundary = uuid.uuid4().hex
@@ -121,8 +126,22 @@ def post_file(url, path, fields):
     parts.append(f"\r\n--{boundary}--\r\n".encode())
     req = urllib.request.Request(url, data=b"".join(parts), headers={"Content-Type": f"multipart/form-data; boundary={boundary}"})
     req.add_header("Authorization", f"token {token}")
-    with urllib.request.urlopen(req, timeout=600) as r:
-        return r.read().decode()[:200]
+    for attempt in range(3):
+        try:
+            with urllib.request.urlopen(req, timeout=600) as r:
+                return r.read().decode()[:200]
+        except urllib.error.HTTPError as e:
+            err_body = e.read().decode()
+            if "配额" in err_body:
+                print(f"Gitee 附件上传失败（配额超出）：{err_body}")
+                raise
+            if attempt == 2:
+                print(f"Gitee 上传失败: {e.code} {err_body}")
+                raise
+            import time; time.sleep(3)
+        except Exception:
+            if attempt == 2: raise
+            import time; time.sleep(3)
 
 base = f"https://gitee.com/api/v5/repos/{owner_repo}"
 rel = post_json(f"{base}/releases?access_token={token}", {
