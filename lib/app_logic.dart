@@ -24,7 +24,7 @@ import 'package:stock/data/tushare_client.dart';
 export 'package:stock/data/bar_repository.dart' show HistoryCoverage;
 
 /// 当前应用版本（发布新包时同步修改，与 pubspec.version 保持一致）。
-const kAppVersion = '2.6.3';
+const kAppVersion = '2.6.5';
 
 /// 更新清单候选源（并发竞速，第一个响应的胜出）。
 /// 国内网络优先命中 Gitee；jsDelivr 镜像可加速 GitHub raw。建仓库后替换为你的地址。
