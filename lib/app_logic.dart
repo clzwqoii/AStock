@@ -1,6 +1,7 @@
 /// App/CLI 共用的重活入口：把 SQLite 读取与计算放进后台 isolate，避免卡 UI。
 library;
 
+import 'dart:async';
 import 'dart:convert';
 import 'dart:io';
 import 'dart:isolate';
@@ -21,7 +22,7 @@ import 'package:stock/data/sync_service.dart';
 import 'package:stock/data/tushare_client.dart';
 
 /// 当前应用版本（发布新包时同步修改，与 pubspec.version 保持一致）。
-const kAppVersion = '2.5.3';
+const kAppVersion = '2.6.0';
 
 /// 更新清单候选源（并发竞速，第一个响应的胜出）。
 /// 国内网络优先命中 Gitee；jsDelivr 镜像可加速 GitHub raw。建仓库后替换为你的地址。
@@ -332,73 +333,364 @@ String _stamp() {
 /// 选股：后台 isolate 里打开库 → 全量加载（剔除 ST / 退市 / 科创板）→ 规则筛选 → 组装展示行 → 关库。
 /// 返回股票总数、入选行、数据截止交易日，以及两个数据卫生护栏各挡掉多少只
 /// （不显示这个数，用户只会看到"入选变少了"而不知道原因）。
-Future<
-        ({int total, List<ScreenRow> picked, String? dataDate, int blockedStale,
-            int blockedCorporateAction, int blockedSuspension})>
-    runScreening(
-  String dbPath,
-  List<Rule> rules,
-) =>
+///
+/// 单发路径：每次调用全量重读库。App 内的连续选股走 [ScreeningService]
+/// （池子跨次复用），CLI 进程即用即走适合单发。
+Future<ScreenResult> runScreening(String dbPath, List<Rule> rules) =>
     Isolate.run(() {
       final repo = BarRepository(dbPath);
       try {
-        final stocks = repo.loadAllStocks(excludeSpecialStocks: true);
-        final names = repo.stockNames();
-        final picked = <ScreenRow>[];
-        final report = loadBacktestReport(dbPath);
-        final model = loadScoreModel(dbPath);
-        final screened = screenDiagnostics(stocks, rules);
-        for (final hit in screened.hits) {
-          final s = hit.stock;
-          final snap = hit.snapshot; // 筛选时已构建，直接复用
-          final prevClose = s.bars[s.bars.length - 2].close;
-          final ids = hit.matchedRuleIds;
-          picked.add(ScreenRow(
-            symbol: s.symbol,
-            name: names[s.symbol],
-            close: snap.close,
-            change: snap.close - prevClose,
-            changePct: snap.pctChange,
-            volumeRatio: snap.volumeRatio,
-            amountWan: s.last.amount / 10,
-            ma20: snap.ma20,
-            matchedRules: [for (final id in ids) ruleById(id).name],
-            signalDate: _ymd(s.last.date),
-            ret20: s.bars.length > 21
-                ? (s.last.close / s.bars[s.bars.length - 21].close - 1) * 100
-                : 0,
-            // 有 score-model.json 就走方案 B；没有就退回方案 A。模型缺失是常态
-            // （首次安装、还没训练过），不该影响选股。
-            // 具体 AUC 不写死在注释里——它每次重训都变，写死必然过期，
-            // 看 score-model.json 的 holdoutAuc 与 planAAuc 字段。
-            score: scoreOf(
-              report,
-              hitRuleIds: ids,
-              horizon: kScoreHorizon,
-              model: model,
-              snapshot: snap,
-              fallbackToPlanA: true,
-            ),
-            forecast: priceForecast(
-              report,
-              close: snap.close,
-              hitRuleIds: ids,
-              horizon: kScoreHorizon,
-            ),
-          ));
-        }
-        return (
-          total: stocks.length,
-          picked: picked,
-          dataDate: repo.maxTradeDate(),
-          blockedStale: screened.blockedStale,
-          blockedCorporateAction: screened.blockedCorporateAction,
-          blockedSuspension: screened.blockedSuspension,
-        );
+        final sw = Stopwatch()..start();
+        final pool = _loadPool(repo, dbPath);
+        final loadMs = sw.elapsedMilliseconds;
+        return _screenWithPool(pool, rules,
+            dataDate: repo.maxTradeDate(), loadMs: loadMs, poolReused: false);
       } finally {
         repo.close();
       }
     });
+
+/// 选股各阶段耗时（毫秒）。手机端结果区展示，让"慢在哪"可见：
+/// loadMs=池子加载（复用时 0）、screenMs=护栏+快照+规则、assembleMs=命中行组装。
+typedef ScreenTimings = ({
+  int loadMs,
+  int screenMs,
+  int assembleMs,
+  int totalMs,
+  bool poolReused,
+});
+
+/// 一次选股的完整结果（App/CLI/UI 共用；[timings] 见 [ScreenTimings]）。
+typedef ScreenResult = ({
+  int total,
+  List<ScreenRow> picked,
+  String? dataDate,
+  int blockedStale,
+  int blockedCorporateAction,
+  int blockedSuspension,
+  ScreenTimings? timings,
+});
+
+/// 选股池：一次加载、可跨次复用的重活产物（仅在后台 isolate 内持有）。
+typedef _Pool = ({
+  List<StockData> stocks,
+  Map<String, String> names,
+  BacktestReport? report,
+  LogRegModel? model,
+});
+
+_Pool _loadPool(BarRepository repo, String dbPath) => (
+      stocks: repo.loadAllStocks(excludeSpecialStocks: true),
+      names: repo.stockNames(),
+      report: loadBacktestReport(dbPath),
+      model: loadScoreModel(dbPath),
+    );
+
+/// 对已加载的池子跑规则并组装展示行。[loadMs]/[poolReused] 由调用方按加载方式填。
+ScreenResult _screenWithPool(
+  _Pool pool,
+  List<Rule> rules, {
+  required String? dataDate,
+  required int loadMs,
+  required bool poolReused,
+}) {
+  final sw = Stopwatch()..start();
+  final screened = screenDiagnostics(pool.stocks, rules);
+  final screenMs = sw.elapsedMilliseconds;
+  sw.reset();
+  final picked = <ScreenRow>[];
+  for (final hit in screened.hits) {
+    final s = hit.stock;
+    final snap = hit.snapshot; // 筛选时已构建，直接复用
+    final prevClose = s.bars[s.bars.length - 2].close;
+    final ids = hit.matchedRuleIds;
+    picked.add(ScreenRow(
+      symbol: s.symbol,
+      name: pool.names[s.symbol],
+      close: snap.close,
+      change: snap.close - prevClose,
+      changePct: snap.pctChange,
+      volumeRatio: snap.volumeRatio,
+      amountWan: s.last.amount / 10,
+      ma20: snap.ma20,
+      matchedRules: [for (final id in ids) ruleById(id).name],
+      signalDate: _ymd(s.last.date),
+      ret20: s.bars.length > 21
+          ? (s.last.close / s.bars[s.bars.length - 21].close - 1) * 100
+          : 0,
+      // 有 score-model.json 就走方案 B；没有就退回方案 A。模型缺失是常态
+      // （首次安装、还没训练过），不该影响选股。
+      // 具体 AUC 不写死在注释里——它每次重训都变，写死必然过期，
+      // 看 score-model.json 的 holdoutAuc 与 planAAuc 字段。
+      score: scoreOf(
+        pool.report,
+        hitRuleIds: ids,
+        horizon: kScoreHorizon,
+        model: pool.model,
+        snapshot: snap,
+        fallbackToPlanA: true,
+      ),
+      forecast: priceForecast(
+        pool.report,
+        close: snap.close,
+        hitRuleIds: ids,
+        horizon: kScoreHorizon,
+      ),
+    ));
+  }
+  final assembleMs = sw.elapsedMilliseconds;
+  return (
+    total: pool.stocks.length,
+    picked: picked,
+    dataDate: dataDate,
+    blockedStale: screened.blockedStale,
+    blockedCorporateAction: screened.blockedCorporateAction,
+    blockedSuspension: screened.blockedSuspension,
+    timings: (
+      loadMs: loadMs,
+      screenMs: screenMs,
+      assembleMs: assembleMs,
+      totalMs: loadMs + screenMs + assembleMs,
+      poolReused: poolReused,
+    ),
+  );
+}
+
+/// 常驻后台 isolate 的选股服务：池子加载一次跨次复用，数据/报告变了自动重载。
+///
+/// 为什么常驻：全市场池子加载是选股耗时的绝对大头（桌面实测 3.9 秒），
+/// `Isolate.run` 单发路径每次点「开始选股」都要全量重读。池子占内存数百 MB 量级，
+/// 必须留在后台 isolate，主 isolate 只收结果行；空闲 [idleTimeout] 后回收 isolate
+/// 释放内存（发关闭消息让它自己关库退出），下次选股重新孵化。
+///
+/// 失效指纹（[_poolFingerprint]）：库水位+行指纹 ⊕ 回测报告文件 ⊕ 评分模型文件。
+/// 同步推进水位、回补历史改行指纹、回测页重跑报告换文件——任一变化都重载。
+class ScreeningService {
+  ScreeningService({this.idleTimeout = const Duration(minutes: 5)});
+
+  /// 空闲多久后回收常驻 isolate（回收路径见 [_drop]）。
+  final Duration idleTimeout;
+
+  Isolate? _iso;
+  ReceivePort? _inbox;
+  ReceivePort? _errors;
+  Completer<SendPort>? _ready;
+
+  /// 常驻 isolate 的请求端口。回收时用它发「关库退出」而不是直接 kill。
+  SendPort? _workerPort;
+
+  final _pending = <int, Completer<Object?>>{};
+  var _seq = 0;
+  Timer? _idle;
+  var _disposed = false;
+
+  /// 进行中的 [screen] 次数（含"已调用、isolate 还没就绪"的孵化期）。
+  /// 内存压力回收要避开它：此刻池子正在被使用，回收只会把即将到手的结果变成错误。
+  var _inflight = 0;
+
+  /// 用池子跑一次选股；规则列表映射成 id 传给 isolate（Rule 带闭包不可跨 isolate）。
+  Future<ScreenResult> screen(String dbPath, List<Rule> rules) {
+    if (_disposed) return Future.error(StateError('ScreeningService 已销毁'));
+    _idle?.cancel();
+    _inflight++;
+    final f = _withWorker().then((send) {
+      final id = _seq++;
+      final c = Completer<Object?>();
+      _pending[id] = c;
+      send.send([
+        id,
+        dbPath,
+        [for (final r in rules) r.id],
+      ]);
+      return c.future.then((payload) {
+        if (payload is String) throw StateError(payload);
+        return payload as ScreenResult;
+      });
+    });
+    return f.whenComplete(() {
+      _inflight--;
+      _armIdle();
+    });
+  }
+
+  /// 释放常驻 isolate（App 退出/测试收尾用；之后再 screen 会抛错）。
+  void dispose() {
+    _disposed = true;
+    _idle?.cancel();
+    _drop(null);
+  }
+
+  /// 只丢池子、不销毁服务：系统内存压力（didHaveMemoryPressure）时调用，
+  /// 立即归还常驻 isolate 的内存；下次 [screen] 自动重新孵化并重载，
+  /// 代价只是那一次退回单发速度。
+  ///
+  /// 有请求在途（含孵化期）时不回收：池子正在被使用，丢掉的只是这次结果，
+  /// 内存也省不下来（isolate 本来就在跑）。等它收尾，空闲回收自会接手。
+  void releasePool() {
+    if (_inflight > 0) return;
+    _idle?.cancel();
+    _drop(null);
+  }
+
+  Future<SendPort> _withWorker() {
+    final existing = _ready;
+    if (existing != null) return existing.future;
+    final fresh = Completer<SendPort>();
+    _ready = fresh;
+    final inbox = ReceivePort();
+    final errors = ReceivePort();
+    _inbox = inbox;
+    _errors = errors;
+    Isolate.spawn(_screeningWorkerMain, inbox.sendPort, onError: errors.sendPort)
+        .then((iso) {
+      if (_ready != fresh) {
+        // spawn 期间服务已被回收/销毁（releasePool/dispose）：杀掉刚孵化的
+        // isolate，否则它会空等一个已关闭的端口，永不释放。
+        iso.kill(priority: Isolate.beforeNextEvent);
+        return;
+      }
+      _iso = iso;
+      inbox.listen((m) {
+        if (m is SendPort) {
+          _workerPort = m;
+          if (!fresh.isCompleted) fresh.complete(m);
+          return;
+        }
+        final msg = m as List;
+        final c = _pending.remove(msg[0] as int);
+        if (c == null) return;
+        if (msg[1] is String) {
+          c.completeError(StateError(msg[1] as String));
+        } else {
+          c.complete(msg[1]);
+        }
+      });
+      errors.listen((m) => _drop('选股 isolate 崩溃: $m'));
+    }).catchError((Object e) {
+      _drop('选股 isolate 启动失败: $e');
+    });
+    return fresh.future;
+  }
+
+  /// 回收常驻 isolate 并让所有在途请求以错误收场；[message] 为 null 表示正常回收（空闲/销毁）。
+  void _drop(String? message) {
+    if (message == null && !_disposed && _inflight > 0) return;
+    final ready = _ready;
+    _ready = null;
+    final worker = _workerPort;
+    _workerPort = null;
+    if (worker != null) {
+      // 端口已建立：让 worker 自己 repo.close() 再退出。kill 掉的 isolate 不保证
+      // 跑到释放在途 native 资源（SQLite 句柄）的 finalizer，而池子下一刻就会被
+      // 重新加载——空闲每回收一轮，就漏一次。消息按序处理，worker 关掉自己的
+      // ReceivePort 后自然退出（它已经空闲，不用等）。
+      worker.send(_kWorkerShutdown);
+    } else {
+      // 还没拿到端口（孵化中/启动失败）：只能强杀，否则它会空等一个已关闭的端口。
+      _iso?.kill(priority: Isolate.beforeNextEvent);
+    }
+    _iso = null;
+    _inbox?.close();
+    _inbox = null;
+    _errors?.close();
+    _errors = null;
+    final err = StateError(message ?? '选股服务已回收');
+    for (final c in _pending.values) {
+      if (!c.isCompleted) c.completeError(err);
+    }
+    _pending.clear();
+    // 未就绪的等待者一律收场：只回收 isolate 不完成它，[screen] 的 Future 会
+    // 永久挂起（加载框关不掉，只能杀 App）。回收（message == null）同样如此——
+    // 孵化期被 releasePool/dispose 打断时，等待者已经拿不到任何结果了。
+    if (ready != null && !ready.isCompleted) {
+      ready.completeError(err);
+    }
+  }
+
+  void _armIdle() {
+    _idle?.cancel();
+    if (_inflight == 0) {
+      _idle = Timer(idleTimeout, () => _drop(null));
+    }
+  }
+}
+
+/// 回收消息：主 isolate 发给常驻 worker，让它关库后自行退出（见 [ScreeningService._drop]）。
+const String _kWorkerShutdown = 'close';
+
+/// [ScreeningService] 的常驻 isolate 主体。
+/// 请求：`[请求id, dbPath, 规则id列表]`（或回收消息 [String]）；
+/// 回包：`[请求id, ScreenResult 或错误字符串]`。
+void _screeningWorkerMain(SendPort out) {
+  final inbox = ReceivePort();
+  out.send(inbox.sendPort);
+  BarRepository? repo;
+  String? openedPath;
+  String? fingerprint;
+  _Pool? pool;
+  // ReceivePort 的 async 回调会并发进入，池子状态必须串行演化。
+  var busy = Future<void>.value();
+
+  inbox.listen((m) {
+    if (m == _kWorkerShutdown) {
+      // 串到 busy 之后：正在跑的选股先收尾，再关库、关端口退出。
+      busy = busy.then((_) {
+        repo?.close();
+        repo = null;
+        pool = null;
+        inbox.close(); // 没有活动端口后 isolate 自然结束
+      });
+      return;
+    }
+    final msg = m as List;
+    busy = busy.then((_) async {
+      final id = msg[0] as int;
+      try {
+        final dbPath = msg[1] as String;
+        final rules = [for (final rid in msg[2] as List) ruleById(rid as String)];
+        if (repo == null || openedPath != dbPath) {
+          repo?.close();
+          repo = BarRepository(dbPath);
+          openedPath = dbPath;
+          fingerprint = null;
+        }
+        final key = _poolFingerprint(repo!, dbPath);
+        var loadMs = 0;
+        var reused = true;
+        if (key != fingerprint) {
+          final sw = Stopwatch()..start();
+          pool = _loadPool(repo!, dbPath);
+          fingerprint = key;
+          loadMs = sw.elapsedMilliseconds;
+          reused = false;
+        }
+        out.send([
+          id,
+          _screenWithPool(pool!, rules,
+              dataDate: repo!.maxTradeDate(),
+              loadMs: loadMs,
+              poolReused: reused),
+        ]);
+      } catch (e, st) {
+        out.send([id, '选股失败: $e\n$st']);
+      }
+    });
+  });
+}
+
+/// 选股池失效指纹：库指纹 ⊕ 报告/模型文件指纹。报告与模型是选股评分的输入，
+/// 回测页重跑后必须跟着换，文件按 长度:mtime 指纹化（缺失记 `-`）。
+String _poolFingerprint(BarRepository repo, String dbPath) {
+  String fileFp(String path) {
+    final f = File(path);
+    if (!f.existsSync()) return '-';
+    return '${f.lengthSync()}:${f.lastModifiedSync().millisecondsSinceEpoch}';
+  }
+
+  return '${repo.poolFingerprint()}'
+      '|${fileFp(reportPathFor(dbPath))}'
+      '|${fileFp('${File(dbPath).parent.path}/score-model.json')}';
+}
 
 /// 读回测报告缓存；无文件或文件损坏返回 null（报表不该影响选股）。
 BacktestReport? loadBacktestReport(String dbPath, {String? reportPath}) =>
@@ -420,15 +712,27 @@ LogRegModel? loadScoreModel(String dbPath, {String? modelPath}) {
 
 /// 回测全部内置规则 × [kDefaultHorizons] 持有期，结果落盘后返回（后台 isolate）。
 /// 实测约 20 秒（5623 只 × 424 根）；落盘后页面秒开。
+///
+/// 同时把快照写入同目录的月度台账（同一数据截止日只留最新一条），
+/// 与 `tool/report_all.dart --archive` 同格式——「连红」计数要求两边口径一致。
 Future<BacktestReport> runBacktest(String dbPath, {String? reportPath}) =>
     Isolate.run(() {
-      final store = ReportStore(reportPath ?? reportPathFor(dbPath));
+      final rp = reportPath ?? reportPathFor(dbPath);
+      final store = ReportStore(rp);
       final repo = BarRepository(dbPath);
       try {
         final stocks = repo.loadAllStocks();
-        final report =
-            backtestAll(stocks, builtInRules, horizons: kDefaultHorizons);
+        final report = backtestAll(stocks, builtInRules,
+            horizons: kDefaultHorizons,
+            recentWindowTradingDays: kRecentWindowTradingDays);
         store.save(report);
+        final dataDate = repo.maxTradeDate();
+        if (dataDate != null) {
+          final hp = historyPathFor(rp);
+          final prev = loadBacktestHistory(hp) ?? const BacktestHistory([]);
+          saveBacktestHistory(
+              hp, prev.upsert(BacktestSnapshot.of(report, dataDate)));
+        }
         return report;
       } finally {
         repo.close();

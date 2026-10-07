@@ -43,6 +43,7 @@ app.*.map.json
 /android/app/debug
 /android/app/profile
 /android/app/release
+/android/.kotlin/
 
 # Widget Preview related
 .widget_preview/
@@ -53,3 +54,5 @@ app.*.map.json
 # AI 编辑器/助手的本地状态目录（各机器生成，不随仓库分发）
 .trae/
 .codebuddy/
+.workbuddy/
+.zcode/

@@ -6,8 +6,10 @@ import 'dart:io';
 import 'package:flutter/material.dart';
 import 'package:flutter_test/flutter_test.dart';
 import 'package:stock/core/backtest.dart';
+import 'package:stock/core/market_state.dart';
 import 'package:stock/core/models.dart';
 import 'package:stock/core/rules.dart';
+import 'package:stock/data/report_store.dart';
 import 'package:stock/ui/backtest_page.dart';
 import 'package:stock/ui/colors.dart';
 
@@ -164,6 +166,20 @@ void main() {
 
     expect(find.textContaining('库不存在'), findsOneWidget);
     expect(find.text('还没有回测报告'), findsOneWidget); // 仍停在空态
+  });
+
+  testWidgets('回测抛 Error（如 StateError）时也显示错误信息，不产生未捕获异常', (tester) async {
+    await pump(tester, BacktestPage(
+      dbPath: dbPath,
+      reportPath: reportPath,
+      runFn: (_, {reportPath}) async => throw StateError('库状态异常'),
+    ));
+
+    await tester.tap(find.text('开始回测'));
+    await tester.pumpAndSettle();
+
+    expect(find.textContaining('库状态异常'), findsOneWidget);
+    expect(find.text('还没有回测报告'), findsOneWidget);
   });
 
   testWidgets('onBack 非空时 AppBar 显示返回键，点击回调', (tester) async {
@@ -406,6 +422,346 @@ int rowRankOf(WidgetTester tester, String target) {
       await tester.tap(find.text('2024年')); // 升序：翻转（旧实现按 PF 排，两条规则不会翻转）
       await tester.pump();
       expect(dy(surge), lessThan(dy(rsi)));
+    });
+  });
+
+  group('市场状态卡片', () {
+    /// 把 [ms] 挂到现有报告上（其余字段原样复制）。
+    BacktestReport withState(BacktestReport r, MarketState? ms) => BacktestReport(
+          generatedAt: r.generatedAt,
+          horizons: r.horizons,
+          stockCount: r.stockCount,
+          baseline: r.baseline,
+          results: r.results,
+          yearly: r.yearly,
+          yearlyBaseline: r.yearlyBaseline,
+          signalProfile: r.signalProfile,
+          marketState: ms,
+        );
+
+    testWidgets('牛市:标签+三个指标+截至行都渲染', (tester) async {
+      const ms = MarketState(
+        regime: MarketRegime.bull,
+        asOfDate: '2026-10-06',
+        stockCount: 5623,
+        maGap: 6.2,
+        ret20: 5.3,
+        breadthAboveMa20: 0.62,
+        newHighLowDiff20: 0.11,
+      );
+      await pump(tester, BacktestPage(
+        dbPath: dbPath,
+        reportPath: reportPath,
+        initialReport: withState(_fakeReport(generated), ms),
+        runFn: (_, {reportPath}) async => fail('不应触发'),
+      ));
+
+      expect(find.text('牛市'), findsOneWidget);
+      expect(find.text('近20日 +5.3%'), findsOneWidget);
+      expect(find.text('站上MA20 62%'), findsOneWidget);
+      expect(find.text('新高−新低 +11pp'), findsOneWidget);
+      expect(find.textContaining('截至 2026-10-06 · 5623 只'), findsOneWidget);
+    });
+
+    testWidgets('熊市显示熊市标签与负号指标', (tester) async {
+      const ms = MarketState(
+        regime: MarketRegime.bear,
+        asOfDate: '2026-10-06',
+        stockCount: 5623,
+        maGap: -7.1,
+        ret20: -6.4,
+        breadthAboveMa20: 0.18,
+        newHighLowDiff20: -0.22,
+      );
+      await pump(tester, BacktestPage(
+        dbPath: dbPath,
+        reportPath: reportPath,
+        initialReport: withState(_fakeReport(generated), ms),
+        runFn: (_, {reportPath}) async => fail('不应触发'),
+      ));
+
+      expect(find.text('熊市'), findsOneWidget);
+      expect(find.text('近20日 -6.4%'), findsOneWidget);
+      expect(find.text('新高−新低 -22pp'), findsOneWidget);
+    });
+
+    testWidgets('旧报告无 marketState 时不显示状态卡片', (tester) async {
+      await pump(tester, BacktestPage(
+        dbPath: dbPath,
+        reportPath: reportPath,
+        initialReport: _fakeReport(generated), // _fakeReport 不带 marketState
+        runFn: (_, {reportPath}) async => fail('不应触发'),
+      ));
+
+      expect(find.text('牛市'), findsNothing);
+      expect(find.text('熊市'), findsNothing);
+      // 不能用"近20日"判:规则说明文案里也有(如"放量突破近20日箱体上沿")。
+      expect(find.textContaining('新高−新低'), findsNothing);
+      // 不加"暂无"提示行:回测页纵向空间全给表格(见 _table 里的注释)。
+      expect(find.textContaining('暂无'), findsNothing);
+    });
+
+    testWidgets('数据不足时显示数据不足标签', (tester) async {
+      const ms = MarketState(
+        regime: MarketRegime.insufficient,
+        asOfDate: '2026-10-06',
+        stockCount: 0,
+        maGap: 0,
+        ret20: 0,
+        breadthAboveMa20: 0,
+        newHighLowDiff20: 0,
+      );
+      await pump(tester, BacktestPage(
+        dbPath: dbPath,
+        reportPath: reportPath,
+        initialReport: withState(_fakeReport(generated), ms),
+        runFn: (_, {reportPath}) async => fail('不应触发'),
+      ));
+
+      expect(find.text('数据不足'), findsOneWidget);
+    });
+  });
+
+  group('最近半年口径', () {
+    /// 构造带 recent 数据的报告:[sig] 为指定规则的窗口日均值。
+    BacktestReport recentReport({
+      required RecentSlice base,
+      required RecentSlice ruleA, // 显著为正
+      required RecentSlice ruleB, // 独立日不足
+      required RecentSlice ruleC, // 显著为负
+    }) {
+      BacktestReport r = _fakeReport(generated);
+      return BacktestReport(
+        generatedAt: r.generatedAt,
+        horizons: r.horizons,
+        stockCount: r.stockCount,
+        baseline: r.baseline,
+        results: r.results,
+        yearly: r.yearly,
+        yearlyBaseline: r.yearlyBaseline,
+        signalProfile: r.signalProfile,
+        recent: {
+          'pct_change_up': {for (final h in r.horizons) h: ruleA},
+          'close_above_ma20': {for (final h in r.horizons) h: ruleB},
+          'macd_golden_cross': {for (final h in r.horizons) h: ruleC},
+        },
+        recentBaseline: {for (final h in r.horizons) h: base},
+      );
+    }
+
+    RecentSlice sliceOf(Map<int, double> dayMean) => RecentSlice(
+          stats: BacktestStats.of(dayMean.values.toList()),
+          dayMeanReturn: dayMean,
+        );
+
+    testWidgets('默认全期口径,不显示「最近半年」chip 与超额列', (tester) async {
+      await pump(tester, BacktestPage(
+        dbPath: dbPath,
+        reportPath: reportPath,
+        initialReport: _fakeReport(generated),
+        runFn: (_, {reportPath}) async => fail('不应触发'),
+      ));
+
+      expect(find.text('最近半年'), findsNothing);
+      expect(find.text('半年超额'), findsNothing);
+    });
+
+    testWidgets('切到最近半年:超额列出现,显著/不显著/样本不足三态', (tester) async {
+      // 基准 30 天日均 0;规则 A 每日 +1(显著为正);
+      // 规则 B 只有 5 个独立日(不足);规则 C 每日 -1(显著为负)。
+      final base = sliceOf({for (var d = 1; d <= 30; d++) d: 0.0});
+      final report = recentReport(
+        base: base,
+        ruleA: sliceOf({for (var d = 1; d <= 30; d++) d: 1.0}),
+        ruleB: sliceOf({for (var d = 1; d <= 5; d++) d: 1.0}),
+        ruleC: sliceOf({for (var d = 1; d <= 30; d++) d: -1.0}),
+      );
+      // 台账:pct_change_up 连续 2 期红;macd_golden_cross 只有 1 期红。
+      RecentExcessRec red(double lo) =>
+          RecentExcessRec(excess: 1.0, ciLow: lo, ciHigh: 2.0, days: 100);
+      BacktestSnapshot snap(String date, Map<String, RecentExcessRec> recs) =>
+          BacktestSnapshot(
+            generatedAt: 't',
+            dataDate: date,
+            stockCount: 2,
+            evaluableDays: 100,
+            ruleWinRate: const {},
+            recentExcess: recs,
+          );
+      File(historyPathFor(reportPath)).writeAsStringSync(jsonEncode(
+        BacktestHistory([
+          snap('20260831', {'pct_change_up': red(0.5), 'macd_golden_cross': red(0.5)}),
+          snap('20260930', {'pct_change_up': red(0.6)}),
+        ]).toJson(),
+      ));
+      await pump(tester, BacktestPage(
+        dbPath: dbPath,
+        reportPath: reportPath,
+        initialReport: report,
+        runFn: (_, {reportPath}) async => fail('不应触发'),
+      ));
+
+      await tester.tap(find.text('最近半年'));
+      await tester.pump();
+
+      expect(find.text('半年超额'), findsOneWidget);
+      expect(find.text('+1.0'), findsWidgets); // 规则 A(及基准行外的同值行)
+      expect(find.text('-1.0'), findsOneWidget); // 规则 C
+      expect(find.text('样本不足'), findsOneWidget); // 规则 B
+      expect(find.text('连红'), findsOneWidget);
+      // 规则 A 连续 2 期红(台账注入);C 只有 1 期、其余无数据 → —。
+      expect(find.text('2连红'), findsOneWidget);
+      expect(find.text('1连红'), findsNothing, reason: '不足 2 期不显示');
+      // 年份列与主力月列在窗口口径下无意义,应消失
+      expect(find.text('2024年'), findsNothing);
+      expect(find.text('主力月'), findsNothing);
+    });
+
+    testWidgets('报告无 recent 数据(旧口径)时不显示「最近半年」chip', (tester) async {
+      await pump(tester, BacktestPage(
+        dbPath: dbPath,
+        reportPath: reportPath,
+        initialReport: _fakeReport(generated), // 不带 recent
+        runFn: (_, {reportPath}) async => fail('不应触发'),
+      ));
+
+      expect(find.text('最近半年'), findsNothing);
+    });
+
+    testWidgets('窗口口径说明随口径出现', (tester) async {
+      final base = sliceOf({for (var d = 1; d <= 30; d++) d: 0.0});
+      final report = recentReport(
+        base: base,
+        ruleA: sliceOf({for (var d = 1; d <= 30; d++) d: 1.0}),
+        ruleB: sliceOf({for (var d = 1; d <= 5; d++) d: 1.0}),
+        ruleC: sliceOf({for (var d = 1; d <= 30; d++) d: -1.0}),
+      );
+      await pump(tester, BacktestPage(
+        dbPath: dbPath,
+        reportPath: reportPath,
+        initialReport: report,
+        runFn: (_, {reportPath}) async => fail('不应触发'),
+      ));
+      expect(find.textContaining('按天重抽'), findsNothing);
+
+      await tester.tap(find.text('最近半年'));
+      await tester.pump();
+      expect(find.textContaining('按天重抽'), findsOneWidget);
+      // 颜色语义必须写在页面上:红色是及格线不是冠军、灰色别追、没有红色少动。
+      expect(find.text('怎么看「最近半年」'), findsOneWidget);
+      expect(find.textContaining('及格线'), findsOneWidget);
+      expect(find.textContaining('没有红色'), findsOneWidget);
+      // 与选股页统计行的口径衔接(那边是"最近一个样本够的年份的超额",比这里松)。
+      expect(find.textContaining('最近一个样本够的年份的超额'), findsOneWidget);
+      // 超额列固定跟随中间持有期:挂在列头 Tooltip 上而不是多写一行正文
+      // (正文多一行会把表头挤出手机首屏)。
+      expect(
+          find.byWidgetPredicate((w) =>
+              w is Tooltip && (w.message ?? '').contains('中间持有期')),
+          findsOneWidget);
+      expect(
+          find.byWidgetPredicate((w) =>
+              w is Tooltip && (w.message ?? '').contains('一期 = 一次回测快照')),
+          findsOneWidget);
+    });
+
+    testWidgets('全期口径下显示「超额」列,数值 = 均收 − 同期基准,基准行 —', (tester) async {
+      final r = _fakeReport(generated);
+      final pfH = r.horizons.length >= 2 ? r.horizons[1] : r.horizons.last;
+      final baseAvg = r.baseline[pfH]!.avgReturn;
+      final rule = ruleById('pct_change_up');
+      final excess = r.result(rule.id, pfH)!.avgReturn - baseAvg;
+      final text =
+          '${excess >= 0 ? '+' : ''}${excess.toStringAsFixed(1)}';
+
+      await pump(tester, BacktestPage(
+        dbPath: dbPath,
+        reportPath: reportPath,
+        initialReport: r,
+        runFn: (_, {reportPath}) async => fail('不应触发'),
+      ));
+
+      expect(find.text('$pfH日超额'), findsOneWidget);
+      expect(find.text(text), findsOneWidget);
+      // 基准行没有自己的超额;分年列的"—"也可能出现,不计数。
+      expect(find.text('—'), findsWidgets);
+    });
+
+    testWidgets('窗口口径下不显示全期超额列(由半年超额替代)', (tester) async {
+      final base = RecentSlice(
+        stats: BacktestStats.of([for (var i = 0; i < 30; i++) 0.0]),
+        dayMeanReturn: {for (var d = 1; d <= 30; d++) d: 0.0},
+      );
+      final report = BacktestReport(
+        generatedAt: generated.toIso8601String(),
+        horizons: const [5, 10],
+        stockCount: 2,
+        baseline: _fakeReport(generated).baseline,
+        results: _fakeReport(generated).results,
+        recent: {
+          'pct_change_up': {5: base, 10: base},
+        },
+        recentBaseline: {5: base, 10: base},
+      );
+      await pump(tester, BacktestPage(
+        dbPath: dbPath,
+        reportPath: reportPath,
+        initialReport: report,
+        runFn: (_, {reportPath}) async => fail('不应触发'),
+      ));
+
+      await tester.tap(find.text('最近半年'));
+      await tester.pump();
+
+      expect(find.text('半年超额'), findsOneWidget);
+      expect(find.text('10日超额'), findsNothing);
+    });
+
+    testWidgets('页面内「重新回测」写入的台账要立刻反映到连红列', (tester) async {
+      // runBacktest 会 upsert 台账，而页面只在 initState 读一次 -- 重跑后
+      // 连红列会永久停在旧期数（台账首启不存在时更是整列都是 —）。
+      final base = sliceOf({for (var d = 1; d <= 30; d++) d: 0.0});
+      final report = recentReport(
+        base: base,
+        ruleA: sliceOf({for (var d = 1; d <= 30; d++) d: 1.0}),
+        ruleB: sliceOf({for (var d = 1; d <= 5; d++) d: 1.0}),
+        ruleC: sliceOf({for (var d = 1; d <= 30; d++) d: -1.0}),
+      );
+      RecentExcessRec red() =>
+          RecentExcessRec(excess: 1.0, ciLow: 0.5, ciHigh: 2.0, days: 100);
+      BacktestSnapshot snap(String date) => BacktestSnapshot(
+            generatedAt: 't',
+            dataDate: date,
+            stockCount: 2,
+            evaluableDays: 100,
+            ruleWinRate: const {},
+            recentExcess: {'pct_change_up': red()},
+          );
+      File(historyPathFor(reportPath))
+          .writeAsStringSync(jsonEncode(BacktestHistory([snap('20260831')]).toJson()));
+
+      await pump(tester, BacktestPage(
+        dbPath: dbPath,
+        reportPath: reportPath,
+        initialReport: report,
+        runFn: (_, {reportPath}) async {
+          // 与 runBacktest 一致：同日替换、新数据截止日追加一期。
+          final hp = historyPathFor(reportPath!);
+          final prev = loadBacktestHistory(hp) ?? const BacktestHistory([]);
+          File(hp).writeAsStringSync(
+              jsonEncode(prev.upsert(snap('20260930')).toJson()));
+          return report;
+        },
+      ));
+
+      await tester.tap(find.text('最近半年'));
+      await tester.pump();
+      expect(find.text('2连红'), findsNothing, reason: '重跑前台账只有 1 期');
+
+      await tester.tap(find.text('重新回测'));
+      await tester.pumpAndSettle();
+      expect(find.text('2连红'), findsOneWidget,
+          reason: '刚写进台账的那一期必须被页面读到');
     });
   });
 }

@@ -39,7 +39,7 @@ export PUB_HOSTED_URL=https://pub.flutter-io.cn FLUTTER_STORAGE_BASE_URL=https:/
 
 ## 开发规则
 
-0. **行情数据的两处口径卫生（2026-10-06 起，改动选股/回测必须遵守）**：库内是不复权价，除权日会留下永久价位断层。判定一律走 `lib/core/market.dart` 的 `isCorporateActionGap` / `isCleanSignalDay`（按代码判涨跌停幅度），**不要在别处另写一套跳空阈值**。除权护栏在 `screener` / `backtestRule` / `baseline` / `backtestAll` / `tool/train_score.dart` 五处共用；\n停牌护栏同样这五处共用（判定 `tradingDaysSincePrevBar` / `hasSuspensionGapNearby`，必须走\n`tradingCalendar` 交易日历，别用日历日差——那会把春节/国庆误判成停牌）；新鲜度护栏（末根滞后 30 天）只在 `screener`，**不得加进回测**（那是存活者偏差）。口径数字与取舍见 `docs/project-structure.md`「数据卫生护栏」节。停牌造成的 K 线洞**不是数据缺失**，
+0. **行情数据的两处口径卫生（2026-10-06 起，改动选股/回测必须遵守）**：库内是不复权价，除权日会留下永久价位断层。判定一律走 `lib/core/market.dart` 的 `isCorporateActionGap` / `isCleanSignalDay`（按代码判涨跌停幅度），**不要在别处另写一套跳空阈值**。除权护栏在 `screener` / `backtestRule` / `baseline` / `backtestAll` / `tool/train_score.dart` 五处共用；\n停牌护栏同样这五处共用（判定 `tradingDaysSincePrevBar` / `hasSuspensionGapNearby`，必须走\n`tradingCalendar` 交易日历，别用日历日差——那会把春节/国庆误判成停牌）；新鲜度护栏（末根滞后 30 天）只在 `screener`，**不得加进回测**（那是存活者偏差）。口径数字与取舍见 `docs/project-structure.md`「数据卫生护栏」节。市场状态仪表（`market_state.dart`）的逐股宽度/新高新低另用 `barsSinceCorporateAction` + 交易日历滞后滤网（末根滞后 ≤ 20 交易日、末根不在除权后 20 根内），等权指数不加——见「市场状态仪表」节。停牌造成的 K 线洞**不是数据缺失**，
 不要为了"把序列补满"去填——权威源当天没返回就是没交易；停牌对指标的失真是日历问题，
 用 `tool/fill_gaps.dart --dry-run` 体检，别用猜的。另：**库的行数/股票数一变（补数、回填），
 `report_all.dart --archive` → `train_score.dart` 必须按这个顺序重算**，否则报告/台账/模型三者不同源

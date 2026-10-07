@@ -49,32 +49,22 @@ Future<void> main(List<String> args) async {
   }
   final bars = stocks.map((s) => s.bars.length).reduce((a, b) => a > b ? a : b);
   print('股票 ${stocks.length} 只 · 每只最多 $bars 根');
-  final report = backtestAll(stocks, builtInRules, horizons: kDefaultHorizons);
+  final report = backtestAll(stocks, builtInRules,
+      horizons: kDefaultHorizons,
+      recentWindowTradingDays: kRecentWindowTradingDays);
   File(out).writeAsStringSync(jsonEncode(report.toJson()));
   print('耗时 ${sw.elapsed.inSeconds}s → $out');
 
   // 月度跟踪：把本次快照追加进台账（同一数据截止日只保留最新一条）
   if (archive) {
     final hp = historyPathFor(out);
-    final prev = File(hp).existsSync()
-        ? BacktestHistory.fromJson(
-            jsonDecode(File(hp).readAsStringSync()) as Map<String, dynamic>)
-        : const BacktestHistory([]);
+    final prev = loadBacktestHistory(hp) ?? const BacktestHistory([]);
     final snap = BacktestSnapshot.of(report, dataDate);
-    final merged = BacktestHistory([
-      ...prev.snapshots.where((s) => s.dataDate != snap.dataDate),
-      snap,
-    ]..sort((a, b) => a.dataDate.compareTo(b.dataDate)));
-    File(hp).writeAsStringSync(jsonEncode(merged.toJson()));
+    final merged = prev.upsert(snap);
+    saveBacktestHistory(hp, merged); // 原子替换：App 侧读-改-写同一个文件
     print('月度台账 → $hp（${merged.snapshots.length} 期）');
   }
   _print(report);
-}
-
-/// 月度台账路径：与报告同目录、固定文件名。
-String historyPathFor(String reportPath) {
-  final f = File(reportPath);
-  return '${f.parent.path}/backtest-history.json';
 }
 
 void _print(BacktestReport r) {

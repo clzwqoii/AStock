@@ -133,13 +133,7 @@ Future<void> scrollTo(WidgetTester tester, Finder finder) =>
   });
 
   group('工作台选股页（方案C）', () {
-  Future<void> pumpWith(
-    WidgetTester tester,
-    Future<
-            ({int total, List<ScreenRow> picked, String? dataDate, int blockedStale,
-                int blockedCorporateAction, int blockedSuspension})>
-        Function(String, List<Rule>) screenFn,
-  ) async {
+  Future<void> pumpWith(WidgetTester tester, ScreenFn screenFn) async {
     await tester.pumpWidget(MaterialApp(
       home: Scaffold(body: ScreeningPage(dbPath: dbPath, screenFn: screenFn)),
     ));
@@ -155,7 +149,7 @@ Future<void> scrollTo(WidgetTester tester, Finder finder) =>
         picked: [fakeRow('S1.SH', name: '威孚高科')],
         dataDate: '20260930',
         blockedStale: 0,
-        blockedCorporateAction: 0, blockedSuspension: 0,
+        blockedCorporateAction: 0, blockedSuspension: 0, timings: null,
       );
     });
 
@@ -211,7 +205,7 @@ Future<void> scrollTo(WidgetTester tester, Finder finder) =>
               ),
             ),
           ],
-          dataDate: '20260930', blockedStale: 0, blockedCorporateAction: 0, blockedSuspension: 0,
+          dataDate: '20260930', blockedStale: 0, blockedCorporateAction: 0, blockedSuspension: 0, timings: null,
         );
       });
       await scrollTo(tester, find.text('量比>2'));
@@ -245,7 +239,7 @@ Future<void> scrollTo(WidgetTester tester, Finder finder) =>
           picked: [fakeRow('600000.SH')],
           dataDate: '20260930',
           blockedStale: 0,
-          blockedCorporateAction: 0, blockedSuspension: 0,
+          blockedCorporateAction: 0, blockedSuspension: 0, timings: null,
         );
       });
       await scrollTo(tester, find.text('量比>2'));
@@ -270,11 +264,11 @@ Future<void> scrollTo(WidgetTester tester, Finder finder) =>
           picked: [fakeRow('S1.SH')],
           dataDate: '20260930',
           blockedStale: 0,
-          blockedCorporateAction: 0, blockedSuspension: 0,
+          blockedCorporateAction: 0, blockedSuspension: 0, timings: null,
         );
       });
 
-      // 按规则名点，不按 Switch 下标：侧栏顺序由 ruleIdsSortedByWinRate 决定，
+      // 按规则名点，不按 Switch 下标：侧栏顺序由 ruleIdsSortedByExcess 决定，
       // 会随 backtestReport 有无 / 主力规则的钉住位置变化，用下标写死等于
       // 每次调顺序都要改测试（已经因此红过两次）。
       await scrollTo(tester, find.text('量比>2'));
@@ -298,7 +292,7 @@ Future<void> scrollTo(WidgetTester tester, Finder finder) =>
             dataDate: null,
             blockedStale: 0,
             blockedCorporateAction: 0,
-            blockedSuspension: 0,
+            blockedSuspension: 0, timings: null,
           ));
       await scrollTo(tester, find.text('量比>2'));
       await tester.tap(find.text('量比>2'));
@@ -317,7 +311,7 @@ Future<void> scrollTo(WidgetTester tester, Finder finder) =>
           picked: [fakeRow('S1.SH', name: '威孚高科')],
           dataDate: '20260930',
           blockedStale: 0,
-          blockedCorporateAction: 0, blockedSuspension: 0,
+          blockedCorporateAction: 0, blockedSuspension: 0, timings: null,
         );
       });
       await tester.tap(find.text('收盘价站上MA20'));
@@ -335,7 +329,7 @@ Future<void> scrollTo(WidgetTester tester, Finder finder) =>
             picked: [fakeRow('600000.SH')],
             dataDate: '20260930',
             blockedStale: 0,
-            blockedCorporateAction: 0, blockedSuspension: 0,
+            blockedCorporateAction: 0, blockedSuspension: 0, timings: null,
           ));
       await tester.tap(find.text('收盘价站上MA20'));
       await tester.pump();
@@ -378,7 +372,7 @@ Future<void> scrollTo(WidgetTester tester, Finder finder) =>
                   picked: const <ScreenRow>[],
                   dataDate: null,
                   blockedStale: 0,
-                  blockedCorporateAction: 0, blockedSuspension: 0,
+                  blockedCorporateAction: 0, blockedSuspension: 0, timings: null,
                 ),
               ),
           ),
@@ -799,6 +793,40 @@ Future<void> scrollTo(WidgetTester tester, Finder finder) =>
       expect(usedForce, isTrue, reason: '勾选完整重拉后外壳必须把 force 传下去');
     });
 
+    testWidgets('回补回执带库内最早日期与备源失败只数，用户能验收覆盖是否到位', (tester) async {
+      await tester.pumpWidget(StockApp(
+        config: AppConfig(tushareToken: 'tok', dbPath: dbPath),
+        showOnboarding: false,
+        persistAccent: (_) async {},
+        runSyncFn: ({required dbPath, required token, onProgress}) async =>
+            const SyncResult(dates: 0, rows: 0),
+        runBackfillFn: ({required dbPath, required token, required fromDate,
+            bool force = false, onProgress}) async {
+          return const SyncResult(
+            dates: 500,
+            rows: 200000,
+            earliestDate: '20250106',
+            failedSymbols: 37,
+          );
+        },
+        runBacktestFn: (_, {reportPath}) async => fakeReport(),
+      ));
+      await tester.pump();
+      await scrollTo(tester, find.text('设置'));
+      await tester.tap(find.text('设置'));
+      await tester.pumpAndSettle();
+      await tester.tap(find.text('回补历史'));
+      await tester.pump();
+      await tester.tap(find.text('近 3 年'));
+      await tester.pump();
+      await tester.pumpAndSettle();
+
+      // 回补 3 年但库内最早只有 20250106：一眼看出没补齐，不用再猜行数含义
+      expect(find.textContaining('库内最早 20250106'), findsWidgets);
+      expect(find.textContaining('37 只'), findsWidgets,
+          reason: '备源单只失败不能静默，回执要点名失败只数并提示重跑');
+    });
+
     testWidgets('同步失败时状态行以「同步失败」开头（不是「同步中失败」）', (tester) async {
       await tester.pumpWidget(StockApp(
         config: AppConfig(tushareToken: 'tok', dbPath: dbPath),
@@ -884,7 +912,7 @@ Future<void> scrollTo(WidgetTester tester, Finder finder) =>
                 picked: const <ScreenRow>[],
                 dataDate: null,
                 blockedStale: 0,
-                blockedCorporateAction: 0, blockedSuspension: 0,
+                blockedCorporateAction: 0, blockedSuspension: 0, timings: null,
               ),
               backtestReport: fakeReport(),
             ),
@@ -904,6 +932,29 @@ Future<void> scrollTo(WidgetTester tester, Finder finder) =>
         expect(find.textContaining('样本少'), findsWidgets);
       });
   
+      testWidgets('主力规则名后挂「主力」徽标，位置完全由排序决定', (tester) async {
+        // 2026-10-07 起主力不再钉首位：排序与回测超额同口径是硬约束，
+        // 主力身份改用名字后的徽标表达。徽标有且只有一个（kMainRuleId）。
+        await tester.pumpWidget(MaterialApp(
+          home: Scaffold(
+            body: ScreeningPage(
+              dbPath: dbPath,
+              screenFn: (_, _) async => (
+                total: 1,
+                picked: const <ScreenRow>[],
+                dataDate: null,
+                blockedStale: 0,
+                blockedCorporateAction: 0, blockedSuspension: 0, timings: null,
+              ),
+              backtestReport: fakeReport(),
+            ),
+          ),
+        ));
+        await tester.pump();
+
+        expect(find.text('主力'), findsOneWidget);
+      });
+
       testWidgets('不传报告时不显示统计行（不占高度）', (tester) async {
         await tester.pumpWidget(MaterialApp(
           home: Scaffold(
@@ -914,7 +965,7 @@ Future<void> scrollTo(WidgetTester tester, Finder finder) =>
                 picked: const <ScreenRow>[],
                 dataDate: null,
                 blockedStale: 0,
-                blockedCorporateAction: 0, blockedSuspension: 0,
+                blockedCorporateAction: 0, blockedSuspension: 0, timings: null,
               ),
             ),
           ),

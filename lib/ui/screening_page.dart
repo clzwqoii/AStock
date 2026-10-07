@@ -13,11 +13,7 @@ import '../core/rules.dart';
 import 'colors.dart';
 import 'stock_detail_page.dart';
 
-typedef ScreenFn =
-    Future<
-            ({int total, List<ScreenRow> picked, String? dataDate, int blockedStale,
-                int blockedCorporateAction, int blockedSuspension})>
-        Function(String dbPath, List<Rule> rules);
+typedef ScreenFn = Future<ScreenResult> Function(String dbPath, List<Rule> rules);
 
 /// 长任务加载模态（居中卡片）：大号强调色转圈 + 标题 + 可选副标题，
 /// 带遮罩挡住重复点击。选股/网络自检/检查更新共用。
@@ -133,8 +129,7 @@ class _ScreeningPageState extends State<ScreeningPage> {
   final _selected = <String>{};
   bool _loading = false;
   String? _error;
-  ({int total, List<ScreenRow> picked, String? dataDate, int blockedStale,
-      int blockedCorporateAction, int blockedSuspension})? _result;
+  ScreenResult? _result;
 
   /// 当前排序列与方向；null = 引擎返回顺序。
   SortField? _sortField;
@@ -263,8 +258,8 @@ class _ScreeningPageState extends State<ScreeningPage> {
                 child: Column(
                   crossAxisAlignment: CrossAxisAlignment.start,
                   children: [
-                    // 分组按「组内最高 10 日胜率」降序，组内再按胜率降序
-                    for (final e in ruleGroupsSortedByWinRate(
+                    // 分组按「组内最高超额」降序，组内再按超额降序（与统计行红绿同口径）
+                    for (final e in ruleGroupsSortedByExcess(
                         ruleGroups, widget.backtestReport)) ...[
                       Padding(
                         padding: const EdgeInsets.fromLTRB(18, 16, 18, 8),
@@ -272,9 +267,9 @@ class _ScreeningPageState extends State<ScreeningPage> {
                             style: const TextStyle(
                                 fontSize: 10, letterSpacing: 2, color: AppColors.dim, fontWeight: FontWeight.w700)),
                       ),
-                      // 组内按 10 日胜率降序（无报告时保持声明顺序）
-                      for (final id in ruleIdsSortedByWinRate(e.value, widget.backtestReport,
-                              pinFirst: kMainRuleId))
+                      // 组内按超额降序（无报告时保持声明顺序）；主力不钉首位，
+                      // 由 _switchRow 在名字旁挂「主力」徽标
+                      for (final id in ruleIdsSortedByExcess(e.value, widget.backtestReport))
                         _switchRow(ruleById(id)),
                     ],
                   ],
@@ -336,11 +331,15 @@ class _ScreeningPageState extends State<ScreeningPage> {
     final upDown = upDownColorsOf(context);
     return Padding(
       padding: const EdgeInsets.only(top: 1),
-      child: Text(
-        line.label,
-        style: TextStyle(
-          fontSize: 9,
-          color: line.excessPp >= 0 ? upDown.up : upDown.down,
+      child: Tooltip(
+        message: RuleStatLine.helpText,
+        margin: const EdgeInsets.symmetric(horizontal: 12),
+        child: Text(
+          line.label,
+          style: TextStyle(
+            fontSize: 9,
+            color: line.excessPp >= 0 ? upDown.up : upDown.down,
+          ),
         ),
       ),
     );
@@ -357,13 +356,31 @@ class _ScreeningPageState extends State<ScreeningPage> {
                   crossAxisAlignment: CrossAxisAlignment.start,
                   mainAxisSize: MainAxisSize.min,
                   children: [
-                    Text(rule.name,
-                        style: TextStyle(
-                            fontSize: 13,
-                            color: AppColors.text,
-                            fontWeight: _selected.contains(rule.id)
-                                ? FontWeight.w600
-                                : FontWeight.w400)),
+                    // 主力规则徽标：身份标识，不影响排序（排序只听超额的）。
+                    // 名字必须 Flexible：长规则名 + 徽标在 236px 侧栏内可能放不下。
+                    Row(children: [
+                      Flexible(
+                          child: Text(rule.name,
+                              overflow: TextOverflow.ellipsis,
+                              style: TextStyle(
+                                  fontSize: 13,
+                                  color: AppColors.text,
+                                  fontWeight: _selected.contains(rule.id)
+                                      ? FontWeight.w600
+                                      : FontWeight.w400))),
+                      if (rule.id == kMainRuleId) ...[
+                        const SizedBox(width: 4),
+                        Container(
+                          padding: const EdgeInsets.symmetric(horizontal: 4, vertical: 1),
+                          decoration: BoxDecoration(
+                            border: Border.all(color: const Color(0xFFE5E8EF)),
+                            borderRadius: BorderRadius.circular(4),
+                          ),
+                          child: const Text('主力',
+                              style: TextStyle(fontSize: 9, color: AppColors.dim)),
+                        ),
+                      ],
+                    ]),
                     _statLine(rule),
                   ],
                 ),

@@ -5,9 +5,11 @@ import 'package:flutter_test/flutter_test.dart';
 import 'package:http/http.dart' as http;
 import 'package:http/testing.dart';
 import 'package:stock/app_logic.dart';
+import 'package:stock/core/backtest.dart';
 import 'package:stock/core/rules.dart';
 import 'package:stock/data/bar_repository.dart';
 import 'package:stock/data/eastmoney_client.dart';
+import 'package:stock/data/report_store.dart';
 import 'package:stock/data/sina_client.dart';
 import 'package:stock/data/tushare_client.dart';
 
@@ -40,6 +42,153 @@ void main() {
 
     final single = await runScreening(dbPath, [ruleById('pct_change_up')]);
     expect(single.picked.map((s) => s.symbol), ['S1.SH', 'S2.SZ']);
+  });
+
+  test('runScreening 结果带分阶段耗时（timings）', () async {
+    seedStocks(dbPath);
+    final r = await runScreening(dbPath, [ruleById('pct_change_up')]);
+    final t = r.timings;
+    expect(t, isNotNull);
+    // 微型库各阶段可能不足 1ms，只断言字段齐全与口径自洽，不钉具体毫秒数。
+    expect(t!.loadMs, greaterThanOrEqualTo(0));
+    expect(t.screenMs, greaterThanOrEqualTo(0));
+    expect(t.assembleMs, greaterThanOrEqualTo(0));
+    expect(t.totalMs, greaterThanOrEqualTo(t.loadMs + t.screenMs + t.assembleMs));
+    expect(t.poolReused, isFalse);
+  });
+
+  test('ScreeningService 池子复用：数据不变时第二次不重载，结果与单发一致', () async {
+    seedStocks(dbPath);
+    final svc = ScreeningService();
+    addTearDown(svc.dispose);
+    final r1 = await svc.screen(dbPath, [ruleById('pct_change_up')]);
+    expect(r1.timings!.poolReused, isFalse);
+    final r2 = await svc.screen(dbPath, [ruleById('pct_change_up')]);
+    expect(r2.timings!.poolReused, isTrue, reason: '数据指纹没变 → 复用池子，不重读库');
+    expect(r2.total, r1.total);
+    expect([for (final p in r2.picked) p.symbol], [for (final p in r1.picked) p.symbol]);
+
+    final direct = await runScreening(dbPath, [ruleById('pct_change_up')]);
+    expect([for (final p in direct.picked) p.symbol], [for (final p in r1.picked) p.symbol],
+        reason: '常驻池子与单发路径的结果必须一致');
+  });
+
+  test('ScreeningService.releasePool：内存压力时立即释放池子，服务仍可继续用', () async {
+    seedStocks(dbPath);
+    final svc = ScreeningService();
+    addTearDown(svc.dispose);
+    await svc.screen(dbPath, [ruleById('pct_change_up')]);
+    final r1 = await svc.screen(dbPath, [ruleById('pct_change_up')]);
+    expect(r1.timings!.poolReused, isTrue);
+
+    svc.releasePool();
+    final r2 = await svc.screen(dbPath, [ruleById('pct_change_up')]);
+    expect(r2.timings!.poolReused, isFalse, reason: '释放后必须重新加载池子');
+    final r3 = await svc.screen(dbPath, [ruleById('pct_change_up')]);
+    expect(r3.timings!.poolReused, isTrue, reason: '释放不销毁服务，之后照常复用');
+  });
+
+  // 内存压力（didHaveMemoryPressure）随时可能落在"请求已发出、isolate 还没就绪"
+  // 的窗口里。此时回收若照做，screen 的 Future 既拿不到结果也不会报错。
+  test('ScreeningService.releasePool：孵化未完成时不回收，本次选股照常出结果', () async {
+    seedStocks(dbPath);
+    final svc = ScreeningService();
+    addTearDown(svc.dispose);
+    final fut = svc.screen(dbPath, [ruleById('pct_change_up')]);
+    svc.releasePool(); // 同一 tick：isolate 必然还没就绪
+
+    final r = await fut.timeout(const Duration(seconds: 10));
+    expect([for (final p in r.picked) p.symbol], ['S1.SH', 'S2.SZ']);
+  });
+
+  test('ScreeningService：多请求并发时先完成的请求不提前触发空闲回收', () async {
+    seedStocks(dbPath);
+    final svc = ScreeningService(idleTimeout: const Duration(milliseconds: 50));
+    addTearDown(svc.dispose);
+    final fut1 = svc.screen(dbPath, [ruleById('pct_change_up')]);
+    final fut2 = svc.screen(dbPath, [ruleById('pct_change_up')]);
+    final results = await Future.wait([fut1, fut2]);
+    expect(results[0].picked.length, results[1].picked.length);
+  });
+
+  test('ScreeningService.dispose：孵化未完成时在途 screen 以错误收场，不挂起', () async {
+    seedStocks(dbPath);
+    final svc = ScreeningService();
+    final fut = svc.screen(dbPath, [ruleById('pct_change_up')]);
+    svc.dispose(); // 销毁不看在途状态：必须在途请求收场（报错）
+
+    await expectLater(
+      fut.timeout(const Duration(seconds: 10)),
+      throwsA(isA<StateError>()),
+    );
+  });
+
+  test('ScreeningService 失效重载：新交易日、回补旧日期、报告更新都会触发重载', () async {
+    seedStocks(dbPath);
+    final svc = ScreeningService();
+    addTearDown(svc.dispose);
+    await svc.screen(dbPath, [ruleById('pct_change_up')]);
+
+    void addBar(String date) {
+      final repo = BarRepository(dbPath);
+      repo.upsertBars([
+        DailyRow(
+            tsCode: 'S1.SH',
+            tradeDate: date,
+            open: 10.0,
+            high: 10.0,
+            low: 10.0,
+            close: 10.5,
+            vol: 300.0,
+            amount: 1),
+      ]);
+      repo.close();
+    }
+
+    addBar('20261003'); // 新交易日
+    final r3 = await svc.screen(dbPath, [ruleById('pct_change_up')]);
+    expect(r3.timings!.poolReused, isFalse, reason: '水位线变了必须重载');
+
+    addBar('20260801'); // 回补更早的历史：水位线不变，但库内容变了
+    final r4 = await svc.screen(dbPath, [ruleById('pct_change_up')]);
+    expect(r4.timings!.poolReused, isFalse, reason: '回补不改水位线，按行指纹仍要重载');
+
+    // 回测报告更新（选股评分依赖它）：文件内容变了也要重载
+    ReportStore(reportPathFor(dbPath)).save(BacktestReport(
+      generatedAt: DateTime.now().toIso8601String(),
+      horizons: const [10],
+      stockCount: 2,
+      baseline: const {},
+      results: const {},
+    ));
+    final r5 = await svc.screen(dbPath, [ruleById('pct_change_up')]);
+    expect(r5.timings!.poolReused, isFalse, reason: '回测报告变了，评分缓存必须跟着换');
+  });
+
+  test('runBacktest 报告携带 recent 窗口数据,并把快照写入台账(同日去重)', () async {
+    seedStocks(dbPath);
+    final reportPath = '${tmp.path}/report.json';
+    final r1 = await runBacktest(dbPath, reportPath: reportPath);
+    // 漏接线回归:App 内重新回测的报告必须有窗口数据,「最近半年」才有得切。
+    expect(r1.recent, isNotEmpty);
+    expect(r1.recentBaseline, isNotEmpty);
+
+    final hp = historyPathFor(reportPath);
+    final h1 = BacktestHistory.fromJson(
+        jsonDecode(File(hp).readAsStringSync()) as Map<String, dynamic>);
+    expect(h1.snapshots, hasLength(1));
+    expect(h1.snapshots.single.dataDate, '20261002');
+
+    // 同一数据截止日重跑 → 替换不追加。
+    await runBacktest(dbPath, reportPath: reportPath);
+    final h2 = BacktestHistory.fromJson(
+        jsonDecode(File(hp).readAsStringSync()) as Map<String, dynamic>);
+    expect(h2.snapshots, hasLength(1));
+    // 台账走「临时文件 + rename」原子替换：写完不许留下 .tmp 残骸
+    // （残留说明 rename 没走成，下一个写者读到的就是半份数据）。
+    final leftovers =
+        tmp.listSync().where((e) => e.path.endsWith('.tmp')).toList();
+    expect(leftovers, isEmpty, reason: '原子写不许留临时文件：$leftovers');
   });
 
   test('loadStockDetail 返回单只股票 bars+快照+名称；无数据返回 null', () async {

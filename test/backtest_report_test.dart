@@ -8,6 +8,7 @@ import 'dart:io';
 
 import 'package:flutter_test/flutter_test.dart';
 import 'package:stock/core/backtest.dart';
+import 'package:stock/core/market_state.dart';
 import 'package:stock/core/models.dart';
 import 'package:stock/core/rules.dart';
 import 'package:stock/data/report_store.dart';
@@ -256,6 +257,45 @@ void main() {
         expect(ReportStore(path).load(), isNull);
         File(path).writeAsStringSync('[]');
         expect(ReportStore(path).load(), isNull);
+      } finally {
+        tmp.deleteSync(recursive: true);
+      }
+    });
+
+    test('saveBacktestHistory 原子覆盖已有台账文件，load 正常读取', () {
+      final tmp = Directory.systemTemp.createTempSync('hist');
+      try {
+        final path = '${tmp.path}/backtest-history.json';
+        const h1 = BacktestHistory([
+          BacktestSnapshot(
+            generatedAt: '2026-10-01',
+            dataDate: '20260930',
+            stockCount: 10,
+            evaluableDays: 5,
+            ruleWinRate: {'r': 0.8},
+          ),
+        ]);
+        saveBacktestHistory(path, h1);
+        expect(loadBacktestHistory(path)!.snapshots.length, 1);
+
+        const h2 = BacktestHistory([
+          BacktestSnapshot(
+            generatedAt: '2026-10-01',
+            dataDate: '20260930',
+            stockCount: 10,
+            evaluableDays: 5,
+            ruleWinRate: {'r': 0.8},
+          ),
+          BacktestSnapshot(
+            generatedAt: '2026-10-02',
+            dataDate: '20261008',
+            stockCount: 10,
+            evaluableDays: 6,
+            ruleWinRate: {'r': 0.9},
+          ),
+        ]);
+        saveBacktestHistory(path, h2);
+        expect(loadBacktestHistory(path)!.snapshots.length, 2);
       } finally {
         tmp.deleteSync(recursive: true);
       }
@@ -708,79 +748,87 @@ void main() {
       expect(back.snapshots.last.ruleWinRate['b'], 0.6);
     });
   });
-  group('ruleIdsSortedByWinRate 规则按胜率排序', () {
-    /// 造一份报告，让几条规则有已知的 10 日胜率。
-    BacktestReport reportWith(Map<String, double> winById) {
-      final bars = <Bar>[];
-      var d = DateTime(2024, 1, 2);
-      for (var i = 0; i < 300; i++) {
-        bars.add(kbar(close: 10.0 + 0.02 * i, volume: 100, date: d));
-        d = d.add(const Duration(days: 1));
-      }
-      return BacktestReport(
-        generatedAt: '2026-10-05T00:00:00.000',
-        horizons: const [10],
-        stockCount: 1,
-        baseline: {10: Baseline(forwardDays: 10, returns: const [])},
-        results: {
-          for (final e in winById.entries)
-            e.key: {
-              10: BacktestResult.fromStats(
-                ruleId: e.key,
-                forwardDays: 10,
-                stats: BacktestStats(
-                  count: 100,
-                  winRate: e.value,
-                  avgReturn: 0,
-                  medianReturn: 0,
-                  bestReturn: 0,
-                  worstReturn: 0,
-                  profitFactor: 1,
-                ),
-              ),
-            },
-        },
+  /// 造一份带年度统计的报告（排序走 ruleStatLine 口径：最近样本够的年份的超额）。
+  /// 基准固定 2026 年 -0.41%，与真实 2026 熊市口径一致。
+  BacktestReport yearlyReportWith(Map<String, BacktestStats> statsById) {
+    final base = BacktestStats(
+      count: 800,
+      winRate: 0.443,
+      avgReturn: -0.41,
+      medianReturn: -0.41,
+      bestReturn: 0,
+      worstReturn: 0,
+      profitFactor: 0.90,
+    );
+    return BacktestReport(
+      generatedAt: '2026-10-07T00:00:00.000',
+      horizons: const [10],
+      stockCount: 100,
+      baseline: const {},
+      results: const {},
+      yearly: {
+        2026: {for (final e in statsById.entries) e.key: {10: e.value}},
+      },
+      yearlyBaseline: {2026: {10: base}},
+    );
+  }
+
+  BacktestStats stats(int count, double avg, double win, {double pf = 1}) =>
+      BacktestStats(
+        count: count,
+        winRate: win,
+        avgReturn: avg,
+        medianReturn: avg,
+        bestReturn: avg,
+        worstReturn: -avg,
+        profitFactor: pf,
       );
-    }
-  
-    test('按 10 日胜率降序', () {
-      final r = reportWith({'a': 0.5, 'b': 0.9, 'c': 0.7});
-      expect(ruleIdsSortedByWinRate(['a', 'b', 'c'], r), ['b', 'c', 'a']);
+
+  group('ruleIdsSortedByExcess 规则按超额排序', () {
+    test('按最近样本年超额降序——胜率高但超额低的排后面', () {
+      // a 胜率 90% 但均收益 -0.50（超额 -0.09pp）；b 胜率 50% 但均收益 +1.00
+      // （超额 +1.41pp）。侧栏的红绿色由超额决定，排序必须同口径。
+      final r = yearlyReportWith({
+        'a': stats(900, -0.50, 0.90),
+        'b': stats(900, 1.00, 0.50),
+        'c': stats(900, 0.00, 0.70),
+      });
+      expect(ruleIdsSortedByExcess(['a', 'b', 'c'], r), ['b', 'c', 'a']);
     });
-  
-    test('没有报告的规则排在后面，且保持声明顺序', () {
-      final r = reportWith({'a': 0.5, 'c': 0.7});
-      // b 无数据 → 靠后；a/c 按胜率
-      expect(ruleIdsSortedByWinRate(['a', 'b', 'c'], r), ['c', 'a', 'b']);
-      // 同为无数据时保持原顺序
-      expect(ruleIdsSortedByWinRate(['x', 'y'], r), ['x', 'y']);
+
+    test('没有统计行的规则排在最后，且保持声明顺序', () {
+      final r = yearlyReportWith({
+        'a': stats(900, -0.50, 0.90),
+        'c': stats(900, 0.00, 0.70),
+      });
+      expect(ruleIdsSortedByExcess(['a', 'b', 'c'], r), ['c', 'a', 'b']);
+      // 同为无统计行时保持原顺序
+      expect(ruleIdsSortedByExcess(['x', 'y'], r), ['x', 'y']);
     });
-  
+
+    test('样本少的规则排在样本够的规则后面，哪怕超额更高', () {
+      // 样本 < kRuleStatLineMinSamples(500) 的均收益是噪声（口径卫生），
+      // 不能靠一个小样本的正超额跳到样本够的负超额规则前面。
+      final r = yearlyReportWith({
+        'a': stats(60, 5.00, 0.90), // 样本少，超额 +5.41pp
+        'b': stats(900, -0.50, 0.40), // 超额 -0.09pp
+      });
+      expect(ruleIdsSortedByExcess(['a', 'b'], r), ['b', 'a']);
+    });
+
     test('report 为 null 时原样返回（排序不抖动）', () {
       const ids = ['ma250_up', 'rsi_oversold_volume', 'close_above_ma20'];
-      expect(ruleIdsSortedByWinRate(ids, null), ids);
-    });
-  
-    test('pinFirst 把主力规则钉到首位，胜率不为它让路', () {
-      // 宽松版全样本胜率(79.9%)低于严格版(86.4%)，但它是主力——
-      // 依据是跨市况稳健而非全样本胜率。所以必须能覆盖胜率排序。
-      final r = reportWith({'strict': 0.864, 'loose': 0.799, 'third': 0.60});
-      expect(ruleIdsSortedByWinRate(['strict', 'loose', 'third'], r),
-          ['strict', 'loose', 'third'], reason: '默认仍按胜率');
-      expect(
-          ruleIdsSortedByWinRate(['strict', 'loose', 'third'], r,
-              pinFirst: 'loose'),
-          ['loose', 'strict', 'third']);
+      expect(ruleIdsSortedByExcess(ids, null), ids);
     });
 
-    test('pinFirst 的 id 不在列表里时静默忽略，不打乱排序', () {
-      final r = reportWith({'a': 0.5, 'b': 0.9});
-      expect(ruleIdsSortedByWinRate(['a', 'b'], r, pinFirst: '不存在'), ['b', 'a']);
-    });
-
-    test('pinFirst 在 report 为 null 时也生效（无报告是降级态）', () {
-      expect(ruleIdsSortedByWinRate(['x', 'y', 'z'], null, pinFirst: 'z'),
-          ['z', 'x', 'y']);
+    test('排序完全决定顺序，主力规则不钉首位', () {
+      // 2026-10-07 起：主力只靠「主力」徽标标识，位置完全由超额排序决定——
+      // 排序与回测结果同口径是硬约束，钉首位会让它再次和颜色/数字矛盾。
+      final r = yearlyReportWith({
+        'strict': stats(900, 2.00, 0.60),
+        'loose': stats(900, 1.00, 0.55),
+      });
+      expect(ruleIdsSortedByExcess(['loose', 'strict'], r), ['strict', 'loose']);
     });
 
     test('kMainRuleId 是真实存在且跨年稳健的主力规则', () {
@@ -791,83 +839,80 @@ void main() {
 
     test('不修改入参列表', () {
       final ids = ['a', 'b', 'c'];
-      final r = reportWith({'a': 0.1, 'b': 0.9, 'c': 0.5});
-      ruleIdsSortedByWinRate(ids, r);
+      final r = yearlyReportWith({
+        'a': stats(900, 0.10, 0.50),
+        'b': stats(900, 0.90, 0.50),
+        'c': stats(900, 0.50, 0.50),
+      });
+      ruleIdsSortedByExcess(ids, r);
       expect(ids, ['a', 'b', 'c']);
     });
-  
+
     test('全部 16 条内置规则都能排（真实报告字段齐全）', () {
-      final r = reportWith({for (final x in builtInRules) x.id: 0.5});
-      final sorted = ruleIdsSortedByWinRate(
-          [for (final x in builtInRules) x.id], r);
+      final r = yearlyReportWith(
+          {for (final x in builtInRules) x.id: stats(900, 0.5, 0.5)});
+      final sorted =
+          ruleIdsSortedByExcess([for (final x in builtInRules) x.id], r);
       expect(sorted.length, builtInRules.length);
       expect(sorted.toSet(), {for (final x in builtInRules) x.id});
     });
   });
-  
-  group('ruleGroupsSortedByWinRate 分组按胜率排序', () {
-    BacktestReport reportWith(Map<String, double> winById) => BacktestReport(
-          generatedAt: '2026-10-05T00:00:00.000',
-          horizons: const [10],
-          stockCount: 1,
-          baseline: {10: Baseline(forwardDays: 10, returns: const [])},
-          results: {
-            for (final e in winById.entries)
-              e.key: {
-                10: BacktestResult.fromStats(
-                  ruleId: e.key,
-                  forwardDays: 10,
-                  stats: BacktestStats(
-                    count: 100,
-                    winRate: e.value,
-                    avgReturn: 0,
-                    medianReturn: 0,
-                    bestReturn: 0,
-                    worstReturn: 0,
-                    profitFactor: 1,
-                  ),
-                ),
-              },
-          },
-        );
-  
+
+  group('ruleGroupsSortedByExcess 分组按超额排序', () {
     const groups = <String, List<String>>{
       '趋势': ['a', 'b'],
       '量能': ['c', 'd'],
       '年线': ['e'],
     };
-  
-    test('按组内最高胜率降序排列分组', () {
-      // 趋势最高 0.6、量能最高 0.9、年线 0.5 → 量能 > 趋势 > 年线
-      final r = reportWith({'a': 0.6, 'b': 0.5, 'c': 0.9, 'd': 0.3, 'e': 0.5});
+
+    test('按组内最高超额降序排列分组', () {
+      // 趋势最高 +0.41（b）、量能最高 +1.41（c）、年线 -0.59（e）
+      final r = yearlyReportWith({
+        'a': stats(900, -0.50, 0.50),
+        'b': stats(900, 0.00, 0.50),
+        'c': stats(900, 1.00, 0.50),
+        'd': stats(900, -0.50, 0.50),
+        'e': stats(900, -1.00, 0.50),
+      });
       expect(
-        ruleGroupsSortedByWinRate(groups, r).map((e) => e.key).toList(),
+        ruleGroupsSortedByExcess(groups, r).map((e) => e.key).toList(),
         ['量能', '趋势', '年线'],
       );
     });
-  
+
     test('report 为 null 时保持声明顺序', () {
-      expect(ruleGroupsSortedByWinRate(groups, null).map((e) => e.key).toList(),
+      expect(ruleGroupsSortedByExcess(groups, null).map((e) => e.key).toList(),
           ['趋势', '量能', '年线']);
     });
-  
-    test('组内最高胜率相同时按声明顺序（排序稳定）', () {
-      final r = reportWith({'a': 0.5, 'b': 0.5, 'c': 0.5, 'd': 0.5, 'e': 0.5});
-      expect(ruleGroupsSortedByWinRate(groups, r).map((e) => e.key).toList(),
+
+    test('组内最高超额相同时按声明顺序（排序稳定）', () {
+      final r = yearlyReportWith({
+        for (final id in ['a', 'b', 'c', 'd', 'e']) id: stats(900, 0.0, 0.5),
+      });
+      expect(ruleGroupsSortedByExcess(groups, r).map((e) => e.key).toList(),
           ['趋势', '量能', '年线']);
     });
-  
-    test('组内全部无数据时该组靠后', () {
-      final r = reportWith({'a': 0.6, 'b': 0.5}); // 量能/年线都无数据
+
+    test('组内全部无统计行时该组靠后', () {
+      final r = yearlyReportWith({
+        'a': stats(900, -0.50, 0.50),
+        'b': stats(900, 0.00, 0.50),
+      }); // 量能/年线都无数据
       expect(
-        ruleGroupsSortedByWinRate(groups, r).map((e) => e.key).toList(),
+        ruleGroupsSortedByExcess(groups, r).map((e) => e.key).toList(),
         ['趋势', '量能', '年线'],
       );
     });
-  
+
     test('不改写入参 maps 的顺序', () {
-      final r = reportWith({'c': 0.9, 'd': 0.3, 'a': 0.6, 'b': 0.5, 'e': 0.5});
-      ruleGroupsSortedByWinRate(groups, r);
+      final r = yearlyReportWith({
+        'a': stats(900, -0.50, 0.50),
+        'b': stats(900, 0.00, 0.50),
+        'c': stats(900, 1.00, 0.50),
+        'd': stats(900, -0.50, 0.50),
+        'e': stats(900, 0.00, 0.50),
+      });
+      ruleGroupsSortedByExcess(groups, r);
       expect(groups.keys.toList(), ['趋势', '量能', '年线']);
     });
   });
@@ -944,6 +989,64 @@ void main() {
       expect(back.p75, closeTo(s.p75!, 1e-12));
       expect(back.p90, closeTo(s.p90!, 1e-12));
       expect(back.stdDev, closeTo(s.stdDev!, 1e-12));
+    });
+  });
+
+  group('市场状态 marketState', () {
+    // 300 根每日 +0.1 的单边上行:指数末值 39.9,20 根前 37.9,
+    // ret20 = +5.28% > 3,且远在 MA120 上方 → 牛市。
+    test('backtestAll 顺带产出市场状态,单边上行判牛市', () {
+      final bars = <Bar>[];
+      var d = DateTime(2024, 1, 2);
+      for (var i = 0; i < 300; i++) {
+        bars.add(kbar(close: 10.0 + 0.1 * i, volume: 100, date: d));
+        d = d.add(const Duration(days: 1));
+      }
+      final r = backtestAll(
+        [StockData(symbol: 'T', bars: bars)],
+        [ruleById('close_above_ma20')],
+        horizons: const [5],
+      );
+      expect(r.marketState, isNotNull);
+      expect(r.marketState!.regime, MarketRegime.bull);
+      expect(r.marketState!.stockCount, 1);
+      expect(r.marketState!.asOfDate, '2024-10-27');
+      // ret20 = (39.9/37.9-1)*100 = 5.277%(20 根前是 i=279 → 37.9)
+      expect(r.marketState!.ret20, closeTo(5.277, 0.001));
+    });
+
+    test('报告 JSON 往返携带 marketState', () {
+      final bars = <Bar>[];
+      var d = DateTime(2024, 1, 2);
+      for (var i = 0; i < 300; i++) {
+        bars.add(kbar(close: 10.0 + 0.1 * i, volume: 100, date: d));
+        d = d.add(const Duration(days: 1));
+      }
+      final r = backtestAll(
+        [StockData(symbol: 'T', bars: bars)],
+        [ruleById('close_above_ma20')],
+        horizons: const [5],
+      );
+      final back = BacktestReport.fromJson(r.toJson());
+      expect(back.marketState!.regime, r.marketState!.regime);
+      expect(back.marketState!.asOfDate, r.marketState!.asOfDate);
+      expect(back.marketState!.maGap, r.marketState!.maGap);
+    });
+
+    test('旧报告没有 marketState 字段也能读(向后兼容,值为 null)', () {
+      final bars = <Bar>[];
+      var d = DateTime(2024, 1, 2);
+      for (var i = 0; i < 300; i++) {
+        bars.add(kbar(close: 10.0 + 0.1 * i, volume: 100, date: d));
+        d = d.add(const Duration(days: 1));
+      }
+      final r = backtestAll(
+        [StockData(symbol: 'T', bars: bars)],
+        [ruleById('close_above_ma20')],
+        horizons: const [5],
+      );
+      final json = r.toJson()..remove('marketState');
+      expect(BacktestReport.fromJson(json).marketState, isNull);
     });
   });
 }

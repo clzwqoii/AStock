@@ -163,13 +163,37 @@ class MobileScreening extends StatefulWidget {
   State<MobileScreening> createState() => _MobileScreeningState();
 }
 
-class _MobileScreeningState extends State<MobileScreening> {
+class _MobileScreeningState extends State<MobileScreening>
+    with WidgetsBindingObserver {
   final _selected = <String>{};
   bool _expanded = true;
   bool _loading = false;
   String? _error;
-  ({int total, List<ScreenRow> picked, String? dataDate, int blockedStale,
-      int blockedCorporateAction, int blockedSuspension})? _result;
+
+  /// 常驻选股服务：池子跨次复用（数据/报告变了自动重载），空闲后自动回收。
+  /// 测试注入 screenFn 假实现时不经过它。
+  final _screeningSvc = ScreeningService();
+
+  ScreenResult? _result;
+
+  @override
+  void initState() {
+    super.initState();
+    WidgetsBinding.instance.addObserver(this);
+  }
+
+  @override
+  void didHaveMemoryPressure() {
+    // 系统缺内存：立即归还常驻 isolate 的池子，下次选股重新加载（慢一次）。
+    _screeningSvc.releasePool();
+  }
+
+  @override
+  void dispose() {
+    WidgetsBinding.instance.removeObserver(this);
+    _screeningSvc.dispose();
+    super.dispose();
+  }
 
   void _toggle(String id) {
     setState(() {
@@ -190,7 +214,9 @@ class _MobileScreeningState extends State<MobileScreening> {
     );
     try {
       final rules = [for (final id in _selected) ruleById(id)];
-      _result = await (widget.screenFn ?? runScreening)(widget.dbPath, rules);
+      _result = widget.screenFn != null
+          ? await widget.screenFn!(widget.dbPath, rules)
+          : await _screeningSvc.screen(widget.dbPath, rules);
     } catch (e) {
       _error = e.toString();
     } finally {
@@ -338,6 +364,16 @@ class _MobileScreeningState extends State<MobileScreening> {
                 style: const TextStyle(fontSize: 11, color: AppColors.dim),
               ),
             ),
+          if (r?.timings != null)
+            Padding(
+              padding: const EdgeInsets.only(top: 8, left: 4),
+              child: Text(
+                '耗时 ${_secs(r!.timings!.totalMs)}（加载 ${_secs(r.timings!.loadMs)}'
+                ' · 筛选 ${_secs(r.timings!.screenMs)} · 汇总 ${_secs(r.timings!.assembleMs)}'
+                '${r.timings!.poolReused ? ' · 池子复用' : ''}）',
+                style: const TextStyle(fontSize: 11, color: AppColors.dim),
+              ),
+            ),
           if (msg != null && msg.isNotEmpty)
             Padding(
               padding: const EdgeInsets.only(top: 8, left: 4),
@@ -350,6 +386,8 @@ class _MobileScreeningState extends State<MobileScreening> {
       ),
     );
   }
+
+  String _secs(int ms) => ms < 1000 ? '${ms}ms' : '${(ms / 1000).toStringAsFixed(1)}s';
 
   Widget _statCard(String value, String label, {Color? color}) => Expanded(
         child: Container(
@@ -402,12 +440,12 @@ class _MobileScreeningState extends State<MobileScreening> {
                 child: SingleChildScrollView(
                   child: Column(
                     children: [
-                      // 分组按「组内最高 10 日胜率」降序，组内再按胜率降序
-                      for (final e in ruleGroupsSortedByWinRate(
+                      // 分组按「组内最高超额」降序；组内按超额降序（无报告时保持
+                      // 声明顺序）。主力不钉首位，由 _ruleRow 在名字旁挂「主力」徽标
+                      for (final e in ruleGroupsSortedByExcess(
                           ruleGroups, widget.backtestReport))
-                        for (final id in ruleIdsSortedByWinRate(
-                            e.value, widget.backtestReport,
-                            pinFirst: kMainRuleId))
+                        for (final id in ruleIdsSortedByExcess(
+                            e.value, widget.backtestReport))
                           _ruleRow(ruleById(id), e.key, accent),
                     ],
                   ),
@@ -430,11 +468,15 @@ class _MobileScreeningState extends State<MobileScreening> {
     final upDown = upDownColorsOf(context);
     return Padding(
       padding: const EdgeInsets.only(top: 2),
-      child: Text(
-        line.label,
-        style: TextStyle(
-          fontSize: 10,
-          color: line.excessPp >= 0 ? upDown.up : upDown.down,
+      child: Tooltip(
+        message: RuleStatLine.helpText,
+        margin: const EdgeInsets.symmetric(horizontal: 12),
+        child: Text(
+          line.label,
+          style: TextStyle(
+            fontSize: 10,
+            color: line.excessPp >= 0 ? upDown.up : upDown.down,
+          ),
         ),
       ),
     );
@@ -454,7 +496,27 @@ class _MobileScreeningState extends State<MobileScreening> {
               crossAxisAlignment: CrossAxisAlignment.start,
               mainAxisSize: MainAxisSize.min,
               children: [
-                Text(rule.name, style: const TextStyle(fontSize: 14)),
+                // 主力规则徽标：身份标识，不影响排序（排序只听超额的）。
+                // 名字必须 Flexible：长规则名（RSI超卖·放量(宽松)）+徽标在
+                // 390px 屏的面板行宽内放不下，硬排会 overflow。
+                Row(children: [
+                  Flexible(
+                      child: Text(rule.name,
+                          overflow: TextOverflow.ellipsis,
+                          style: const TextStyle(fontSize: 14))),
+                  if (rule.id == kMainRuleId) ...[
+                    const SizedBox(width: 4),
+                    Container(
+                      padding: const EdgeInsets.symmetric(horizontal: 4, vertical: 1),
+                      decoration: BoxDecoration(
+                        border: Border.all(color: const Color(0xFFE5E8EF)),
+                        borderRadius: BorderRadius.circular(4),
+                      ),
+                      child: const Text('主力',
+                          style: TextStyle(fontSize: 9, color: AppColors.dim)),
+                    ),
+                  ],
+                ]),
                 _statLine(rule),
               ],
             ),

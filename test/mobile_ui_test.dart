@@ -51,6 +51,17 @@ void main() {
     expect(find.textContaining('全市场'), findsOneWidget);
   });
 
+  testWidgets('系统内存压力通知可正常分发（选股页注册了 WidgetsBindingObserver）', (tester) async {
+    _phone(tester);
+    await tester.pumpWidget(stockApp());
+    await tester.pump();
+
+    // 不抛即视为通过：释放池子后页面状态不受影响，仍能正常出结果。
+    tester.binding.handleMemoryPressure();
+    await tester.pump();
+    expect(find.text('开始选股'), findsOneWidget);
+  });
+
   testWidgets('移动端选股：开规则出结果卡片', (tester) async {
     _phone(tester);
     await tester.pumpWidget(StockApp(
@@ -65,7 +76,7 @@ void main() {
               close: 18.21, change: 0.41, changePct: 2.31,
               volumeRatio: 1.8, amountWan: 8452, ma20: 18.10),
         ],
-        dataDate: '20260930', blockedStale: 0, blockedCorporateAction: 0, blockedSuspension: 0,
+        dataDate: '20260930', blockedStale: 0, blockedCorporateAction: 0, blockedSuspension: 0, timings: null,
       ),
     ));
     await tester.pump();
@@ -115,7 +126,7 @@ void main() {
               lowConfidence: true, reason: '历史平均收益为负，目标价低于买入价'),
           ),
         ],
-        dataDate: '20260930', blockedStale: 0, blockedCorporateAction: 0, blockedSuspension: 0,
+        dataDate: '20260930', blockedStale: 0, blockedCorporateAction: 0, blockedSuspension: 0, timings: null,
       ),
     ));
     await tester.pump();
@@ -162,7 +173,7 @@ void main() {
               close: 10.5, change: 0.5, changePct: 5.0,
               volumeRatio: 3.0, amountWan: 0.1, ma20: 10.025),
         ],
-        dataDate: '20260930', blockedStale: 0, blockedCorporateAction: 0, blockedSuspension: 0,
+        dataDate: '20260930', blockedStale: 0, blockedCorporateAction: 0, blockedSuspension: 0, timings: null,
       ),
     ));
     await tester.pump();
@@ -273,6 +284,61 @@ void main() {
     expect(find.textContaining('24年 6.78%'), findsNothing);
   });
 
+  testWidgets('移动端长按统计行弹出字段说明（与桌面共用 RuleStatLine.helpText）', (tester) async {
+    _phone(tester);
+    // 安卓/iOS 规则面板与桌面侧栏共用排序 helper 与统计行——这里锁住
+    // Tooltip 在触屏上的触发路径（长按），防止以后重构把移动端说明弄丢。
+    final report = backtestAll(
+      [
+        StockData(
+          symbol: 'X',
+          bars: [
+            for (var i = 0; i < 90; i++)
+              kbar(
+                close: 10.0 + 0.1 * i,
+                volume: 100,
+                date: DateTime(2024, 1, 1).add(Duration(days: i)),
+              ),
+          ],
+        ),
+      ],
+      [ruleById('close_above_ma20')],
+      horizons: const [5, 10],
+    );
+    await tester.pumpWidget(MaterialApp(
+      home: AccentScope(
+        color: AccentColor.red.color,
+        child: MobileHome(
+          dbPath: dbPath,
+          syncing: false,
+          syncMsg: null,
+          syncedDate: null,
+          accent: AccentColor.red,
+          onAccentChanged: (_) {},
+          onSyncPressed: () {},
+          configPath: '${tmp.path}/.env',
+          initialToken: '',
+          backtestReport: report,
+          backtestRunFn: (_, {reportPath}) async => report,
+          onReport: (_) {},
+        ),
+      ),
+    ));
+    await tester.pump();
+
+    final statLine = find.textContaining('24年 6.78%');
+    await tester.scrollUntilVisible(statLine, 80,
+        scrollable: find.byType(Scrollable).first);
+
+    // 主力规则名后挂「主力」徽标（不钉首位，位置由超额排序决定）
+    expect(find.text('主力'), findsOneWidget);
+
+    await tester.longPress(statLine.last);
+    await tester.pumpAndSettle();
+    expect(find.textContaining('胜率高不等于赚钱'), findsOneWidget,
+        reason: '长按统计行应弹出字段说明');
+  });
+
   testWidgets('选股完成后规则面板自动收起，结果列表不再被面板遮住', (tester) async {
     _phone(tester);
     await tester.pumpWidget(StockApp(
@@ -287,7 +353,7 @@ void main() {
               close: 18.21, change: 0.41, changePct: 2.31,
               volumeRatio: 1.8, amountWan: 8452, ma20: 18.10),
         ],
-        dataDate: '20260930', blockedStale: 0, blockedCorporateAction: 0, blockedSuspension: 0,
+        dataDate: '20260930', blockedStale: 0, blockedCorporateAction: 0, blockedSuspension: 0, timings: null,
       ),
     ));
     await tester.pump();
@@ -336,7 +402,7 @@ void main() {
           picked: const <ScreenRow>[],
           dataDate: '20260930',
           blockedStale: 0,
-          blockedCorporateAction: 0, blockedSuspension: 0,
+          blockedCorporateAction: 0, blockedSuspension: 0, timings: null,
         );
       },
     ));

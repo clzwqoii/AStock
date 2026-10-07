@@ -10,7 +10,13 @@ import 'tencent_client.dart';
 import 'tushare_client.dart';
 
 class SyncResult {
-  const SyncResult({required this.dates, required this.rows, this.latestDate});
+  const SyncResult({
+    required this.dates,
+    required this.rows,
+    this.latestDate,
+    this.earliestDate,
+    this.failedSymbols = 0,
+  });
 
   /// 本次实际拉取的交易日数。
   final int dates;
@@ -20,6 +26,14 @@ class SyncResult {
 
   /// 同步完成后库内最大交易日（`YYYYMMDD`）；空库为 null。
   final String? latestDate;
+
+  /// 同步完成后库内最早交易日（`YYYYMMDD`）。回补历史的验收锚点：
+  /// 选了 3 年而它晚于 3 年前，就是没补齐——光看行数看不出来。
+  final String? earliestDate;
+
+  /// 逐股备源拉取失败的股票只数（单只失败不中断，但必须在回执里可见，
+  /// 否则大量失败也显示"回补完成"，用户以为数据齐了）。
+  final int failedSymbols;
 }
 
 /// 回补历史的区间下界：今天往前推 [years] 个日历年（`YYYYMMDD`，闭区间）。
@@ -223,6 +237,7 @@ class SyncService {
     }
 
     var rows = 0;
+    var failedSymbols = 0;
     var lastCompleted = -1; // targets 中最后一个成功入库的下标；-1 = 一个都没成
     try {
       for (var i = 0; i < targets.length; i++) {
@@ -244,7 +259,10 @@ class SyncService {
           'tushare 日线不可用，按优先级降级：${sources.map((s) => s.$1).join(' → ')}');
       // 备源走独立限速：新浪没有 tushare 那种 50 次/分配额，逐股请求
       // 继承回补的 1.2s 间隔会把全程拖到 3 小时以上。
-      rows += await _fillPerStock(remaining, sources, onProgress, backupRateDelay);
+      final (backupRows, failed) =
+          await _fillPerStock(remaining, sources, onProgress, backupRateDelay);
+      rows += backupRows;
+      failedSymbols = failed;
       if (!calendarDegraded) {
         rows += await _retryMissingDates(remaining, onProgress, rateDelay);
       }
@@ -254,7 +272,11 @@ class SyncService {
       await _backfillNames(onProgress);
     }
     return SyncResult(
-        dates: targets.length, rows: rows, latestDate: _repo.maxTradeDate());
+        dates: targets.length,
+        rows: rows,
+        latestDate: _repo.maxTradeDate(),
+        earliestDate: _repo.minTradeDate(),
+        failedSymbols: failedSymbols);
   }
 
   bool get _hasPerStockSources => eastmoney != null || sina != null;
@@ -296,8 +318,10 @@ class SyncService {
           ];
 
   /// 逐股补数：遍历本地已有股票（空库时向东财要名单），
-  /// 按优先级尝试各源——某源拉到数据即采用，无数据自动切下一源。单只失败跳过。
-  Future<int> _fillPerStock(
+  /// 按优先级尝试各源——某源拉到数据即采用，无数据自动切下一源。单只失败跳过
+  /// 但计数——返回值是 (入库行数, 失败只数)，失败只数随回执上报，
+  /// 否则大面积失败照样显示"回补完成"，用户以为数据齐了。
+  Future<(int, int)> _fillPerStock(
     List<String> targets,
     List<(String, Future<List<DailyRow>> Function(String symbol))> sources,
     void Function(String msg)? onProgress,
@@ -311,10 +335,14 @@ class SyncService {
     }
     final minD = targets.first;
     final maxD = targets.last;
-    var rows = 0;
+    // 降级链里每个源都会对同一批票再试一次，失败只数取各源的**最大值**：
+    // 任一源的失败都代表"这些票这次没补上"。只记最后一个源的话，
+    // 前面源全挂、最后源返回空数组时会报 0 只失败，用户以为数据齐了。
+    var worstFailed = 0;
     for (final (label, fetch) in sources) {
       var done = 0;
-      rows = 0;
+      var failed = 0;
+      var rows = 0;
       // 攒批再入库：逐股提交意味着每只股票一次 BEGIN/COMMIT（一次 fsync），
       // 全市场 5672 次。同样的行改成每 200 只一批，实测快约 3 倍
       // （0.35s → 0.11s）。绝对收益不大（这条路径的主成本是每只 350ms 的
@@ -338,22 +366,28 @@ class SyncService {
           rows += picked.length;
           if (batch.length >= 200) flush();
         } catch (_) {
-          // 单只失败不影响整体（次日同步会按水位线自然补齐）。
+          // 单只失败不影响整体（次日同步会按水位线自然补齐），但要计数上报。
+          failed++;
         }
         done++;
         // 每 50 只报一次：200 只攒一条消息时，备源阶段会静默 5 分钟以上，
         // 界面看起来像卡死。
-        if (done % 50 == 0) onProgress?.call('$label 备源 $done/${symbols.length}');
+        if (done % 50 == 0) {
+          onProgress?.call(
+              '$label 备源 $done/${symbols.length}${failed > 0 ? '（$failed 只失败）' : ''}');
+        }
         if (rateDelay > Duration.zero) await Future.delayed(rateDelay);
       }
       flush(); // 收尾：最后不足一批的也要落库
       if (rows > 0) {
-        onProgress?.call('$label 备源完成：$done 只，$rows 行');
-        return rows;
+        onProgress?.call(
+            '$label 备源完成：$done 只，$rows 行${failed > 0 ? '，$failed 只失败' : ''}');
+        return (rows, failed);
       }
+      if (failed > worstFailed) worstFailed = failed;
       stderr.writeln('$label 备源无数据，降级下一源');
     }
-    return rows;
+    return (0, worstFailed);
   }
 
   /// 名称回填（逐股）：只补 stocks 表里还没有名称的代码；

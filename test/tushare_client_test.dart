@@ -75,6 +75,43 @@ void main() {
     expect(rows.last.tsCode, '000004.SZ');
   });
 
+  // 5561 = 2026-10-07 本地库与 tushare 真机（limit=6000）实测的最大单日行数，
+  // 库里全市场每天都有 5200+ 行；而限速只加在「天」与「天」之间（页间不等待），
+  // 默认单页装不下就会天天翻页、顶破 daily 50 次/分的配额。
+  test('默认单页一次装下全市场单日（5561 行不翻页）', () async {
+    final total = List.generate(
+        5561,
+        (i) => ['${600000 + i}.SH', '20260930', 1.0, 2.0, 0.5, 1.5, 100.0, 50.0]);
+    var calls = 0;
+    final client = TushareClient(
+      token: 'tok',
+      http: MockClient((req) async {
+        calls++;
+        final body = jsonDecode(req.body) as Map<String, dynamic>;
+        final params = body['params'] as Map;
+        final page = total
+            .skip(params['offset'] as int)
+            .take(params['limit'] as int)
+            .toList();
+        return http.Response(
+          jsonEncode({
+            'code': 0,
+            'data': {
+              'fields': ['ts_code', 'trade_date', 'open', 'high', 'low', 'close', 'vol', 'amount'],
+              'items': page,
+            },
+          }),
+          200,
+        );
+      }),
+    );
+
+    final rows = await client.daily(tradeDate: '20260930');
+
+    expect(calls, 1, reason: '默认单页容量要一次装下全市场单日，翻页会顶破 50 次/分配额');
+    expect(rows, hasLength(5561), reason: '不能因不翻页而截断');
+  });
+
   test('请求超时抛出 TimeoutException（避免界面永远转圈）', () async {
     final client = TushareClient(
       token: 'tok',

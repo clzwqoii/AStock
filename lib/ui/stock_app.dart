@@ -252,8 +252,16 @@ class _StockAppState extends State<StockApp> {
     try {
       final r = await task();
       if (!mounted) return;
+      // 库内最早日期是回补的验收锚点：选了 3 年而最早日期晚于 3 年前，
+      // 光看行数看不出来。备源单只失败同理——大面积失败也显示"完成"。
+      final receipt = StringBuffer('$doneLabel：新增 ${r.dates} 个交易日、'
+          '${r.rows} 行（数据齐全时为 0）');
+      if (r.earliestDate != null) receipt.write('，库内最早 ${r.earliestDate}');
+      if (r.failedSymbols > 0) {
+        receipt.write('，${r.failedSymbols} 只备源拉取失败，建议网络稳定后重跑');
+      }
       setState(() {
-        _syncMsg = '$doneLabel：新增 ${r.dates} 个交易日、${r.rows} 行（数据齐全时为 0）';
+        _syncMsg = receipt.toString();
         _syncedDate = r.latestDate ?? _syncedDate;
       });
       // 有新增数据就重算回测报告，否则选股页规则列表上的胜率还是上周的；

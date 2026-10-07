@@ -82,6 +82,23 @@ class BarRepository {
     return r.first.values[0] as String?;
   }
 
+  /// 库中最早的交易日（回补历史覆盖下界，回执用它验收是否补到位）；空库返回 null。
+  String? minTradeDate() {
+    final r = _db.select('SELECT MIN(trade_date) FROM daily_bars');
+    return r.first.values[0] as String?;
+  }
+
+  /// 选股池失效指纹：水位 + 最大 rowid。选股池缓存用它判断要不要重读全库。
+  ///
+  /// 只有水位不够：回补历史（[SyncService] 的区间模式）插入的是**早于水位**
+  /// 的行，水位不动但池子内容变了。MAX(rowid) 补这个洞——daily_bars 是普通
+  /// rowid 表，INSERT OR REPLACE 也换 rowid，任何写入都逃不过它；两条 MAX
+  /// 都走索引/builtin 优化，O(1)。
+  String poolFingerprint() {
+    final r = _db.select('SELECT MAX(trade_date), MAX(rowid) FROM daily_bars');
+    return '${r.first.values[0]}|${r.first.values[1]}';
+  }
+
   /// 日线总行数（进度观感用，CLI 打印同步前后行数）。
   int barCount() {
     final r = _db.select('SELECT COUNT(*) AS n FROM daily_bars');

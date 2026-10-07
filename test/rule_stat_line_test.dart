@@ -321,4 +321,14 @@ void main() {
 
     expect(ruleStatLine(r, 'a', 10)!.concentrated, isFalse);
   });
+
+  test('字段说明文案把每个字段都解释到', () {
+    // 悬停/长按统计行弹出的说明：用户看得到红绿颜色和一串数字，
+    // 但字段口径（超额是什么、基准是什么、样本少意味着什么）无处可查时，
+    // 就只能按"胜率高=好"去理解——这正是排序口径要纠正的误读。
+    const t = RuleStatLine.helpText;
+    for (final kw in ['10 日', '超额', '胜率', 'PF', '基准', '信号', '样本少', '红', '绿']) {
+      expect(t, contains(kw), reason: 'helpText 应解释「$kw」：$t');
+    }
+  });
 }

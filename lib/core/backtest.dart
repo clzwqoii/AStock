@@ -8,11 +8,16 @@ library;
 import 'dart:math' as math;
 
 import 'market.dart';
+import 'market_state.dart';
 import 'models.dart';
 import 'rules.dart';
 
 /// 回测报告覆盖的持有期（天）。页面展示与 CLI 默认都用这套。
 const kDefaultHorizons = [5, 10, 20];
+
+/// 「最近半年」窗口的交易日数。App（runBacktest）、CLI（report_all --archive）、
+/// 探针三处共用一个常量——台账里的连红计数要求每期快照的窗口口径一致。
+const kRecentWindowTradingDays = 120;
 
 /// 报告生成时刻（供落盘与"是否过期"判断用）。
 typedef BacktestClock = String Function();
@@ -490,6 +495,9 @@ class BacktestReport {
     this.yearly = const {},
     this.yearlyBaseline = const {},
     this.signalProfile = const {},
+    this.marketState,
+    this.recent = const {},
+    this.recentBaseline = const {},
   });
 
   /// 报告生成时间（ISO8601 字符串）。
@@ -517,6 +525,17 @@ class BacktestReport {
   /// 信号集中度：规则 id → 持有期 → [RuleProfile]。
   /// 缺失键（某持有期无信号）表示 profile 为空，用 [RuleProfile.empty]。
   final Map<String, Map<int, RuleProfile>> signalProfile;
+
+  /// 市场状态（等权口径自算，见 [assessMarketState]）。
+  /// 旧版报告无此字段，读回为 null，UI 整块不渲染（重新回测即出现）。
+  final MarketState? marketState;
+
+  /// 最近 N 交易日窗口（口径见 [backtestAll] 的 `recentWindowTradingDays`）：
+  /// 规则 id → 持有期 → 切片。未启用窗口时为空。
+  final Map<String, Map<int, RecentSlice>> recent;
+
+  /// 最近窗口的无条件基准：持有期 → 切片。
+  final Map<int, RecentSlice> recentBaseline;
 
   /// 某规则某持有期的集中度；无信号时返回 [RuleProfile.empty]。
   RuleProfile profileOf(String ruleId, int horizon) =>
@@ -560,6 +579,16 @@ class BacktestReport {
               for (final e in r.value.entries) '${e.key}': e.value.toJson(),
             },
         },
+        if (marketState != null) 'marketState': marketState!.toJson(),
+        'recent': {
+          for (final r in recent.entries)
+            r.key: {
+              for (final e in r.value.entries) '${e.key}': e.value.toJson(),
+            },
+        },
+        'recentBaseline': {
+          for (final e in recentBaseline.entries) '${e.key}': e.value.toJson(),
+        },
       };
 
   factory BacktestReport.fromJson(Map<String, dynamic> json) {
@@ -587,8 +616,53 @@ class BacktestReport {
               int.parse(e.key): RuleProfile.fromJson(e.value),
           },
       },
+      marketState: json['marketState'] == null
+          ? null
+          : MarketState.fromJson(json['marketState'] as Map<String, dynamic>),
+      recent: {
+        for (final r in (json['recent'] as Map<String, dynamic>?)?.entries ??
+            const <String, dynamic>{}.entries)
+          r.key: {
+            for (final e in (r.value as Map<String, dynamic>).entries)
+              int.parse(e.key): RecentSlice.fromJson(e.value),
+          },
+      },
+      recentBaseline: {
+        for (final e in (json['recentBaseline'] as Map<String, dynamic>?)?.entries ??
+            const <String, dynamic>{}.entries)
+          int.parse(e.key): RecentSlice.fromJson(e.value),
+      },
     );
   }
+}
+
+/// 最近窗口切片：窗口内统计量 + 按日平均收益（给按天重抽的 CI 用）。
+class RecentSlice {
+  const RecentSlice({required this.stats, required this.dayMeanReturn});
+
+  final BacktestStats stats;
+
+  // 常用统计量转发，调用方免一层 .stats。
+  int get count => stats.count;
+  double get winRate => stats.winRate;
+  double get avgReturn => stats.avgReturn;
+
+  /// 交易日（YYYYMMDD）→ 该日全部样本的平均收益（%）。
+  /// 规则切片只含有信号的日子；与基准切片取交集才是 CI 的重抽池。
+  final Map<int, double> dayMeanReturn;
+
+  Map<String, dynamic> toJson() => {
+        'stats': stats.toJson(),
+        'dayMean': {for (final e in dayMeanReturn.entries) '${e.key}': e.value},
+      };
+
+  factory RecentSlice.fromJson(Map<String, dynamic> json) => RecentSlice(
+        stats: BacktestStats.fromJson(json['stats'] as Map<String, dynamic>),
+        dayMeanReturn: {
+          for (final e in (json['dayMean'] as Map<String, dynamic>? ?? const {}).entries)
+            int.parse(e.key): (e.value as num).toDouble(),
+        },
+      );
 }
 
 /// 一遍扫描算完 [rules] × [horizons] 的全部信号与基准。
@@ -608,6 +682,7 @@ BacktestReport backtestAll(
   required List<int> horizons,
   int corporateActionLookbackBars = kCorporateActionLookbackBars,
   int suspensionLookbackBars = kSuspensionLookbackBars,
+  int? recentWindowTradingDays,
 }) {
   if (horizons.isEmpty) throw ArgumentError('horizons 不能为空');
   final hs = [...horizons]..sort();
@@ -636,6 +711,29 @@ BacktestReport backtestAll(
 
   // 停牌洞要用全市场交易日历判（节假日全市场一起休，只有停牌是个股缺）。
   final calendar = tradingCalendar(stocks);
+
+  // 最近窗口：截止日按**交易日**数（日历日差会把春节/国庆算进去）。
+  // 窗口内可评估日与全样本共用同一套护栏，逐日双写进两套桶。
+  final recentCutoff = recentWindowTradingDays == null || recentWindowTradingDays <= 0
+      ? null
+      : _recentCutoffDate(calendar, recentWindowTradingDays);
+  final recentSig = <String, Map<int, Tape>>{
+    if (recentCutoff != null)
+      for (final r in rules) r.id: {for (final h in hs) h: Tape()},
+  };
+  final recentBase = {
+    if (recentCutoff != null) for (final h in hs) h: Tape(),
+  };
+  // 按日累加器：dayKey → [sum, count]。只存窗口段,内存增量约窗口占比。
+  final recentSigDays = <String, Map<int, Map<int, List<double>>>>{
+    if (recentCutoff != null)
+      for (final r in rules) r.id: {for (final h in hs) h: <int, List<double>>{}},
+  };
+  final recentBaseDays = {
+    if (recentCutoff != null)
+      for (final h in hs) h: <int, List<double>>{},
+  };
+
   for (final stock in stocks) {
     final bars = stock.bars;
     // 可评估日统一取最大持有期的范围，保证三个持有期覆盖同一批交易日、彼此可比。
@@ -659,9 +757,20 @@ BacktestReport backtestAll(
       final year = bars[t].date.year;
       // 前瞻收益每个持有期只算一次：原来基准桶与信号桶各算一遍。
       final fwdByH = [for (final h in hs) (bars[t + h].close / from - 1) * 100];
+      final inRecent = recentCutoff != null && !bars[t].date.isBefore(recentCutoff);
+      final dayKey = inRecent
+          ? bars[t].date.year * 10000 + bars[t].date.month * 100 + bars[t].date.day
+          : 0;
       for (var i = 0; i < baseFlat.length; i++) {
         // 基准 tape 不需要 profile()，不记 monthKey（免去千万次 map 更新）。
         baseFlat[i].add(fwdByH[i], year);
+        if (inRecent) {
+          recentBase[hs[i]]!.add(fwdByH[i], year);
+          final acc =
+              recentBaseDays[hs[i]]!.putIfAbsent(dayKey, () => [0.0, 0.0]);
+          acc[0] += fwdByH[i];
+          acc[1] += 1;
+        }
       }
       // 逐条规则判定：绝大多数规则在标量条件就返回 false，不碰 Tape。
       final snap = series.at(t);
@@ -672,6 +781,13 @@ BacktestReport backtestAll(
           mk ??= '${bars[t].date.year}-${bars[t].date.month.toString().padLeft(2, '0')}';
           for (var i = 0; i < hs.length; i++) {
             sigFlat[k + i].add(fwdByH[i], year, monthKey: mk);
+            if (inRecent) {
+              recentSig[r.id]![hs[i]]!.add(fwdByH[i], year);
+              final acc = recentSigDays[r.id]![hs[i]]!
+                  .putIfAbsent(dayKey, () => [0.0, 0.0]);
+              acc[0] += fwdByH[i];
+              acc[1] += 1;
+            }
           }
         }
         k += hs.length;
@@ -730,6 +846,78 @@ BacktestReport backtestAll(
       for (final r in rules)
         r.id: {for (final h in hs) h: sigTapes[r.id]![h]!.profile()},
     },
+    // 市场状态仪表：与回测基准同源的等权口径。顺带算比调用方再扫一遍
+    // 全市场便宜（可评估日窗口已在此确定，口径天然一致）。
+    marketState: assessMarketState(stocks),
+    recent: recentCutoff == null
+        ? const {}
+        : {
+            for (final r in rules)
+              r.id: {
+                for (final h in hs)
+                  h: RecentSlice(
+                    stats: recentSig[r.id]![h]!.overall(),
+                    dayMeanReturn: _dayMeans(recentSigDays[r.id]![h]!),
+                  ),
+              },
+          },
+    recentBaseline: recentCutoff == null
+        ? const {}
+        : {
+            for (final h in hs)
+              h: RecentSlice(
+                stats: recentBase[h]!.overall(),
+                dayMeanReturn: _dayMeans(recentBaseDays[h]!),
+              ),
+          },
+  );
+}
+
+/// 窗口起始日：按交易日序取倒数第 [windowDays] 个；交易日不足时取最早一天
+/// （等于全部日子进窗口）。
+DateTime? _recentCutoffDate(Set<DateTime> calendar, int windowDays) {
+  if (calendar.isEmpty) return null;
+  final days = calendar.toList()..sort();
+  return days.length > windowDays ? days[days.length - windowDays] : days.first;
+}
+
+Map<int, double> _dayMeans(Map<int, List<double>> acc) =>
+    {for (final e in acc.entries) e.key: e.value[0] / e.value[1]};
+
+/// 按天重抽的窗口超额 CI：重抽单位是**交易日**（同一天内样本共享行情、
+/// 不独立，逐样本重抽会把 CI 虚窄——全历史才 171 个独立交易日）。
+///
+/// 池 = 规则与基准日均值键的交集（规则无信号的日子不进池，不算 0 超额）。
+/// 返回点估计（日均超额，pp）与 bootstrap 均值的 95% 双侧 CI；种子固定可复现。
+({double excess, double ciLow, double ciHigh}) recentExcessCI({
+  required Map<int, double> ruleDayMean,
+  required Map<int, double> baseDayMean,
+  int rounds = 200,
+  int? seed,
+}) {
+  final days =
+      ruleDayMean.keys.where(baseDayMean.containsKey).toList()..sort();
+  if (days.isEmpty) return (excess: 0.0, ciLow: 0.0, ciHigh: 0.0);
+  final excessByDay = [for (final d in days) ruleDayMean[d]! - baseDayMean[d]!];
+  final mean = excessByDay.reduce((a, b) => a + b) / excessByDay.length;
+  if (days.length == 1 || rounds <= 1) {
+    return (excess: mean, ciLow: mean, ciHigh: mean);
+  }
+  final rng = math.Random(seed);
+  final n = excessByDay.length;
+  final boots = List<double>.filled(rounds, 0);
+  for (var r = 0; r < rounds; r++) {
+    var s = 0.0;
+    for (var i = 0; i < n; i++) {
+      s += excessByDay[rng.nextInt(n)];
+    }
+    boots[r] = s / n;
+  }
+  boots.sort();
+  return (
+    excess: mean,
+    ciLow: boots[((0.025 * (rounds - 1)).round())],
+    ciHigh: boots[((0.975 * (rounds - 1)).round())],
   );
 }
 
@@ -956,49 +1144,68 @@ class Tape {
   }
 }
 
-/// 按回测报告的 10 日胜率给规则 id 降序排序。
+/// 排序键 tier：0=最近样本够年份的统计、1=样本少（标注过的不硬数字）、
+/// 2=无统计行。第二位是该年相对基准的超额（pp）；tier 2 时无意义。
+(int, double) _excessSortKey(BacktestReport report, String id) {
+  final s = ruleStatLine(report, id, 10);
+  return switch (s) {
+    null => (2, 0.0),
+    _ => (s.smallSample ? 1 : 0, s.excessPp),
+  };
+}
+
+/// 按回测报告的**超额收益**（[ruleStatLine] 同口径：最近样本够年份相对同年基准）
+/// 给规则 id 降序排序——与统计行的红绿色一致，红的排前面。**排序完全决定顺序**：
+/// 主力规则（[kMainRuleId]）不钉首位，由 UI 在名字旁挂「主力」徽标标识
+/// （2026-10-07 用户拍板：排序必须与回测结果对应，钉首位会让它再次矛盾）。
 ///
-/// 刻意在**显示时**算而不是把顺序硬编码进 `builtInRules`：胜率是数据相关的，
-/// 写进源码后一刷新报告就过期。无报告、或某规则没有回测数据（胜率按 −1 处理）时，
-/// 该规则排在后面并保持 [ids] 里的原始顺序，避免每次刷新排序抖动。
-List<String> ruleIdsSortedByWinRate(List<String> ids, BacktestReport? report,
-    {String? pinFirst}) {
+/// 刻意在**显示时**算而不是把顺序硬编码进 `builtInRules`：超额是数据相关的，
+/// 写进源码后一刷新报告就过期。无报告、或某规则没有统计行时，该规则排在
+/// 样本少规则的后面并保持 [ids] 里的原始顺序，避免每次刷新排序抖动。
+/// 样本少（[kRuleStatLineMinSamples] 以下）的规则再排在其后：小样本的
+/// 均收益是噪声，不能靠一个 +5pp 的单月数字跳到样本够的规则前面。
+List<String> ruleIdsSortedByExcess(List<String> ids, BacktestReport? report) {
   final ordered = [...ids];
   if (report != null) {
-    double winOf(String id) => report.result(id, 10)?.winRate ?? -1;
+    final keys = {for (final id in ids) id: _excessSortKey(report, id)};
     ordered.sort((a, b) {
-      final byWin = winOf(b).compareTo(winOf(a));
-      return byWin != 0 ? byWin : ids.indexOf(a).compareTo(ids.indexOf(b));
+      final ka = keys[a]!, kb = keys[b]!;
+      final byTier = ka.$1.compareTo(kb.$1);
+      if (byTier != 0) return byTier;
+      final byExcess = kb.$2.compareTo(ka.$2);
+      return byExcess != 0 ? byExcess : ids.indexOf(a).compareTo(ids.indexOf(b));
     });
-  }
-  // 钉住首位：胜率排序会把"全样本胜率最高"的规则排第一，但那不等于最该用。
-  // 宽松版 RSI超卖·放量 全样本胜率（79.9%）低于严格版（86.4%），可它在
-  // 下行 / 中性 / 上行三种市况下都有足够样本量的正超额，严格版的胜率
-  // 却有 73.7% 的信号来自 2024-02 单月。所以这里显式指定主力，而不是
-  // 让一个会被单月绑架的指标替我们决定。
-  if (pinFirst != null && ordered.remove(pinFirst)) {
-    ordered.insert(0, pinFirst);
   }
   return ordered;
 }
 
-/// 按「组内最高 10 日胜率」给规则分组降序排序。
+/// 按「组内最高超额」给规则分组降序排序（口径同 [ruleIdsSortedByExcess]）。
 ///
 /// 只排序组内规则还不够——最好的规则可能埋在第三个分组里。把分组也按
-/// 组内最高胜率排，包含最强规则的分组就会排到最前。
+/// 组内最好规则的（tier, 超额）排，包含最强规则的分组就会排到最前。
 /// 无报告时保持 [groups] 的声明顺序。
-List<MapEntry<String, List<String>>> ruleGroupsSortedByWinRate(
+List<MapEntry<String, List<String>>> ruleGroupsSortedByExcess(
   Map<String, List<String>> groups,
   BacktestReport? report,
 ) {
   final order = {for (var i = 0; i < groups.length; i++) groups.keys.elementAt(i): i};
   final entries = groups.entries.toList();
   if (report == null) return entries;
-  double topOf(List<String> ids) =>
-      ids.map((id) => report.result(id, 10)?.winRate ?? -1).reduce(math.max);
+  (int, double) bestOf(List<String> ids) {
+    var best = (2, 0.0);
+    for (final id in ids) {
+      final k = _excessSortKey(report, id);
+      if (k.$1 < best.$1 || (k.$1 == best.$1 && k.$2 > best.$2)) best = k;
+    }
+    return best;
+  }
+
   entries.sort((a, b) {
-    final byTop = topOf(b.value).compareTo(topOf(a.value));
-    return byTop != 0 ? byTop : order[a.key]!.compareTo(order[b.key]!);
+    final ka = bestOf(a.value), kb = bestOf(b.value);
+    final byTier = ka.$1.compareTo(kb.$1);
+    if (byTier != 0) return byTier;
+    final byExcess = kb.$2.compareTo(ka.$2);
+    return byExcess != 0 ? byExcess : order[a.key]!.compareTo(order[b.key]!);
   });
   return entries;
 }
@@ -1024,8 +1231,9 @@ List<MapEntry<String, List<String>>> ruleGroupsSortedByWinRate(
 /// （rsi_oversold_volume / rsi_oversold_volume_loose / rsi_oversold /
 /// ma60_breakout_pullback）。
 ///
-/// 注：规则列表的**排序**仍用胜率（`ruleIdsSortedByWinRate`），那是纯排序选择，
-/// 不涉及"能不能用"的判断，两者不必一致。
+/// 注：规则列表的**排序**也用超额（`ruleIdsSortedByExcess`，与统计行红绿
+/// 同口径），但那仍是纯排序选择，不涉及"能不能用"的判断，与这里的
+/// 稳健判定不必一致。
 bool isRuleYearlyRobust(BacktestReport report, String ruleId, {int horizon = 10}) {
   for (final y in report.yearly.keys) {
     final st = report.yearly[y]?[ruleId]?[horizon];
@@ -1164,6 +1372,21 @@ class RuleStatLine {
   static String _pct(double v) => '${v.toStringAsFixed(2)}%';
 
   static String _pp(double v) => '${v >= 0 ? '+' : ''}${v.toStringAsFixed(2)}pp';
+
+  /// 悬停/长按统计行时弹出的字段说明。放在数据层而不是 UI：桌面侧栏与
+  /// 移动规则面板画的是同一行数字，说明文案只写一份，两处 Tooltip 共用。
+  static const String helpText =
+      '回测统计，10 日持有口径。红 = 正超额（跑赢基准），绿 = 负超额。'
+      '26年：统计取最近一个样本够的年份；'
+      '首个百分比：该年信号的平均 10 日收益；'
+      '超额：平均收益减同年基准；'
+      '胜率：信号后 10 日上涨的占比；'
+      'PF：盈亏比（赚的总额 ÷ 亏的总额）；'
+      '基准：同年随便买一只的平均收益；'
+      '信号：样本数。'
+      '标月份 = 信号集中在那个月，高胜率可能是行情带来的；'
+      '样本少 = 样本不足，数字不够硬。'
+      '胜率高不等于赚钱，期望为正（超额 > 0 且 PF > 1）才保得住本金。';
 }
 
 /// 取某规则该持有期的统计行数据；无年度数据或当年基准缺失时返回 null。
@@ -1220,6 +1443,39 @@ RuleStatLine? ruleStatLine(
 /// 目的：现在所有结论都是**样本内**的。真正的考验是未来，而唯一的验证手段是
 /// 持续记录、隔一段时间重跑、看胜率有没有漂移。这份快照把一个月的报告固化下来，
 /// `tool/report_all.dart --archive` 每次重跑都会追加一条。
+/// 某规则某一期的窗口超额记录（台账快照用，判定"连续红"）。
+class RecentExcessRec {
+  const RecentExcessRec({
+    required this.excess,
+    required this.ciLow,
+    required this.ciHigh,
+    required this.days,
+  });
+
+  /// 日均超额（pp）与按天重抽 95% CI；[days] = 独立信号日数。
+  final double excess;
+  final double ciLow;
+  final double ciHigh;
+  final int days;
+
+  /// 该期是否"红"（显著为正）。样本不足一律不算红。
+  bool get isRed => days >= kMinSignificantDays && ciLow > 0;
+
+  Map<String, dynamic> toJson() =>
+      {'excess': excess, 'lo': ciLow, 'hi': ciHigh, 'days': days};
+
+  factory RecentExcessRec.fromJson(Map<String, dynamic> json) => RecentExcessRec(
+        excess: (json['excess'] as num).toDouble(),
+        ciLow: (json['lo'] as num).toDouble(),
+        ciHigh: (json['hi'] as num).toDouble(),
+        days: json['days'] as int,
+      );
+}
+
+/// 独立信号日少于此值的窗口超额不参与显著性解读（阈值来自探针实证:
+/// 窗口 120 交易日有约 100 个独立基准日,信号日更少的规则 CI 全程跨 0）。
+const kMinSignificantDays = 20;
+
 class BacktestSnapshot {
   const BacktestSnapshot({
     required this.generatedAt,
@@ -1227,6 +1483,7 @@ class BacktestSnapshot {
     required this.stockCount,
     required this.evaluableDays,
     required this.ruleWinRate,
+    this.recentExcess,
   });
 
   /// 报告生成时间（ISO8601）。
@@ -1243,12 +1500,20 @@ class BacktestSnapshot {
   /// 各规则 10 日胜率：规则 id → 胜率（0~1）。
   final Map<String, double> ruleWinRate;
 
+  /// 各规则窗口超额：规则 id → 记录。旧快照无此字段（null），连红链从
+  /// 第一条带数据的快照起算。仅当报告带 recent 数据且基准切片非空时才有。
+  final Map<String, RecentExcessRec>? recentExcess;
+
   Map<String, dynamic> toJson() => {
         'generatedAt': generatedAt,
         'dataDate': dataDate,
         'stockCount': stockCount,
         'evaluableDays': evaluableDays,
         'ruleWinRate': ruleWinRate,
+        if (recentExcess != null && recentExcess!.isNotEmpty)
+          'recentExcess': {
+            for (final e in recentExcess!.entries) e.key: e.value.toJson(),
+          },
       };
 
   factory BacktestSnapshot.fromJson(Map<String, dynamic> json) => BacktestSnapshot(
@@ -1260,21 +1525,47 @@ class BacktestSnapshot {
           for (final e in (json['ruleWinRate'] as Map<String, dynamic>).entries)
             e.key: (e.value as num).toDouble(),
         },
+        recentExcess: (json['recentExcess'] as Map<String, dynamic>?)
+            ?.map((k, v) => MapEntry(k, RecentExcessRec.fromJson(v as Map<String, dynamic>))),
       );
 
   /// 从一份完整报告 + 数据截止日提炼快照。
-  factory BacktestSnapshot.of(BacktestReport r, String dataDate, {int horizon = 10}) =>
-      BacktestSnapshot(
-        generatedAt: r.generatedAt,
-        dataDate: dataDate,
-        stockCount: r.stockCount,
-        evaluableDays: r.baseline[horizon]?.count ?? 0,
-        ruleWinRate: {
-          for (final e in r.results.entries)
-            if (e.value[horizon] != null && e.value[horizon]!.count > 0)
-              e.key: e.value[horizon]!.winRate,
-        },
-      );
+  ///
+  /// 报告带 recent 数据时顺带记录每条规则的窗口超额（固定种子，可复现）；
+  /// 全部规则都没有窗口记录时该字段为 null。
+  factory BacktestSnapshot.of(BacktestReport r, String dataDate, {int horizon = 10}) {
+    final baseSlice = r.recentBaseline[horizon];
+    Map<String, RecentExcessRec>? recs;
+    if (baseSlice != null && baseSlice.dayMeanReturn.isNotEmpty) {
+      for (final e in r.recent.entries) {
+        final slice = e.value[horizon];
+        if (slice == null || slice.dayMeanReturn.isEmpty) continue;
+        final ci = recentExcessCI(
+          ruleDayMean: slice.dayMeanReturn,
+          baseDayMean: baseSlice.dayMeanReturn,
+          seed: 7,
+        );
+        (recs ??= {})[e.key] = RecentExcessRec(
+          excess: ci.excess,
+          ciLow: ci.ciLow,
+          ciHigh: ci.ciHigh,
+          days: slice.dayMeanReturn.length,
+        );
+      }
+    }
+    return BacktestSnapshot(
+      generatedAt: r.generatedAt,
+      dataDate: dataDate,
+      stockCount: r.stockCount,
+      evaluableDays: r.baseline[horizon]?.count ?? 0,
+      ruleWinRate: {
+        for (final e in r.results.entries)
+          if (e.value[horizon] != null && e.value[horizon]!.count > 0)
+            e.key: e.value[horizon]!.winRate,
+      },
+      recentExcess: recs,
+    );
+  }
 }
 
 /// 月度跟踪台账：按时间顺序排列的报告快照。
@@ -1284,6 +1575,26 @@ class BacktestHistory {
   final List<BacktestSnapshot> snapshots;
 
   bool get isEmpty => snapshots.isEmpty;
+
+  /// 追加/替换一期：同一数据截止日只保留最新一条（当天重跑不算新窗口），
+  /// 结果按 dataDate 升序。App（runBacktest）与 CLI（report_all --archive）共用。
+  BacktestHistory upsert(BacktestSnapshot snap) => BacktestHistory([
+        ...snapshots.where((s) => s.dataDate != snap.dataDate),
+        snap,
+      ]..sort((a, b) => a.dataDate.compareTo(b.dataDate)));
+
+  /// [ruleId] 的连续红期数：从最新一期往回数，遇到不红（灰/绿）、样本不足、
+  /// 或该期没有窗口记录（旧快照/该期无信号）即断。"连续两个窗口都红" = 返回 ≥2。
+  int consecutiveReds(String ruleId, {int minDays = kMinSignificantDays}) {
+    final ordered = [...snapshots]..sort((a, b) => a.dataDate.compareTo(b.dataDate));
+    var n = 0;
+    for (final s in ordered.reversed) {
+      final rec = s.recentExcess?[ruleId];
+      if (rec == null || rec.days < minDays || rec.ciLow <= 0) break;
+      n++;
+    }
+    return n;
+  }
 
   /// 某条规则的胜率随时间变化（按数据截止日升序）。
   /// 只返回至少出现两次的规则——只出现一次的无从判断漂移。

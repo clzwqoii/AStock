@@ -8,6 +8,7 @@ library;
 import 'package:flutter/material.dart';
 import 'package:stock/app_logic.dart';
 import 'package:stock/core/backtest.dart';
+import 'package:stock/core/market_state.dart';
 import 'package:stock/core/rules.dart';
 import 'package:stock/data/report_store.dart';
 import 'package:stock/ui/colors.dart';
@@ -32,6 +33,7 @@ class BacktestPage extends StatefulWidget {
     this.onBack,
     this.initialReport,
     this.onReport,
+    this.historyPath,
   });
 
   final String dbPath;
@@ -51,6 +53,9 @@ class BacktestPage extends StatefulWidget {
   /// 报告更新回调：重算成功后通知外壳，让选股页的规则列表同步刷新胜率。
   final ValueChanged<BacktestReport>? onReport;
 
+  /// 台账 JSON 路径；null 时取报告同目录的 backtest-history.json。
+  final String? historyPath;
+
   @override
   State<BacktestPage> createState() => _BacktestPageState();
 }
@@ -68,13 +73,27 @@ class _BacktestPageState extends State<BacktestPage> {
   /// 只看「跨年稳健」的规则（每年胜率都跑赢该年基准）。
   bool _robustOnly = false;
 
+  /// 「最近半年」窗口口径：表格数据切换到报告的 recent 切片，
+  /// 并追加按天重抽的日均超额列。与全期口径并存，默认全期。
+  bool _recentMode = false;
+
+  /// 月度台账：连红计数的数据源。缺失/损坏为 null。
+  BacktestHistory? _history;
+
   @override
   void initState() {
     super.initState();
     _store = ReportStore(widget.reportPath ?? reportPathFor(widget.dbPath));
     // 外壳已读过缓存就复用（避免两页各读一次 IO）；否则自己读。
     _report = widget.initialReport ?? _store.load();
+    _history = _loadHistory();
   }
+
+  /// 台账路径：注入优先，否则取报告同目录的 `backtest-history.json`。
+  String get _historyFile => widget.historyPath ?? historyPathFor(_store.path);
+
+  /// 读台账（连红计数用）。损坏/缺失都降级为 null，连红列显示 —。
+  BacktestHistory? _loadHistory() => loadBacktestHistory(_historyFile);
 
   Future<void> _run() async {
     setState(() {
@@ -84,9 +103,14 @@ class _BacktestPageState extends State<BacktestPage> {
     try {
       final r = await widget.runFn(widget.dbPath, reportPath: widget.reportPath);
       if (!mounted) return;
-      setState(() => _report = r);
+      // 台账要跟着一起重读：runBacktest 落盘报告的同时也 upsert 了台账，
+      // 只更新 _report 会让连红列停在旧期数（首启无台账时更是整列 —）。
+      setState(() {
+        _report = r;
+        _history = _loadHistory();
+      });
       widget.onReport?.call(r); // 通知外壳，选股页规则列表的胜率随之更新
-    } on Exception catch (e) {
+    } catch (e) {
       if (!mounted) return;
       setState(() => _error = '$e');
     } finally {
@@ -114,13 +138,23 @@ class _BacktestPageState extends State<BacktestPage> {
             ? null
             : IconButton(icon: const Icon(Icons.arrow_back), onPressed: widget.onBack),
         actions: [
-          FilterChip(
-            label: const Text('只看稳健规则', style: TextStyle(fontSize: 12)),
-            selected: _robustOnly,
-            onSelected: (v) => setState(() => _robustOnly = v),
-            selectedColor: accent.withValues(alpha: 0.18),
-            checkmarkColor: accent,
-          ),
+          // 稳健判定依赖分年数据,窗口口径下无意义,隐藏避免误读。
+          if (!_recentMode)
+            FilterChip(
+              label: const Text('只看稳健规则', style: TextStyle(fontSize: 12)),
+              selected: _robustOnly,
+              onSelected: (v) => setState(() => _robustOnly = v),
+              selectedColor: accent.withValues(alpha: 0.18),
+              checkmarkColor: accent,
+            ),
+          if (_report != null && _report!.recent.isNotEmpty)
+            FilterChip(
+              label: const Text('最近半年', style: TextStyle(fontSize: 12)),
+              selected: _recentMode,
+              onSelected: (v) => setState(() => _recentMode = v),
+              selectedColor: accent.withValues(alpha: 0.18),
+              checkmarkColor: accent,
+            ),
           const SizedBox(width: 8),
           Padding(
             padding: const EdgeInsets.only(right: 12),
@@ -172,49 +206,106 @@ class _BacktestPageState extends State<BacktestPage> {
   Widget _table(BacktestReport r, Color accent) {
     final hs = r.horizons; // 升序；列完全由它推导，不硬编码 5/10/20
     final pfH = hs.length >= 2 ? hs[1] : hs.last; // 盈亏比取中间持有期（默认 10 日）
+    final recentMode = _recentMode && r.recent.isNotEmpty;
+    final baseSlice = recentMode ? r.recentBaseline[pfH] : null;
 
     // 可信 = 跨年稳健 **且** 信号不集中。早先这里只用 isRuleYearlyRobust，
     // 于是按年胜率每年都赢、但 70% 信号集中在单月的规则也能进"稳健"名单。
     // 加了这个 AND 之后，严格版 RSI超卖·放量 在只开这一档时会被筛掉。
-    final shown = _robustOnly
-        ? [for (final rule in builtInRules)
-            if (isRuleTrustworthy(r, rule.id)) rule]
-        : builtInRules;
-    final rows = <_Row>[
-      for (final rule in shown)
-        _Row(
+    // 窗口口径没有分年数据，稳健筛选不适用，恒显全部规则。
+    final shown = recentMode
+        ? builtInRules
+        : _robustOnly
+            ? [for (final rule in builtInRules)
+                if (isRuleTrustworthy(r, rule.id)) rule]
+            : builtInRules;
+
+    _Row ruleRow(Rule rule) {
+      if (recentMode) {
+        final slice = r.recent[rule.id]?[pfH];
+        var days = 0;
+        double? ex, lo, hi;
+        if (slice != null &&
+            baseSlice != null &&
+            slice.dayMeanReturn.isNotEmpty) {
+          final ci = recentExcessCI(
+            ruleDayMean: slice.dayMeanReturn,
+            baseDayMean: baseSlice.dayMeanReturn,
+            seed: 7,
+          );
+          ex = ci.excess;
+          lo = ci.ciLow;
+          hi = ci.ciHigh;
+          days = slice.dayMeanReturn.length;
+        }
+        return _Row(
           name: rule.name,
           desc: rule.desc,
-          count: {for (final h in hs) h: r.result(rule.id, h)?.count ?? 0},
-          yearlyWin: {
-            for (final y in r.yearly.keys)
-              y: (r.yearly[y]?[rule.id]?[pfH]?.count ?? 0) == 0
-                  ? -1 // 该年没数据（如 MA250 需要 250 根，早年算不出来）
-                  : r.yearly[y]![rule.id]![pfH]!.winRate
-          },
-          win: {for (final h in hs) h: r.result(rule.id, h)?.winRate ?? 0},
-          avg: {for (final h in hs) h: r.result(rule.id, h)?.avgReturn ?? 0},
-          pf: r.result(rule.id, pfH)?.profitFactor ?? 0,
-          profile: r.profileOf(rule.id, pfH),
+          count: {for (final h in hs) h: r.recent[rule.id]?[h]?.count ?? 0},
+          win: {for (final h in hs) h: r.recent[rule.id]?[h]?.winRate ?? 0},
+          avg: {for (final h in hs) h: r.recent[rule.id]?[h]?.avgReturn ?? 0},
+          pf: r.recent[rule.id]?[pfH]?.stats.profitFactor ?? 0,
           isMain: rule.id == kMainRuleId,
           isBaseline: false,
-        ),
-      _Row(
-        name: '（无条件基准）',
-        count: {for (final h in hs) h: r.baseline[h]?.count ?? 0},
+          excessPp: ex,
+          excessLo: lo,
+          excessHi: hi,
+          excessDays: days,
+          consecutiveReds: _history?.consecutiveReds(rule.id),
+        );
+      }
+      return _Row(
+        name: rule.name,
+        desc: rule.desc,
+        count: {for (final h in hs) h: r.result(rule.id, h)?.count ?? 0},
         yearlyWin: {
-          for (final y in r.yearlyBaseline.keys)
-            y: (r.yearlyBaseline[y]?[pfH]?.count ?? 0) == 0
-                ? -1
-                : r.yearlyBaseline[y]![pfH]!.winRate
+          for (final y in r.yearly.keys)
+            y: (r.yearly[y]?[rule.id]?[pfH]?.count ?? 0) == 0
+                ? -1 // 该年没数据（如 MA250 需要 250 根，早年算不出来）
+                : r.yearly[y]![rule.id]![pfH]!.winRate
         },
-        win: {for (final h in hs) h: r.baseline[h]?.winRate ?? 0},
-        avg: {for (final h in hs) h: r.baseline[h]?.avgReturn ?? 0},
-        pf: 0,
-        profile: RuleProfile.empty,
-        isMain: false,
-        isBaseline: true,
-      ),
+        win: {for (final h in hs) h: r.result(rule.id, h)?.winRate ?? 0},
+        avg: {for (final h in hs) h: r.result(rule.id, h)?.avgReturn ?? 0},
+        pf: r.result(rule.id, pfH)?.profitFactor ?? 0,
+        profile: r.profileOf(rule.id, pfH),
+        isMain: rule.id == kMainRuleId,
+        isBaseline: false,
+        fullExcess: r.baseline[pfH] == null || r.result(rule.id, pfH) == null
+            ? null
+            : r.result(rule.id, pfH)!.avgReturn - r.baseline[pfH]!.avgReturn,
+      );
+    }
+
+    final rows = <_Row>[
+      for (final rule in shown) ruleRow(rule),
+      if (recentMode)
+        _Row(
+          name: '（无条件基准）',
+          count: {for (final h in hs) h: r.recentBaseline[h]?.count ?? 0},
+          win: {for (final h in hs) h: r.recentBaseline[h]?.winRate ?? 0},
+          avg: {for (final h in hs) h: r.recentBaseline[h]?.avgReturn ?? 0},
+          pf: 0,
+          profile: RuleProfile.empty,
+          isMain: false,
+          isBaseline: true,
+        )
+      else
+        _Row(
+          name: '（无条件基准）',
+          count: {for (final h in hs) h: r.baseline[h]?.count ?? 0},
+          yearlyWin: {
+            for (final y in r.yearlyBaseline.keys)
+              y: (r.yearlyBaseline[y]?[pfH]?.count ?? 0) == 0
+                  ? -1
+                  : r.yearlyBaseline[y]![pfH]!.winRate
+          },
+          win: {for (final h in hs) h: r.baseline[h]?.winRate ?? 0},
+          avg: {for (final h in hs) h: r.baseline[h]?.avgReturn ?? 0},
+          pf: 0,
+          profile: RuleProfile.empty,
+          isMain: false,
+          isBaseline: true,
+        ),
     ];
 
     // 排序：用户点过列头就听用户的；否则默认按中间持有期胜率降序。
@@ -240,19 +331,34 @@ class _BacktestPageState extends State<BacktestPage> {
     // 固定列宽 + 横向滚动：11 列在手机上放不下，溢出不如滑动。
     const nameW = 132.0;
     const cellW = 62.0;
-    // 分年胜率：每年一列
-    final years = r.yearly.keys.toList()..sort();
+    // 分年胜率：每年一列。窗口口径没有分年与集中度,换成超额列。
+    final years = recentMode ? <int>[] : (r.yearly.keys.toList()..sort());
     // +20 是行内左右各 10 的水平内边距，不加会让 Row 溢出。
-    final tableW =
-        nameW + cellW * (hs.length * 3 + 2 + years.length) + 20;
+    // 全期 3 列(PF/超额/主力月),窗口 3 列(PF/半年超额/连红)。
+    final extraCols = 3;
+    final tableW = nameW +
+        cellW * (hs.length * 3 + extraCols + years.length) +
+        20;
 
     return ListView(
       padding: const EdgeInsets.all(14),
       children: [
+        // 旧报告（这次版本之前生成的）没有 marketState 字段，这里整块不渲染。
+        // 刻意不加"暂无，请重新回测"提示行：回测页纵向空间全给表格，多一行会把
+        // 表头挤出视口（实测 800×600 下 3 个用例因此看不到表头）——报告每次同步
+        // 后会自动重算，这个状态本就是过渡态。
+        if (r.marketState != null) ...[
+          _marketStateCard(r.marketState!),
+          const SizedBox(height: 10),
+        ],
         _meta(r),
         const SizedBox(height: 10),
         _notes(),
         const SizedBox(height: 12),
+        if (recentMode) ...[
+          _recentNote(),
+          const SizedBox(height: 12),
+        ],
         Card(
           elevation: 0,
           shape: RoundedRectangleBorder(
@@ -266,9 +372,10 @@ class _BacktestPageState extends State<BacktestPage> {
               child: Column(
                 crossAxisAlignment: CrossAxisAlignment.stretch,
                 children: [
-                  _headerRow(hs, pfH, years, nameW, cellW, sortKey),
+                  _headerRow(hs, pfH, years, nameW, cellW, sortKey, recentMode),
                   const Divider(height: 1),
-                  for (final row in rows) _dataRow(row, hs, years, accent, nameW, cellW),
+                  for (final row in rows)
+                    _dataRow(row, hs, years, accent, nameW, cellW, recentMode),
                 ],
               ),
             ),
@@ -279,6 +386,88 @@ class _BacktestPageState extends State<BacktestPage> {
       ],
     );
   }
+
+  /// 市场状态卡片：牛/熊/震荡标签 + 三个等权口径关键数字。
+  /// A 股色彩习惯：牛 = 红，熊 = 绿，震荡 = 中性。
+  Widget _marketStateCard(MarketState ms) {
+    final (Color tone, String why) = switch (ms.regime) {
+      MarketRegime.bull => (
+          AppColors.red,
+          '等权市场在均线上方且近 20 日走强：普涨环境。'
+              '趋势/动量类规则的信号密度通常上升。'
+        ),
+      MarketRegime.bear => (
+          AppColors.down,
+          '等权市场走弱：普跌或分化环境，基准收益本身为负，'
+              '规则"跑赢基准"与"绝对赚钱"要分开看。'
+        ),
+      MarketRegime.sideways => (
+          AppColors.text,
+          '方向不明：结构性行情，同一条规则在不同月份的表现会差别很大。'
+        ),
+      MarketRegime.insufficient => (
+          AppColors.dim,
+          '本地历史不足以计算市场状态（需要至少 120 个交易日）。'
+        ),
+    };
+    return Container(
+      padding: const EdgeInsets.all(12),
+      decoration: BoxDecoration(
+        color: Colors.white,
+        borderRadius: BorderRadius.circular(12),
+        border: Border.all(color: AppColors.border),
+      ),
+      child: Column(
+        crossAxisAlignment: CrossAxisAlignment.start,
+        children: [
+          Row(
+            children: [
+              const Text('当前市况',
+                  style: TextStyle(fontSize: 13, fontWeight: FontWeight.w800)),
+              const SizedBox(width: 8),
+              Container(
+                padding: const EdgeInsets.symmetric(horizontal: 10, vertical: 3),
+                decoration: BoxDecoration(
+                  color: tone.withValues(alpha: 0.12),
+                  borderRadius: BorderRadius.circular(6),
+                ),
+                child: Text(ms.regime.label,
+                    style: TextStyle(
+                        fontSize: 14, fontWeight: FontWeight.w800, color: tone)),
+              ),
+              const Spacer(),
+              // 手机宽度下"截至 YYYY-MM-DD · NNNN 只"放不下,截断比溢出好。
+              Flexible(
+                child: Text('截至 ${ms.asOfDate} · ${ms.stockCount} 只',
+                    maxLines: 1,
+                    overflow: TextOverflow.ellipsis,
+                    style: const TextStyle(fontSize: 11, color: AppColors.dim)),
+              ),
+            ],
+          ),
+          const SizedBox(height: 8),
+          Wrap(
+            spacing: 8,
+            runSpacing: 6,
+            children: [
+              _chip('近20日 ${_signedPct(ms.ret20)}', tone),
+              _chip('站上MA20 ${(ms.breadthAboveMa20 * 100).toStringAsFixed(0)}%', tone),
+              _chip(
+                  '新高−新低 ${_signedPp(ms.newHighLowDiff20)}', tone),
+            ],
+          ),
+          const SizedBox(height: 8),
+          Text(why,
+              style: const TextStyle(fontSize: 12, height: 1.6, color: AppColors.dim)),
+        ],
+      ),
+    );
+  }
+
+  String _signedPct(double v) =>
+      '${v >= 0 ? '+' : ''}${v.toStringAsFixed(1)}%';
+  String _signedPp(double v) =>
+      '${v >= 0 ? '+' : ''}${(v * 100).toStringAsFixed(0)}pp';
 
   Widget _meta(BacktestReport r) => Wrap(
         spacing: 8,
@@ -341,7 +530,7 @@ class _BacktestPageState extends State<BacktestPage> {
       );
 
   Widget _headerRow(List<int> hs, int pfH, List<int> years, double nameW,
-          double cellW, _SortKey sortKey) =>
+          double cellW, _SortKey sortKey, bool recentMode) =>
       Padding(
         padding: const EdgeInsets.symmetric(horizontal: 10, vertical: 9),
         child: Row(
@@ -360,10 +549,32 @@ class _BacktestPageState extends State<BacktestPage> {
                   _SortKey('avg${hs[i]}', (row) => row.avg[hs[i]] ?? 0), cellW, sortKey),
             ],
             _headCell('$pfH日PF', _SortKey('pf', (row) => row.pf), cellW, sortKey),
+            // 全期口径:均收 − 同期基准(选股页统计行同口径的表格版)。
+            if (!recentMode)
+              _headCell('$pfH日超额',
+                  _SortKey('fullExcess', (row) => row.fullExcess ?? -999), cellW, sortKey),
+            // 窗口口径:日均超额(按天重抽 CI)替代主力月与年份列。
+            if (recentMode)
+              _headCell(
+                  '半年超额',
+                  _SortKey('excess', (row) => row.excessPp ?? -999),
+                  cellW,
+                  sortKey,
+                  tip: '固定跟随中间持有期（默认 10 日）：规则日均收益 − 基准日均收益，'
+                      '按天重抽 200 轮取 95% 置信区间。'),
+            if (recentMode)
+              _headCell(
+                  '连红',
+                  _SortKey('reds', (row) => (row.consecutiveReds ?? 0).toDouble()),
+                  cellW,
+                  sortKey,
+                  tip: '连续几期台账都红才显示。一期 = 一次回测快照，两期挨得越近'
+                      '窗口重叠越多、证据越弱，隔一个月以上再看才作数。'),
             // 主力月占比：最大单月信号数 / 总信号数。超过
             // kRuleTopMonthShareCeiling 标警示色——那不是"更好"，是"更可疑"。
-            _headCell('主力月', _SortKey('share', (row) => row.profile.topMonthShare),
-                cellW, sortKey),
+            if (!recentMode)
+              _headCell('主力月', _SortKey('share', (row) => row.profile.topMonthShare),
+                  cellW, sortKey),
             for (final y in years)
               _headCell('$y年',
                   _SortKey('year$y', (row) => row.yearlyWin[y] ?? -1), cellW, sortKey),
@@ -371,29 +582,34 @@ class _BacktestPageState extends State<BacktestPage> {
         ),
       );
 
-  Widget _headCell(String label, _SortKey key, double w, _SortKey active) =>
-      SizedBox(
-        width: w,
-        child: InkWell(
-          onTap: () => _sortBy(key),
-          child: Column(
-            crossAxisAlignment: key.num == null
-                ? CrossAxisAlignment.start
-                : CrossAxisAlignment.end,
-            children: [
-              Text(label,
-                  textAlign: key.num == null ? TextAlign.left : TextAlign.right,
-                  style: const TextStyle(fontSize: 11, fontWeight: FontWeight.w700)),
-              if (active.id == key.id)
-                Icon(_desc ? Icons.arrow_drop_up : Icons.arrow_drop_down,
-                    size: 14, color: AppColors.dim),
-            ],
-          ),
+  /// [tip] 非空时给表头挂悬停/长按说明。用 Tooltip 而不是多写一行正文：
+  /// 表格上方每多一行，表头就被往下推一行（说明卡已经吃掉首屏大半）。
+  Widget _headCell(String label, _SortKey key, double w, _SortKey active,
+      {String? tip}) {
+    final text = Text(label,
+        textAlign: key.num == null ? TextAlign.left : TextAlign.right,
+        style: const TextStyle(fontSize: 11, fontWeight: FontWeight.w700));
+    return SizedBox(
+      width: w,
+      child: InkWell(
+        onTap: () => _sortBy(key),
+        child: Column(
+          crossAxisAlignment: key.num == null
+              ? CrossAxisAlignment.start
+              : CrossAxisAlignment.end,
+          children: [
+            if (tip == null) text else Tooltip(message: tip, child: text),
+            if (active.id == key.id)
+              Icon(_desc ? Icons.arrow_drop_up : Icons.arrow_drop_down,
+                  size: 14, color: AppColors.dim),
+          ],
         ),
-      );
+      ),
+    );
+  }
 
   Widget _dataRow(_Row row, List<int> hs, List<int> years, Color accent,
-          double nameW, double cellW) =>
+          double nameW, double cellW, bool recentMode) =>
       Container(
         color: row.isBaseline ? accent.withValues(alpha: 0.06) : null,
         padding: const EdgeInsets.symmetric(horizontal: 10, vertical: 9),
@@ -412,9 +628,19 @@ class _BacktestPageState extends State<BacktestPage> {
             _cell(row.pf.toStringAsFixed(2), cellW,
                 weight: row.isBaseline ? FontWeight.w800 : FontWeight.w400,
                 tone: row.isBaseline ? accent : AppColors.text),
-            _cell(_topMonthShare(row), cellW,
+            if (!recentMode)
+              _cell(
+                row.fullExcess == null ? '—' : _signedPp0(row.fullExcess!),
+                cellW,
                 weight: row.isBaseline ? FontWeight.w800 : FontWeight.w400,
-                tone: _shareTone(row)),
+                tone: row.isBaseline ? accent : AppColors.text,
+              ),
+            if (recentMode) _excessCell(row, cellW, accent),
+            if (recentMode) _redsCell(row, cellW, accent),
+            if (!recentMode)
+              _cell(_topMonthShare(row), cellW,
+                  weight: row.isBaseline ? FontWeight.w800 : FontWeight.w400,
+                  tone: _shareTone(row)),
             for (final y in years)
               _cell(
                 // -1 表示该年没有可用数据（如 MA250 需要 250 根，早年算不出来）
@@ -422,6 +648,69 @@ class _BacktestPageState extends State<BacktestPage> {
                 cellW,
                 tone: row.isBaseline ? accent : AppColors.text,
               ),
+          ],
+        ),
+      );
+
+  /// 半年超额单元格:显著为正高亮、显著为负绿、不显著灰、样本不足/基准 —。
+  Widget _excessCell(_Row row, double cellW, Color accent) {
+    if (row.isBaseline || row.excessPp == null) {
+      return _cell('—', cellW, tone: AppColors.dim);
+    }
+    if (row.excessDays < kMinSignificantDays) {
+      return _cell('样本不足', cellW, tone: AppColors.dim);
+    }
+    final lo = row.excessLo!;
+    final hi = row.excessHi!;
+    final (Color tone, FontWeight w) = lo > 0
+        ? (accent, FontWeight.w800) // 显著为正:A 股红 = 强
+        : hi < 0
+            ? (AppColors.down, FontWeight.w800) // 显著为负:绿
+            : (AppColors.dim, FontWeight.w400); // 不显著:灰
+    return _cell(_signedPp0(row.excessPp!), cellW, tone: tone, weight: w);
+  }
+
+  String _signedPp0(double v) =>
+      '${v >= 0 ? '+' : ''}${v.toStringAsFixed(1)}';
+
+  /// 连红列:台账里连续显著为正的期数。≥2 才显示(1 期红说明不了什么),
+  /// 颜色与超额列同源——这是"跨窗口可信度",不是当期表现。
+  Widget _redsCell(_Row row, double cellW, Color accent) {
+    final n = row.consecutiveReds ?? 0;
+    if (row.isBaseline || n < 2) return _cell('—', cellW, tone: AppColors.dim);
+    return _cell('$n连红', cellW, tone: accent, weight: FontWeight.w800);
+  }
+
+  /// 窗口口径说明。放在表上,颜色语义不写清楚,"不显著一片"会被误读成页面坏了,
+  /// "红色"会被误读成排行榜第一。
+  Widget _recentNote() => Container(
+        padding: const EdgeInsets.all(12),
+        decoration: BoxDecoration(
+          color: const Color(0xFFEAF3FF),
+          borderRadius: BorderRadius.circular(10),
+          border: Border.all(color: const Color(0xFFC3DBF7)),
+        ),
+        child: const Column(
+          crossAxisAlignment: CrossAxisAlignment.start,
+          children: [
+            Text('怎么看「最近半年」',
+                style: TextStyle(fontSize: 12, fontWeight: FontWeight.w800)),
+            SizedBox(height: 6),
+            Text(
+              '「最近半年」= 最近 120 个交易日的可评估日。超额 = 规则日均收益 − '
+              '基准日均收益(按日配对),按天重抽 200 轮取 95% 置信区间。\n'
+              '· 红色 = 显著为正(下界>0):最近半年确实在赚超额。这是及格线,'
+              '不是冠军奖牌;多条红色时看「连红」列——连续几期台账都红的才更可信。\n'
+              '· 灰色 = 不显著:分不清是真本事还是运气,当"暂时失效"处理,别追。\n'
+              '· 绿色 = 显著为负:统计上确认跑输基准,当前市况下避开。\n'
+              '· 样本不足 = 独立信号日少于 20 个,不下结论。\n'
+              '· 没有红色 = 当前没有规则值得信,正确动作是降低操作频率与预期,'
+              '而不是换一条规则。红色只描述过去 120 个交易日,不是对未来的承诺。\n'
+              '· 选股页规则名下的红绿是「最近一个样本够的年份的超额」,口径比这里松;'
+              '两处不一致时,以这里的 CI 为准。',
+              style: TextStyle(
+                  fontSize: 12, height: 1.7, color: Color(0xFF2A588C)),
+            ),
           ],
         ),
       );
@@ -512,6 +801,12 @@ class _Row {
     this.yearlyWin = const {},
     this.profile = RuleProfile.empty,
     this.isMain = false,
+    this.excessPp,
+    this.excessLo,
+    this.excessHi,
+    this.excessDays = 0,
+    this.fullExcess,
+    this.consecutiveReds,
   });
 
   final String name;
@@ -531,4 +826,18 @@ class _Row {
 
   /// 是否 [kMainRuleId] 指定的主力规则。
   final bool isMain;
+
+  /// 窗口口径的日均超额(pp)与按天重抽 CI;null = 无数据(基准行)。
+  final double? excessPp;
+  final double? excessLo;
+  final double? excessHi;
+
+  /// 窗口内独立信号日数,不足 [kMinSignificantDays] 显示"样本不足"。
+  final int excessDays;
+
+  /// 全期口径:中间持有期均收 − 同期基准(pp);null = 无数据(基准行/无结果)。
+  final double? fullExcess;
+
+  /// 台账里连续显著为正的期数;null = 无台账数据。
+  final int? consecutiveReds;
 }

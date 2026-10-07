@@ -49,7 +49,7 @@ class TushareClient {
   TushareClient({
     required this.token,
     h.Client? http,
-    this.pageSize = 5000,
+    this.pageSize = 6000,
     this.apiBase = 'https://api.tushare.pro',
     this.timeout = const Duration(seconds: 15),
   }) : _http = http ?? h.Client();
@@ -57,7 +57,10 @@ class TushareClient {
   final String token;
   final h.Client _http;
 
-  /// 单页行数上限；测试注入小值驱动翻页。
+  /// 单页行数上限：必须恰好等于服务端上限 6000，不可更大——超限的 limit 不报错
+  /// 而是被静默截断到 6000，`_callPaged` 的「不满一页即终止」会因此提前 break 丢
+  /// 数据（真机实测：limit=6000 返回满 6000 行，limit=100000 也只回 6000 行）。
+  /// 测试注入小值驱动翻页。
   final int pageSize;
   final String apiBase;
 

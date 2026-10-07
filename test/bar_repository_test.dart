@@ -38,6 +38,22 @@ void main() {
     expect(stocks.single.bars.single.close, 11.0);
   });
 
+  test('poolFingerprint：新交易日、回补旧日期、同主键替换都会改变指纹', () {
+    expect(repo.poolFingerprint(), isNotNull, reason: '空库也要返回稳定的指纹');
+    repo.upsertBars([row('600000.SH', '20260930')]);
+    final afterSeed = repo.poolFingerprint();
+    repo.upsertBars([row('600000.SH', '20261009')]);
+    expect(repo.poolFingerprint(), isNot(afterSeed), reason: '水位线推进要变');
+
+    final afterNew = repo.poolFingerprint();
+    repo.upsertBars([row('600000.SH', '20260901')], ); // 回补更早历史：水位不变
+    expect(repo.poolFingerprint(), isNot(afterNew), reason: '回补不改水位但改内容，指纹必须变');
+
+    final afterBackfill = repo.poolFingerprint();
+    repo.upsertBars([row('600000.SH', '20260901', close: 12.0)]); // INSERT OR REPLACE
+    expect(repo.poolFingerprint(), isNot(afterBackfill), reason: '替换写入也要被感知');
+  });
+
   test('stockNames 读取股票名单', () {
     expect(repo.stockNames(), isEmpty);
     repo.upsertStocks([(tsCode: '000001.SZ', name: '平安银行')]);
@@ -81,6 +97,12 @@ void main() {
     repo.upsertBars([row('000001.SZ', '20260929'), row('000001.SZ', '20260930')]);
     expect(repo.maxTradeDate(), '20260930');
     expect(repo.barCount(), 2);
+  });
+
+  test('minTradeDate 取最早交易日，空库为 null', () {
+    expect(repo.minTradeDate(), isNull);
+    repo.upsertBars([row('000001.SZ', '20260929'), row('000001.SZ', '20260930')]);
+    expect(repo.minTradeDate(), '20260929');
   });
 
   test('rowCountOnDate 返回某交易日已入库行数，无数据为 0', () {
