@@ -157,6 +157,17 @@ void main() {
     expect(fullCov.isYearsCovered(2, now), isTrue);
     expect(fullCov.isYearsCovered(3, now), isTrue);
     expect(fullCov.isYearsCovered(4, now), isFalse);
+
+    // 场景 4：真实节假日休市边界（如 2026-10-07 的 3 年前 2023-10-07 为国庆休市，
+    // 最早开市交易日为 20231009，自然日稍晚 2 天，但交易日数 726 已完整覆盖）
+    const holidayBoundaryCov = HistoryCoverage(
+      minDate: '20231009',
+      maxDate: '20261007',
+      tradeDays: 726,
+      totalBars: 3920000,
+    );
+    expect(holidayBoundaryCov.isYearsCovered(3, now), isTrue,
+        reason: '国庆长假休市导致首个交易日比自然日晚2天，不能误判为未覆盖3年');
   });
 
   test('isStale：末根超过 45 天算断更，空库不算', () {

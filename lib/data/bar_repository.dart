@@ -62,18 +62,26 @@ class HistoryCoverage {
   bool get isEmpty => minDate == null;
 
   /// 指定年数（1/2/3 年）的历史是否已经覆盖到位：
-  /// 1. 最早交易日 <= 该年数起算日期；
+  /// 1. 最早交易日 <= 该年数起算日期 + 休市容差（[holidayToleranceDays]）；
   /// 2. 最新交易日不严重断更（[isStale]）；
   /// 3. 交易日数满足基本密度（每年至少 [minDaysPerYear] 交易日，防止拉了头尾或中途断流）。
   ///
   /// 三条都不满足时返回 false，但**原因不同**：调用方要给诊断文案时必须先问
   /// [isStale]——断更库的深度往往够，"不足 N 年"的说法会把用户指去补历史，
   /// 而真正该做的是恢复同步。
-  bool isYearsCovered(int years, [DateTime? now, int minDaysPerYear = 180]) {
+  bool isYearsCovered(int years,
+      [DateTime? now, int minDaysPerYear = 180, int holidayToleranceDays = 15]) {
     if (minDate == null || maxDate == null) return false;
     final current = now ?? DateTime.now();
-    final target = backfillFromDate(current, years);
-    if (minDate!.compareTo(target) > 0) return false;
+    // N 年前的自然日起算日（如 2026-10-07 的 3 年前是 2023-10-07）。
+    // A 股在春节（7~8 天）、国庆（7 天）、连休周末等节假日不产生交易数据，
+    // 例如 2023-10-07 为国庆休市周末，节后首个开市交易日为 2023-10-09。
+    // 允许 [holidayToleranceDays]（默认 15 天）的休市容差，避免将已拉满全量数据的库误判为未覆盖。
+    final targetDate = DateTime(current.year - years, current.month, current.day);
+    final cutoffDate = targetDate.add(Duration(days: holidayToleranceDays));
+    final cutoff =
+        '${cutoffDate.year}${cutoffDate.month.toString().padLeft(2, '0')}${cutoffDate.day.toString().padLeft(2, '0')}';
+    if (minDate!.compareTo(cutoff) > 0) return false;
     if (isStale(current)) return false;
     if (tradeDays < years * minDaysPerYear) return false;
     return true;
