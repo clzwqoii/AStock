@@ -144,6 +144,38 @@ def post_file(url, path, fields):
             import time; time.sleep(3)
 
 base = f"https://gitee.com/api/v5/repos/{owner_repo}"
+
+def cleanup_old_assets(keep_count=3):
+    """Gitee 免费仓库附件总额度仅 1GB，每个版本包约 100MB。
+    上传新包前自动检查，只保留最近 keep_count 个版本的二进制附件，
+    更早版本的附件自动删除以释放配额，防止超出 1GB 导致上传失败与客户端 404。
+    （GitHub Release 保持全量长期保留）"""
+    print(f"正在检查 Gitee 附件配额（策略：只保留最近 {keep_count} 个版本的安装包）...")
+    try:
+        req = urllib.request.Request(f"{base}/releases?access_token={token}&per_page=100")
+        with urllib.request.urlopen(req, timeout=30) as r:
+            rels = json.loads(r.read())
+        rels.sort(key=lambda x: x.get("id", 0), reverse=True)
+        # 本次将新增 1 个版本，因此现有版本中保留前 keep_count - 1 个
+        old_rels = rels[(keep_count - 1):] if keep_count > 1 else rels
+        for r in old_rels:
+            r_id, r_tag = r["id"], r.get("tag_name", "")
+            f_req = urllib.request.Request(f"{base}/releases/{r_id}/attach_files?access_token={token}")
+            with urllib.request.urlopen(f_req, timeout=30) as f_res:
+                files = json.loads(f_res.read())
+            for f in files:
+                fid, fname = f["id"], f["name"]
+                del_req = urllib.request.Request(f"{base}/releases/{r_id}/attach_files/{fid}?access_token={token}", method="DELETE")
+                try:
+                    with urllib.request.urlopen(del_req, timeout=15):
+                        print(f"  [配额维护] 已清理历史 {r_tag} 附件: {fname}")
+                except Exception:
+                    pass
+    except Exception as e:
+        print(f"  [配额维护] 历史附件检查跳过（非阻断）：{e}")
+
+cleanup_old_assets(keep_count=3)
+
 rel = post_json(f"{base}/releases?access_token={token}", {
     "tag_name": tag, "name": tag, "body": body, "target_commitish": "main", "prerelease": False,
 })
