@@ -308,6 +308,7 @@ class SettingsPage extends StatefulWidget {
     this.initialToken = '',
     required this.configPath,
     this.dbPath,
+    this.coverage,
     this.syncing = false,
     this.syncMsg,
     this.onSyncPressed,
@@ -325,6 +326,9 @@ class SettingsPage extends StatefulWidget {
   final String initialToken;
   final String configPath;
   final String? dbPath;
+
+  /// 本地库历史行情覆盖情况（诊断历史深度、是否需要回补）。
+  final HistoryCoverage? coverage;
 
   /// 同步编排在外壳（启动自动触发），这里只展示状态、转发点击。
   final bool syncing;
@@ -435,6 +439,70 @@ class _SettingsPageState extends State<SettingsPage> {
           padding: const EdgeInsets.only(top: 8),
           child: Text(widget.syncMsg!),
         ),
+        if (widget.coverage != null && !widget.coverage!.isEmpty) ...[
+          Builder(builder: (_) {
+            final cov = widget.coverage!;
+            final isCovered3 = cov.isYearsCovered(3);
+            // 断更要单独说：深度足够的库停更两个月也会让 isYearsCovered 全 false，
+            // 按年份降级会在这种时候报"不足 1 年"——把用户指去补历史，
+            // 而真正该做的是恢复同步（见 HistoryCoverage.isYearsCovered）。
+            final statusText = cov.isStale()
+                ? '本地行情已断更（最新 ${cov.maxDate}），请先同步数据'
+                : isCovered3
+                    ? '历史数据已补齐（覆盖近 3 年）'
+                    : (cov.isYearsCovered(2)
+                        ? '历史数据已覆盖近 2 年（可按需补近 3 年）'
+                        : (cov.isYearsCovered(1)
+                            ? '历史数据已覆盖近 1 年（建议回补 2～3 年）'
+                            : '历史数据不足 1 年（建议回补历史）'));
+            return Container(
+              margin: const EdgeInsets.only(top: 12),
+              padding: const EdgeInsets.symmetric(horizontal: 12, vertical: 10),
+              decoration: BoxDecoration(
+                color: Colors.black.withValues(alpha: 0.03),
+                borderRadius: BorderRadius.circular(8),
+                border: Border.all(color: AppColors.border),
+              ),
+              child: Column(
+                crossAxisAlignment: CrossAxisAlignment.start,
+                children: [
+                  Row(
+                    children: [
+                      Icon(
+                        isCovered3
+                            ? Icons.check_circle_outline
+                            : Icons.info_outline,
+                        size: 16,
+                        color: isCovered3
+                            ? const Color(0xFF2E7D32)
+                            : AppColors.dim,
+                      ),
+                      const SizedBox(width: 6),
+                      Expanded(
+                        child: Text(
+                          statusText,
+                          style: TextStyle(
+                            fontSize: 12,
+                            fontWeight: FontWeight.w600,
+                            color: isCovered3
+                                ? const Color(0xFF2E7D32)
+                                : Colors.black87,
+                          ),
+                        ),
+                      ),
+                    ],
+                  ),
+                  const SizedBox(height: 4),
+                  Text(
+                    '覆盖区间：${cov.minDate} ～ ${cov.maxDate}'
+                    '（共 ${cov.tradeDays} 个交易日，${cov.totalBars} 行）',
+                    style: const TextStyle(fontSize: 11, color: AppColors.dim),
+                  ),
+                ],
+              ),
+            );
+          }),
+        ],
         const SizedBox(height: 24),
         const Text('主题色'),
         const SizedBox(height: 10),
@@ -551,45 +619,98 @@ class _SettingsPageState extends State<SettingsPage> {
   void _pickBackfill(BuildContext context) {
     final callback = widget.onBackfillPressed;
     if (callback == null) return;
+    final cov = widget.coverage;
     var force = false;
     showDialog<void>(
       context: context,
       builder: (dialogContext) => StatefulBuilder(
-        builder: (ctx, setDialogState) => AlertDialog(
-          title: const Text('回补历史'),
-          content: Column(
-            mainAxisSize: MainAxisSize.min,
-            crossAxisAlignment: CrossAxisAlignment.start,
-            children: [
-              const Text(
-                '首次同步若没拉全历史（回测数字明显偏少），从这里补拉。\n'
-                '与每日增量同一数据源；已入库的交易日自动跳过，重复点只补缺口。\n\n'
-                '缺口大时近 1/2/3 年 ≈ 5/10/15 分钟，期间请保持 App 在前台、网络可用。',
-                style: TextStyle(fontSize: 13, height: 1.6),
-              ),
-              CheckboxListTile(
-                value: force,
-                onChanged: (v) => setDialogState(() => force = v ?? false),
-                dense: true,
-                contentPadding: EdgeInsets.zero,
-                controlAffinity: ListTileControlAffinity.leading,
-                title: const Text('完整重拉', style: TextStyle(fontSize: 13)),
-                subtitle: const Text('忽略已入库数据（某天只入库了部分股票时用；更慢）',
-                    style: TextStyle(fontSize: 11, height: 1.4)),
-              ),
+        builder: (ctx, setDialogState) {
+          final isFullCovered =
+              cov != null && !cov.isEmpty && cov.isYearsCovered(3);
+          return AlertDialog(
+            title: const Text('回补历史'),
+            content: Column(
+              mainAxisSize: MainAxisSize.min,
+              crossAxisAlignment: CrossAxisAlignment.start,
+              children: [
+                if (cov != null && !cov.isEmpty) ...[
+                  Container(
+                    width: double.infinity,
+                    padding: const EdgeInsets.all(8),
+                    margin: const EdgeInsets.only(bottom: 12),
+                    decoration: BoxDecoration(
+                      color: (isFullCovered
+                              ? const Color(0xFF2E7D32)
+                              : Colors.black87)
+                          .withValues(alpha: 0.06),
+                      borderRadius: BorderRadius.circular(6),
+                    ),
+                    child: Column(
+                      crossAxisAlignment: CrossAxisAlignment.start,
+                      children: [
+                        Text(
+                          '当前本地历史：${cov.minDate} ～ ${cov.maxDate}（${cov.tradeDays} 个交易日）',
+                          style: const TextStyle(
+                              fontSize: 11, fontWeight: FontWeight.w600),
+                        ),
+                        const SizedBox(height: 2),
+                        Text(
+                          // 断更优先：深度够但停更时，"历史不足 1 年"是错的诊断。
+                          cov.isStale()
+                              ? '本地行情已断更，请先同步数据再考虑回补。'
+                              : (isFullCovered
+                                  ? '已完整覆盖近 3 年历史数据，无需重复回补。'
+                                  : (cov.isYearsCovered(2)
+                                      ? '已覆盖近 2 年历史，可按需补充近 3 年。'
+                                      : (cov.isYearsCovered(1)
+                                          ? '已覆盖近 1 年历史，长线回测样本较少，建议回补近 2～3 年。'
+                                          : '当前历史不足 1 年，回测样本较少，建议回补历史。'))),
+                          style: TextStyle(
+                            fontSize: 11,
+                            color: isFullCovered
+                                ? const Color(0xFF2E7D32)
+                                : Colors.black54,
+                          ),
+                        ),
+                      ],
+                    ),
+                  ),
+                ],
+                const Text(
+                  '与每日增量同一数据源；已入库的交易日自动跳过，重复点只补缺口。\n\n'
+                  '缺口大时近 1/2/3 年 ≈ 5/10/15 分钟，期间请保持 App 在前台、网络可用。',
+                  style: TextStyle(fontSize: 13, height: 1.6),
+                ),
+                CheckboxListTile(
+                  value: force,
+                  onChanged: (v) => setDialogState(() => force = v ?? false),
+                  dense: true,
+                  contentPadding: EdgeInsets.zero,
+                  controlAffinity: ListTileControlAffinity.leading,
+                  title: const Text('完整重拉', style: TextStyle(fontSize: 13)),
+                  subtitle: const Text('忽略已入库数据（某天只入库了部分股票时用；更慢）',
+                      style: TextStyle(fontSize: 11, height: 1.4)),
+                ),
+              ],
+            ),
+            actions: [
+              for (final years in [1, 2, 3]) ...[
+                Builder(builder: (_) {
+                  final covered =
+                      cov != null && !cov.isEmpty && cov.isYearsCovered(years);
+                  final label = covered ? '近 $years 年 (已补齐)' : '近 $years 年';
+                  return TextButton(
+                    onPressed: () {
+                      Navigator.pop(ctx);
+                      callback(years, force: force);
+                    },
+                    child: Text(label),
+                  );
+                }),
+              ],
             ],
-          ),
-          actions: [
-            for (final years in [1, 2, 3])
-              TextButton(
-                onPressed: () {
-                  Navigator.pop(ctx);
-                  callback(years, force: force);
-                },
-                child: Text('近 $years 年'),
-              ),
-          ],
-        ),
+          );
+        },
       ),
     );
   }

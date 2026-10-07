@@ -28,6 +28,13 @@ ScreenRow fakeRow(String symbol, {String? name}) => ScreenRow(
       ma20: 10.025,
     );
 
+/// `YYYYMMDD`（与 trade_date 同格式）。
+///
+/// 覆盖判定的用例要用当天推算日期，不能写死：`isYearsCovered` 带 45 天断更
+/// 护栏，写死的 maxDate 过一阵子就会因为"库变旧"而失败。
+String stamp(DateTime d) =>
+    '${d.year}${d.month.toString().padLeft(2, '0')}${d.day.toString().padLeft(2, '0')}';
+
 void main() {
   late Directory tmp;
   late String dbPath;
@@ -690,6 +697,137 @@ Future<void> scrollTo(WidgetTester tester, Finder finder) =>
         find.widgetWithText(OutlinedButton, '回补历史'),
       );
       expect(button.onPressed, isNull);
+    });
+
+    testWidgets('历史覆盖状态：已覆盖 3 年时设置页与弹窗清晰展示已补齐且无需重复回补', (tester) async {
+      final today = stamp(DateTime.now());
+      final threeYearsAgo = stamp(DateTime(DateTime.now().year - 3,
+          DateTime.now().month, DateTime.now().day));
+      final fullCoverage = HistoryCoverage(
+        minDate: threeYearsAgo,
+        maxDate: today,
+        tradeDays: 728,
+        totalBars: 3800000,
+      );
+
+      await tester.pumpWidget(MaterialApp(
+        home: Scaffold(
+          body: SettingsPage(
+            configPath: '${tmp.path}/.env',
+            dbPath: dbPath,
+            coverage: fullCoverage,
+            onBackfillPressed: (y, {force = false}) {},
+          ),
+        ),
+      ));
+      await tester.pump();
+
+      // 设置页主面板显示已补齐状态与区间
+      expect(find.textContaining('历史数据已补齐（覆盖近 3 年）'), findsOneWidget);
+      expect(find.textContaining('$threeYearsAgo ～ $today'), findsOneWidget);
+      expect(find.textContaining('728 个交易日'), findsOneWidget);
+
+      // 点开回补历史弹窗
+      await tester.tap(find.text('回补历史'));
+      await tester.pump();
+
+      // 弹窗内包含已补齐说明与各档位标注
+      expect(find.textContaining('已完整覆盖近 3 年历史数据，无需重复回补'), findsOneWidget);
+      expect(find.text('近 1 年 (已补齐)'), findsOneWidget);
+      expect(find.text('近 2 年 (已补齐)'), findsOneWidget);
+      expect(find.text('近 3 年 (已补齐)'), findsOneWidget);
+    });
+
+    testWidgets('历史覆盖状态：仅覆盖 1 年时提示历史深度不足并引导回补', (tester) async {
+      final partialCoverage = HistoryCoverage(
+        minDate: stamp(DateTime(DateTime.now().year - 1, DateTime.now().month,
+            DateTime.now().day)),
+        maxDate: stamp(DateTime.now()),
+        tradeDays: 245,
+        totalBars: 1300000,
+      );
+
+      await tester.pumpWidget(MaterialApp(
+        home: Scaffold(
+          body: SettingsPage(
+            configPath: '${tmp.path}/.env',
+            dbPath: dbPath,
+            coverage: partialCoverage,
+            onBackfillPressed: (y, {force = false}) {},
+          ),
+        ),
+      ));
+      await tester.pump();
+
+      expect(find.textContaining('历史数据已覆盖近 1 年（建议回补 2～3 年）'), findsOneWidget);
+
+      await tester.tap(find.text('回补历史'));
+      await tester.pump();
+
+      expect(find.text('近 1 年 (已补齐)'), findsOneWidget);
+      expect(find.text('近 2 年'), findsOneWidget);
+      expect(find.text('近 3 年'), findsOneWidget);
+    });
+
+    testWidgets('历史覆盖状态：不足 1 年时提示历史数据不足 1 年', (tester) async {
+      final underOneYear = HistoryCoverage(
+        minDate: stamp(DateTime.now().subtract(const Duration(days: 30))),
+        maxDate: stamp(DateTime.now()),
+        tradeDays: 25,
+        totalBars: 130000,
+      );
+
+      await tester.pumpWidget(MaterialApp(
+        home: Scaffold(
+          body: SettingsPage(
+            configPath: '${tmp.path}/.env',
+            dbPath: dbPath,
+            coverage: underOneYear,
+            onBackfillPressed: (y, {force = false}) {},
+          ),
+        ),
+      ));
+      await tester.pump();
+
+      expect(find.textContaining('历史数据不足 1 年（建议回补历史）'), findsOneWidget);
+    });
+
+    testWidgets('历史覆盖状态：历史很深但末根断更时,提示去同步而不是"不足 1 年"', (tester) async {
+      // 库里有 6 年历史、交易日密度也够，只有末根停在 2025-01-01（早已断更）。
+      // isYearsCovered 有三种 false 原因（深度不够 / 末根断更 / 密度不足），
+      // 一律按"年份不够"降级会把用户指去补历史——而真正该做的是恢复同步。
+      const stale = HistoryCoverage(
+        minDate: '20200101',
+        maxDate: '20250101',
+        tradeDays: 900,
+        totalBars: 3000000,
+      );
+      expect(stale.isYearsCovered(3), isFalse);
+
+      await tester.pumpWidget(MaterialApp(
+        home: Scaffold(
+          body: SettingsPage(
+            configPath: '${tmp.path}/.env',
+            dbPath: dbPath,
+            coverage: stale,
+            onBackfillPressed: (y, {force = false}) {},
+          ),
+        ),
+      ));
+      await tester.pump();
+
+      expect(find.textContaining('已断更'), findsOneWidget);
+      expect(find.textContaining('请先同步'), findsOneWidget);
+      expect(find.textContaining('不足 1 年'), findsNothing,
+          reason: '深度足够，只是断更，不能报"不足 1 年"');
+      expect(find.textContaining('20200101 ～ 20250101'), findsOneWidget,
+          reason: '区间照旧展示，用户要能看出数据停在哪天');
+
+      await tester.tap(find.text('回补历史'));
+      await tester.pump();
+      expect(find.textContaining('已断更'), findsWidgets,
+          reason: '弹窗里也要说明是断更，而不是"历史不足 1 年"');
+      expect(find.textContaining('历史不足 1 年'), findsNothing);
     });
   });
   

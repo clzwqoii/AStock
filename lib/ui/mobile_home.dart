@@ -31,6 +31,7 @@ class MobileHome extends StatefulWidget {
     this.screenFn,
     this.launchUrl,
     this.backtestReport,
+    this.coverage,
     this.backtestRunFn,
     this.onReport,
   });
@@ -62,6 +63,9 @@ class MobileHome extends StatefulWidget {
 
   /// 回测报告缓存（外壳读一次）；非 null 时规则面板在名字下显示 10 日胜率/PF/信号数。
   final BacktestReport? backtestReport;
+
+  /// 本地历史行情覆盖情况（供设置页与回补弹窗诊断）。
+  final HistoryCoverage? coverage;
 
   @override
   State<MobileHome> createState() => _MobileHomeState();
@@ -98,6 +102,7 @@ class _MobileHomeState extends State<MobileHome> {
               initialToken: widget.initialToken,
               configPath: widget.configPath,
               dbPath: widget.dbPath,
+              coverage: widget.coverage,
               syncing: widget.syncing,
               syncMsg: widget.syncMsg,
               onSyncPressed: widget.onSyncPressed,

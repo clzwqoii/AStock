@@ -9,7 +9,7 @@ import 'dart:io' show Platform;
 import '../app_logic.dart';
 import '../core/backtest.dart';
 import '../config.dart';
-import '../data/sync_service.dart' show SyncResult, backfillFromDate;
+import '../data/sync_service.dart' show SyncResult, backfillFromDate, HistoryCoverage;
 import '../net_diag.dart';
 import '../update_download.dart';
 import '../update_notice.dart';
@@ -27,6 +27,7 @@ class StockApp extends StatefulWidget {
     this.runSyncFn = runSync,
     this.runBackfillFn = runBackfillSync,
     this.runBacktestFn = runBacktest,
+    this.loadCoverageFn = loadHistoryCoverage,
     this.persistAccent,
     this.screenFn,
     this.persistToken,
@@ -42,6 +43,9 @@ class StockApp extends StatefulWidget {
 
   /// 回补历史同步；测试注入假实现，生产用 [runBackfillSync]。
   final RunBackfillFn runBackfillFn;
+
+  /// 历史覆盖查询；测试注入假实现，生产用 [loadHistoryCoverage]。
+  final LoadCoverageFn loadCoverageFn;
 
   /// 重算回测报告；测试可注入假实现，避免真跑 30~50 秒。
   final Future<BacktestReport> Function(String dbPath, {String? reportPath})
@@ -91,6 +95,9 @@ class _StockAppState extends State<StockApp> {
   /// 回测报告缓存：启动时读一次，选股页规则列表与回测页共用；
   /// 回测完成后 [onReport] 回来刷新，两处胜率同步更新。
   BacktestReport? _report;
+
+  /// 本地历史行情覆盖情况（诊断历史深度、是否需要回补）。
+  HistoryCoverage? _coverage;
 
   /// 是否正在重算回测报告（同步到新数据后自动触发）。
   bool _refreshingReport = false;
@@ -145,9 +152,22 @@ class _StockAppState extends State<StockApp> {
       }
     });
     _startSync();
+    _refreshCoverage();
     _maybeShowUpdateNotice();
     if (widget.showOnboarding && widget.config.tushareToken.isEmpty) {
       WidgetsBinding.instance.addPostFrameCallback((_) => _openOnboarding());
+    }
+  }
+
+  /// 读一次本地库覆盖情况。失败只影响诊断卡片（不出现），不该拖垮主流程，
+  /// 但也不静默——卡片没出现时至少要能从日志查到原因。
+  Future<void> _refreshCoverage() async {
+    if (_config.dbPath.isEmpty) return;
+    try {
+      final c = await widget.loadCoverageFn(_config.dbPath);
+      if (mounted) setState(() => _coverage = c);
+    } catch (e) {
+      debugPrint('读取历史覆盖失败：$e');
     }
   }
 
@@ -254,8 +274,12 @@ class _StockAppState extends State<StockApp> {
       if (!mounted) return;
       // 库内最早日期是回补的验收锚点：选了 3 年而最早日期晚于 3 年前，
       // 光看行数看不出来。备源单只失败同理——大面积失败也显示"完成"。
-      final receipt = StringBuffer('$doneLabel：新增 ${r.dates} 个交易日、'
-          '${r.rows} 行（数据齐全时为 0）');
+      final receipt = StringBuffer('$doneLabel：');
+      if (r.dates == 0 && r.rows == 0) {
+        receipt.write('数据已齐全，无需新增交易日');
+      } else {
+        receipt.write('新增 ${r.dates} 个交易日、${r.rows} 行');
+      }
       if (r.earliestDate != null) receipt.write('，库内最早 ${r.earliestDate}');
       if (r.failedSymbols > 0) {
         receipt.write('，${r.failedSymbols} 只备源拉取失败，建议网络稳定后重跑');
@@ -272,7 +296,10 @@ class _StockAppState extends State<StockApp> {
       if (!mounted) return;
       setState(() => _syncMsg = '$failLabel失败：${describeSyncError(e)}');
     } finally {
-      if (mounted) setState(() => _syncing = false);
+      if (mounted) {
+        setState(() => _syncing = false);
+        _refreshCoverage();
+      }
     }
   }
 
@@ -314,6 +341,7 @@ class _StockAppState extends State<StockApp> {
             initialToken: _config.tushareToken,
             configPath: _configPath,
             dbPath: _config.dbPath,
+            coverage: _coverage,
             syncing: _syncing,
             syncMsg: _syncMsg,
             onSyncPressed: _startSync,
@@ -354,6 +382,7 @@ class _StockAppState extends State<StockApp> {
             if (!wide) {
               return MobileHome(
                 dbPath: _config.dbPath,
+                coverage: _coverage,
                 screenFn: widget.screenFn,
                 syncing: _syncing,
                 syncMsg: _refreshingReport ? '正在重算回测报告…' : _syncMsg,

@@ -504,6 +504,96 @@ void main() {
     });
   });
 
+  group('跨年一致性落败判定 isRuleYearlyLoser', () {
+    // 与 isRuleYearlyRobust 互为镜像：全期表超额列的绿色语义
+    // （"历史无优势"）与红色同源同口径，不允许 UI 另写一套。
+    BacktestStats st(double win, int count, {double avg = 0}) => BacktestStats(
+          count: count,
+          winRate: win,
+          avgReturn: avg,
+          medianReturn: avg,
+          bestReturn: avg,
+          worstReturn: -avg,
+          profitFactor: 1,
+        );
+
+    BacktestReport retReport(
+      Map<int, double> ruleAvg, {
+      double baseAvg = 0,
+      int count = 100,
+      String ruleId = 'r',
+    }) {
+      return BacktestReport(
+        generatedAt: '2026-10-07T00:00:00.000',
+        horizons: const [10],
+        stockCount: 1,
+        baseline: const {},
+        results: const {},
+        yearly: {
+          for (final e in ruleAvg.entries)
+            e.key: {ruleId: {10: st(0.5, count, avg: e.value)}},
+        },
+        yearlyBaseline: {
+          for (final e in ruleAvg.entries)
+            e.key: {10: st(0.5, count, avg: baseAvg)},
+        },
+      );
+    }
+
+    test('每年均收都输基准才算落败', () {
+      expect(isRuleYearlyLoser(retReport({2024: -1.0, 2025: -0.2}, baseAvg: 0.1), 'r'),
+          isTrue);
+    });
+
+    test('有一年跑赢就不算落败', () {
+      expect(
+          isRuleYearlyLoser(retReport({2024: -1.0, 2025: 0.5}, baseAvg: 0.1), 'r'),
+          isFalse);
+    });
+
+    test('均收益恰好等于基准不算落败（必须严格小于）', () {
+      expect(isRuleYearlyLoser(retReport({2024: 0.1, 2025: -1.0}, baseAvg: 0.1), 'r'),
+          isFalse);
+    });
+
+    test('没有可判年份时判 unknown：不判红也不判绿', () {
+      // 旧报告 JSON 缺 yearly / yearlyBaseline 键 → fromJson 容错成空 map。
+      final empty = retReport(const {});
+      expect(yearlyVerdict(empty, 'r'), YearlyVerdict.unknown);
+      expect(isRuleYearlyLoser(empty, 'r'), isFalse);
+      expect(isRuleYearlyRobust(empty, 'r'), isTrue,
+          reason: '「只看稳健规则」是不默认有罪的筛子，缺数据不该把旧报告筛成空表；'
+              '而红绿上色必须走 yearlyVerdict，只看 robust/loser');
+    });
+
+    test('有的年份赢有的输判 mixed，既不算稳健也不算落败', () {
+      final r = retReport({2024: 1.0, 2025: -0.2}, baseAvg: 0.1);
+      expect(yearlyVerdict(r, 'r'), YearlyVerdict.mixed);
+      expect(isRuleYearlyLoser(r, 'r'), isFalse);
+      expect(isRuleYearlyRobust(r, 'r'), isFalse);
+    });
+
+    test('该年无数据（count=0）时跳过，不判胜', () {
+      final r = BacktestReport(
+        generatedAt: '2026-10-07T00:00:00.000',
+        horizons: const [10],
+        stockCount: 1,
+        baseline: const {},
+        results: const {},
+        yearly: {
+          2024: {'r': {10: st(0.5, 0, avg: 99)}},
+          2025: {'r': {10: st(0.5, 100, avg: -1.0)}},
+        },
+        yearlyBaseline: {
+          2024: {10: st(0.5, 100, avg: 0.1)},
+          2025: {10: st(0.5, 100, avg: 0.1)},
+        },
+      );
+      expect(isRuleYearlyLoser(r, 'r'), isTrue,
+          reason: '2024 年 count=0 必须被跳过');
+    });
+  });
+
   group('信号集中度（防"名声建立在单个月上"）', () {
     // 直接构造报告太啰嗦，用 backtestAll 跑一条恒真规则，再看 profile。
     test('backtestAll 产出 monthsWithSignals 与 topMonthShare', () {

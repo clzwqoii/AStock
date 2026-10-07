@@ -99,6 +99,111 @@ void main() {
     expect(repo.barCount(), 2);
   });
 
+  test('historyCoverage：空库返回空覆盖，有数据返回正确起止日期与交易日数', () {
+    final emptyCov = repo.historyCoverage();
+    expect(emptyCov.isEmpty, isTrue);
+    expect(emptyCov.minDate, isNull);
+    expect(emptyCov.maxDate, isNull);
+    expect(emptyCov.tradeDays, 0);
+    expect(emptyCov.totalBars, 0);
+    expect(emptyCov.isYearsCovered(1, DateTime(2026, 10, 7)), isFalse);
+
+    repo.upsertBars([
+      row('000001.SZ', '20231001'),
+      row('600000.SH', '20231001'),
+      row('000001.SZ', '20261007'),
+    ]);
+
+    final cov = repo.historyCoverage();
+    expect(cov.isEmpty, isFalse);
+    expect(cov.minDate, '20231001');
+    expect(cov.maxDate, '20261007');
+    expect(cov.tradeDays, 2);
+    expect(cov.totalBars, 3);
+  });
+
+  test('isYearsCovered：断更库或交易日数不足时返回 false，足量且最新时返回 true', () {
+    final now = DateTime(2026, 10, 7);
+    // 场景 1：断更陈旧库（maxDate 远早于当前）
+    const staleCov = HistoryCoverage(
+      minDate: '20200101',
+      maxDate: '20220101',
+      tradeDays: 500,
+      totalBars: 2000000,
+    );
+    expect(staleCov.isYearsCovered(1, now), isFalse);
+    expect(staleCov.isYearsCovered(2, now), isFalse);
+    expect(staleCov.isYearsCovered(3, now), isFalse);
+
+    // 场景 2：碎片库（交易日数远不足，如仅有 2 个交易日）
+    const sparseCov = HistoryCoverage(
+      minDate: '20231001',
+      maxDate: '20261007',
+      tradeDays: 2,
+      totalBars: 3,
+    );
+    expect(sparseCov.isYearsCovered(1, now), isFalse);
+    expect(sparseCov.isYearsCovered(2, now), isFalse);
+    expect(sparseCov.isYearsCovered(3, now), isFalse);
+
+    // 场景 3：覆盖足量且连续
+    const fullCov = HistoryCoverage(
+      minDate: '20231001',
+      maxDate: '20261007',
+      tradeDays: 728,
+      totalBars: 3800000,
+    );
+    expect(fullCov.isYearsCovered(1, now), isTrue);
+    expect(fullCov.isYearsCovered(2, now), isTrue);
+    expect(fullCov.isYearsCovered(3, now), isTrue);
+    expect(fullCov.isYearsCovered(4, now), isFalse);
+  });
+
+  test('isStale：末根超过 45 天算断更，空库不算', () {
+    final now = DateTime(2026, 10, 7);
+    // 深且密，只有末根停在两年前
+    const stopped = HistoryCoverage(
+      minDate: '20200101',
+      maxDate: '20240101',
+      tradeDays: 900,
+      totalBars: 3000000,
+    );
+    expect(stopped.isStale(now), isTrue);
+    expect(stopped.isYearsCovered(1, now), isFalse,
+        reason: '断更库不能因为"深度够"就判成已覆盖');
+
+    const fresh = HistoryCoverage(
+      minDate: '20231001',
+      maxDate: '20261007',
+      tradeDays: 728,
+      totalBars: 3800000,
+    );
+    expect(fresh.isStale(now), isFalse);
+    // 边界：正好 45 天（20260823）不算断更，差一天（20260822）就算
+    const exactly = HistoryCoverage(
+      minDate: '20231001',
+      maxDate: '20260823',
+      tradeDays: 700,
+      totalBars: 3000000,
+    );
+    expect(exactly.isStale(now), isFalse);
+    const oneDayMore = HistoryCoverage(
+      minDate: '20231001',
+      maxDate: '20260822',
+      tradeDays: 700,
+      totalBars: 3000000,
+    );
+    expect(oneDayMore.isStale(now), isTrue);
+
+    const empty = HistoryCoverage(
+      minDate: null,
+      maxDate: null,
+      tradeDays: 0,
+      totalBars: 0,
+    );
+    expect(empty.isStale(now), isFalse, reason: '空库是"还没有数据"，不是"断更"');
+  });
+
   test('minTradeDate 取最早交易日，空库为 null', () {
     expect(repo.minTradeDate(), isNull);
     repo.upsertBars([row('000001.SZ', '20260929'), row('000001.SZ', '20260930')]);

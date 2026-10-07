@@ -130,6 +130,12 @@ class _BacktestPageState extends State<BacktestPage> {
   @override
   Widget build(BuildContext context) {
     final accent = AccentScope.of(context);
+    // 窄屏（手机宽）下筛选 chips 与返回键/标题/回测按钮挤一行放不下，
+    // NavigationToolbar 会静默把标题压到 0 宽、chip 贴上返回键（真机截图实拍）。
+    // 窄屏把 chips 下移到 AppBar 下方独立一行；桌面（≥600dp）保持原布局，
+    // 不动 800×600 首屏契约（表头可见性测试锁着）。
+    final narrow = MediaQuery.sizeOf(context).width < 600;
+    final chips = _filterChips(accent);
     return Scaffold(
       backgroundColor: AppColors.bg,
       appBar: AppBar(
@@ -138,23 +144,7 @@ class _BacktestPageState extends State<BacktestPage> {
             ? null
             : IconButton(icon: const Icon(Icons.arrow_back), onPressed: widget.onBack),
         actions: [
-          // 稳健判定依赖分年数据,窗口口径下无意义,隐藏避免误读。
-          if (!_recentMode)
-            FilterChip(
-              label: const Text('只看稳健规则', style: TextStyle(fontSize: 12)),
-              selected: _robustOnly,
-              onSelected: (v) => setState(() => _robustOnly = v),
-              selectedColor: accent.withValues(alpha: 0.18),
-              checkmarkColor: accent,
-            ),
-          if (_report != null && _report!.recent.isNotEmpty)
-            FilterChip(
-              label: const Text('最近半年', style: TextStyle(fontSize: 12)),
-              selected: _recentMode,
-              onSelected: (v) => setState(() => _recentMode = v),
-              selectedColor: accent.withValues(alpha: 0.18),
-              checkmarkColor: accent,
-            ),
+          if (!narrow) ...chips,
           const SizedBox(width: 8),
           Padding(
             padding: const EdgeInsets.only(right: 12),
@@ -171,10 +161,40 @@ class _BacktestPageState extends State<BacktestPage> {
             ),
           ),
         ],
+        bottom: narrow && chips.isNotEmpty
+            ? PreferredSize(
+                preferredSize: const Size.fromHeight(48),
+                child: Padding(
+                  padding: const EdgeInsets.fromLTRB(12, 0, 12, 8),
+                  child: Row(children: chips),
+                ),
+              )
+            : null,
       ),
       body: _report == null ? _empty() : _table(_report!, accent),
     );
   }
+
+  /// 两个口径筛选 chip。窄屏渲染在 AppBar 下方独立一行，桌面渲染在 actions。
+  List<Widget> _filterChips(Color accent) => [
+        // 稳健判定依赖分年数据,窗口口径下无意义,隐藏避免误读。
+        if (!_recentMode)
+          FilterChip(
+            label: const Text('只看稳健规则', style: TextStyle(fontSize: 12)),
+            selected: _robustOnly,
+            onSelected: (v) => setState(() => _robustOnly = v),
+            selectedColor: accent.withValues(alpha: 0.18),
+            checkmarkColor: accent,
+          ),
+        if (_report != null && _report!.recent.isNotEmpty)
+          FilterChip(
+            label: const Text('最近半年', style: TextStyle(fontSize: 12)),
+            selected: _recentMode,
+            onSelected: (v) => setState(() => _recentMode = v),
+            selectedColor: accent.withValues(alpha: 0.18),
+            checkmarkColor: accent,
+          ),
+      ];
 
   Widget _empty() => Center(
         child: Padding(
@@ -254,6 +274,11 @@ class _BacktestPageState extends State<BacktestPage> {
           consecutiveReds: _history?.consecutiveReds(rule.id),
         );
       }
+      // 全期红绿口径（与半年 CI 互不替代）：分年均收都赢该年基准 → 红，
+      // 分年都输 → 绿，其余（含"一个可判年份都没有"的旧报告）→ 黑。
+      // 判定在 core（yearlyVerdict）：缺 yearly 的旧报告在这里返回 unknown，
+      // 不上色——否则空循环恒真会把超额为正的规则整列染红。
+      final verdict = yearlyVerdict(r, rule.id, horizon: pfH);
       return _Row(
         name: rule.name,
         desc: rule.desc,
@@ -273,6 +298,8 @@ class _BacktestPageState extends State<BacktestPage> {
         fullExcess: r.baseline[pfH] == null || r.result(rule.id, pfH) == null
             ? null
             : r.result(rule.id, pfH)!.avgReturn - r.baseline[pfH]!.avgReturn,
+        fullRobust: verdict == YearlyVerdict.robust,
+        fullLoser: verdict == YearlyVerdict.loser,
       );
     }
 
@@ -351,7 +378,7 @@ class _BacktestPageState extends State<BacktestPage> {
           _marketStateCard(r.marketState!),
           const SizedBox(height: 10),
         ],
-        _meta(r),
+        _meta(r, recentMode && !_anyRecentRed(rows)),
         const SizedBox(height: 10),
         _notes(),
         const SizedBox(height: 12),
@@ -469,7 +496,7 @@ class _BacktestPageState extends State<BacktestPage> {
   String _signedPp(double v) =>
       '${v >= 0 ? '+' : ''}${(v * 100).toStringAsFixed(0)}pp';
 
-  Widget _meta(BacktestReport r) => Wrap(
+  Widget _meta(BacktestReport r, bool warnNoRed) => Wrap(
         spacing: 8,
         runSpacing: 6,
         crossAxisAlignment: WrapCrossAlignment.center,
@@ -477,6 +504,7 @@ class _BacktestPageState extends State<BacktestPage> {
           _chip('股票 ${r.stockCount} 只', AppColors.dim),
           _chip('基准样本 ${r.baseline[r.horizons.first]?.count ?? 0}', AppColors.dim),
           _chip('生成于 ${_fmtTime(r.generatedAt)}', AppColors.dim),
+          if (warnNoRed) _noRedChip(),
         ],
       );
 
@@ -552,7 +580,11 @@ class _BacktestPageState extends State<BacktestPage> {
             // 全期口径:均收 − 同期基准(选股页统计行同口径的表格版)。
             if (!recentMode)
               _headCell('$pfH日超额',
-                  _SortKey('fullExcess', (row) => row.fullExcess ?? -999), cellW, sortKey),
+                  _SortKey('fullExcess', (row) => row.fullExcess ?? -999), cellW,
+                  sortKey,
+                  tip: '规则均收 − 同期基准。红 = 分年每个有数据年份的均收都赢'
+                      '该年基准（历史有优势）；绿 = 分年都输（历史无优势）；'
+                      '黑色 = 其余。最近是否还灵看「最近半年」的置信区间，两口径互不替代。'),
             // 窗口口径:日均超额(按天重抽 CI)替代主力月与年份列。
             if (recentMode)
               _headCell(
@@ -633,7 +665,9 @@ class _BacktestPageState extends State<BacktestPage> {
                 row.fullExcess == null ? '—' : _signedPp0(row.fullExcess!),
                 cellW,
                 weight: row.isBaseline ? FontWeight.w800 : FontWeight.w400,
-                tone: row.isBaseline ? accent : AppColors.text,
+                tone: row.isBaseline
+                    ? accent
+                    : _fullExcessTone(row, accent), // 全期红绿:分年一致性口径,见列头 Tooltip
               ),
             if (recentMode) _excessCell(row, cellW, accent),
             if (recentMode) _redsCell(row, cellW, accent),
@@ -660,9 +694,10 @@ class _BacktestPageState extends State<BacktestPage> {
     if (row.excessDays < kMinSignificantDays) {
       return _cell('样本不足', cellW, tone: AppColors.dim);
     }
-    final lo = row.excessLo!;
     final hi = row.excessHi!;
-    final (Color tone, FontWeight w) = lo > 0
+    // 走到这里 days >= kMinSignificantDays 已由上面的早退保证，
+    // _recentRed 在此等价于 lo > 0。
+    final (Color tone, FontWeight w) = _recentRed(row)
         ? (accent, FontWeight.w800) // 显著为正:A 股红 = 强
         : hi < 0
             ? (AppColors.down, FontWeight.w800) // 显著为负:绿
@@ -673,6 +708,16 @@ class _BacktestPageState extends State<BacktestPage> {
   String _signedPp0(double v) =>
       '${v >= 0 ? '+' : ''}${v.toStringAsFixed(1)}';
 
+  /// 全期超额列三色:红 = 分年均收都赢该年基准（历史有优势）,
+  /// 绿 = 分年都输（历史无优势）,黑 = 其余。数值仍是全期点估计,
+  /// "最近是否还灵"由半年超额列的 CI 负责——同色不同窗,不互相替代。
+  /// 红用主题 accent,与半年超额列的"显著为正"同源（A 股红 = 强）。
+  Color _fullExcessTone(_Row row, Color accent) {
+    if (row.fullRobust && (row.fullExcess ?? 0) > 0) return accent;
+    if (row.fullLoser && (row.fullExcess ?? 0) < 0) return AppColors.down;
+    return AppColors.text;
+  }
+
   /// 连红列:台账里连续显著为正的期数。≥2 才显示(1 期红说明不了什么),
   /// 颜色与超额列同源——这是"跨窗口可信度",不是当期表现。
   Widget _redsCell(_Row row, double cellW, Color accent) {
@@ -680,6 +725,33 @@ class _BacktestPageState extends State<BacktestPage> {
     if (row.isBaseline || n < 2) return _cell('—', cellW, tone: AppColors.dim);
     return _cell('$n连红', cellW, tone: accent, weight: FontWeight.w800);
   }
+
+  /// 「最近半年显著为正（红）」的唯一判定：独立信号日 ≥ [kMinSignificantDays]
+  /// 且超额 CI 下界 > 0。_excessCell 的红色分支与 _anyRecentRed 共用它，
+  /// 口径只此一份（基准行由各调用方排除：单元格早退成 —，提示过滤 isBaseline）。
+  bool _recentRed(_Row row) =>
+      row.excessDays >= kMinSignificantDays && (row.excessLo ?? 0) > 0;
+
+  /// 半年视图里有没有"显著为正"的规则（红）。
+  bool _anyRecentRed(List<_Row> rows) =>
+      rows.any((row) => !row.isBaseline && _recentRed(row));
+
+  /// 无红提示。做成 _meta 行里的一枚琥珀色胶囊而不是独立横幅：半年视图下
+  /// 表格上方每多一行就会把「半年超额」表头挤出 800×600 首屏（有测试契约）。
+  /// 有红时不渲染。
+  Widget _noRedChip() => Container(
+        padding: const EdgeInsets.symmetric(horizontal: 8, vertical: 3),
+        decoration: BoxDecoration(
+          color: const Color(0xFFFFF8E1),
+          borderRadius: BorderRadius.circular(6),
+          border: Border.all(color: const Color(0xFFFFE0A3)),
+        ),
+        child: const Text(
+          '⚠ 当前没有任何规则在最近半年显著跑赢基准',
+          style: TextStyle(
+              fontSize: 11, fontWeight: FontWeight.w700, color: Color(0xFF6B5B23)),
+        ),
+      );
 
   /// 窗口口径说明。放在表上,颜色语义不写清楚,"不显著一片"会被误读成页面坏了,
   /// "红色"会被误读成排行榜第一。
@@ -806,6 +878,8 @@ class _Row {
     this.excessHi,
     this.excessDays = 0,
     this.fullExcess,
+    this.fullRobust = false,
+    this.fullLoser = false,
     this.consecutiveReds,
   });
 
@@ -837,6 +911,12 @@ class _Row {
 
   /// 全期口径:中间持有期均收 − 同期基准(pp);null = 无数据(基准行/无结果)。
   final double? fullExcess;
+
+  /// 全期超额列红绿:分年均收都赢该年基准（红）/ 分年都输（绿）。
+  /// 判定在 core（[yearlyVerdict]），与半年 CI 同源不同窗。
+  /// 一个可判年份都没有时**两个都是 false**（不上色，见 [YearlyVerdict.unknown]）。
+  final bool fullRobust;
+  final bool fullLoser;
 
   /// 台账里连续显著为正的期数;null = 无台账数据。
   final int? consecutiveReds;

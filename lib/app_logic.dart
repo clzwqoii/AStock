@@ -21,8 +21,10 @@ import 'package:stock/data/sina_client.dart';
 import 'package:stock/data/sync_service.dart';
 import 'package:stock/data/tushare_client.dart';
 
+export 'package:stock/data/bar_repository.dart' show HistoryCoverage;
+
 /// 当前应用版本（发布新包时同步修改，与 pubspec.version 保持一致）。
-const kAppVersion = '2.6.0';
+const kAppVersion = '2.6.1';
 
 /// 更新清单候选源（并发竞速，第一个响应的胜出）。
 /// 国内网络优先命中 Gitee；jsDelivr 镜像可加速 GitHub raw。建仓库后替换为你的地址。
@@ -851,3 +853,20 @@ typedef RunBackfillFn = Future<SyncResult> Function({
   bool force,
   void Function(String msg)? onProgress,
 });
+
+/// 读取本地库历史行情覆盖情况（供设置页与回补弹窗诊断）。
+///
+/// 走 isolate：这条 SQL 是全表聚合（`COUNT(DISTINCT trade_date)` 要扫全表，
+/// 360 万行实测 130ms 起），而调用方是 [StockApp.initState]，留在主 isolate
+/// 会把首帧一起堵住。与 [runBacktest] 同理——纯计算、不需要 onProgress。
+Future<HistoryCoverage> loadHistoryCoverage(String dbPath) => Isolate.run(() {
+      final repo = BarRepository(dbPath);
+      try {
+        return repo.historyCoverage();
+      } finally {
+        repo.close();
+      }
+    });
+
+/// 历史覆盖情况读取端口（外壳字段用）；测试注入假实现，生产用 [loadHistoryCoverage]。
+typedef LoadCoverageFn = Future<HistoryCoverage> Function(String dbPath);

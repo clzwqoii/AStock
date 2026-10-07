@@ -57,6 +57,21 @@ void main() {
     expect(t.poolReused, isFalse);
   });
 
+  test('loadHistoryCoverage：在 isolate 里读真实库，覆盖区间与库内容一致', () async {
+    seedStocks(dbPath); // 2 只 × 40 个交易日（20260810~20261002）
+    final cov = await loadHistoryCoverage(dbPath);
+    expect(cov.isEmpty, isFalse);
+    expect(cov.minDate, '20260810');
+    expect(cov.maxDate, '20261002');
+    expect(cov.tradeDays, 40);
+    expect(cov.totalBars, 80);
+
+    // 空库（库文件还不存在，App 首启就是这种）要返回空覆盖而不是抛异常
+    final empty = await loadHistoryCoverage('${tmp.path}/fresh.db');
+    expect(empty.isEmpty, isTrue);
+    expect(empty.tradeDays, 0);
+  });
+
   test('ScreeningService 池子复用：数据不变时第二次不重载，结果与单发一致', () async {
     seedStocks(dbPath);
     final svc = ScreeningService();

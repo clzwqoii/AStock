@@ -1210,6 +1210,47 @@ List<MapEntry<String, List<String>>> ruleGroupsSortedByExcess(
   return entries;
 }
 
+/// 跨年一致性判定的结论。`mixed` 与 `unknown` 都不上色，但语义不同：
+/// 前者"判过了，结果不一致"，后者"没证据"。
+enum YearlyVerdict {
+  /// 每个有数据的年份，10 日均收益都严格高于该年基准：历史有优势。
+  robust,
+
+  /// 每个有数据的年份，均收益都严格低于该年基准：历史无优势。
+  loser,
+
+  /// 有的年份赢、有的输：判过了但结论不一致。
+  mixed,
+
+  /// 一个可判年份都没有：不是"看不出"而是"没证据"。
+  ///
+  /// 旧报告 JSON 缺 `yearly` / `yearlyBaseline` 键时 [BacktestReport.fromJson]
+  /// 容错成空 map，这里就是这种情况——此时不许给出任何结论。
+  unknown,
+}
+
+/// 按「分年均收益是否都赢该年基准」判定规则。
+///
+/// 这是全期超额列红绿与 [isRuleYearlyRobust] / [isRuleYearlyLoser] 的**唯一**判定源：
+/// 口径是分年均收益超额（不是全期点估计，也不是显著性），UI 不得另写一套。
+YearlyVerdict yearlyVerdict(BacktestReport report, String ruleId, {int horizon = 10}) {
+  var judged = false;
+  var allWin = true;
+  var allLose = true;
+  for (final y in report.yearly.keys) {
+    final st = report.yearly[y]?[ruleId]?[horizon];
+    final base = report.yearlyBaseline[y]?[horizon];
+    if (st == null || base == null || st.count == 0) continue;
+    judged = true;
+    if (st.avgReturn <= base.avgReturn) allWin = false; // 必须严格赢
+    if (st.avgReturn >= base.avgReturn) allLose = false; // 必须严格输
+  }
+  if (!judged) return YearlyVerdict.unknown;
+  if (allWin) return YearlyVerdict.robust;
+  if (allLose) return YearlyVerdict.loser;
+  return YearlyVerdict.mixed;
+}
+
 /// 规则是否「跨年稳健」：在**每一个有数据的年份**，10 日**均收益**都跑赢该年的无条件基准。
 ///
 /// 全样本均值会把"只有某一年特别 high"的规则抬上来，所以拿它当筛选条件比按全样本
@@ -1234,15 +1275,25 @@ List<MapEntry<String, List<String>>> ruleGroupsSortedByExcess(
 /// 注：规则列表的**排序**也用超额（`ruleIdsSortedByExcess`，与统计行红绿
 /// 同口径），但那仍是纯排序选择，不涉及"能不能用"的判断，与这里的
 /// 稳健判定不必一致。
+///
+/// 注 2：一个可判年份都没有（[YearlyVerdict.unknown]）时**返回 true**（保持历史行为）。
+/// 它的调用方是「只看稳健规则」这类"不默认有罪"的筛子，改判会把缺 `yearly`
+/// 的旧报告筛成空表。反过来"不默认有优势"的**上色**必须走 [yearlyVerdict]，
+/// 只看 `robust`/`loser`——否则同一份旧报告会把所有超额为正的规则染红。
 bool isRuleYearlyRobust(BacktestReport report, String ruleId, {int horizon = 10}) {
-  for (final y in report.yearly.keys) {
-    final st = report.yearly[y]?[ruleId]?[horizon];
-    final base = report.yearlyBaseline[y]?[horizon];
-    if (st == null || base == null || st.count == 0) continue;
-    if (st.avgReturn <= base.avgReturn) return false;
-  }
-  return true;
+  final v = yearlyVerdict(report, ruleId, horizon: horizon);
+  return v == YearlyVerdict.robust || v == YearlyVerdict.unknown;
 }
+
+/// 规则是否**跨年一致性落败** = 分年每个有数据年份的均收都严格低于该年基准。
+///
+/// [isRuleYearlyRobust] 的镜像：全期表超额列的绿色语义（"历史无优势"）。
+/// 与红色同源同口径（分年均收益超额），UI 不得另写一套。
+///
+/// 与上者的差别只在缺数据：没有可判年份时这里返回 false（不判绿），
+/// 所以它可以直接用于上色，但上色统一走 [yearlyVerdict] 更省一次遍历。
+bool isRuleYearlyLoser(BacktestReport report, String ruleId, {int horizon = 10}) =>
+    yearlyVerdict(report, ruleId, horizon: horizon) == YearlyVerdict.loser;
 
 /// 信号是否过度集中在少数几个月。
 ///

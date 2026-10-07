@@ -6,6 +6,7 @@ import 'dart:io';
 import 'package:flutter/material.dart';
 import 'package:flutter_test/flutter_test.dart';
 import 'package:stock/core/backtest.dart';
+import 'package:stock/core/backtest.dart' as bt; // Baseline 与 Flutter 的同名，bt. 消歧
 import 'package:stock/core/market_state.dart';
 import 'package:stock/core/models.dart';
 import 'package:stock/core/rules.dart';
@@ -152,6 +153,41 @@ void main() {
     expect(find.text('10日胜率'), findsOneWidget);
     expect(before, isNotEmpty);
     expect(afterName, isNotEmpty);
+  });
+
+  testWidgets('窄屏(手机宽)下筛选 chips 下移独立一行,AppBar 不溢出遮挡', (tester) async {
+    // 360dp + 1.3 倍字号 ≈ 真机（安卓常见小屏 + 用户系统字体放大）。
+    // 此前 chips 与返回键/标题/回测按钮同挤 actions 行,放不下时
+    // NavigationToolbar 静默把标题压到读不了、chip 贴上返回键（真机截图实拍）。
+    // 修复:窄屏(<600dp)把筛选 chips 下移到 AppBar 下方独立一行。
+    addTearDown(tester.view.reset);
+    tester.view.physicalSize = const Size(360, 800);
+    tester.view.devicePixelRatio = 1.0;
+    tester.platformDispatcher.textScaleFactorTestValue = 1.3;
+    addTearDown(tester.platformDispatcher.clearAllTestValues);
+    File(reportPath).writeAsStringSync(jsonEncode(_fakeReport(generated).toJson()));
+
+    await pump(tester, BacktestPage(
+      dbPath: dbPath,
+      reportPath: reportPath,
+      onBack: () {},
+      runFn: (_, {reportPath}) async {
+        fail('不应触发');
+      },
+    ));
+
+    // 布局必须完整:标题、返回键、筛选 chips、回测按钮同时可见。
+    expect(find.text('回测对比'), findsOneWidget);
+    expect(find.text('只看稳健规则'), findsOneWidget);
+    expect(find.byIcon(Icons.arrow_back), findsOneWidget);
+    expect(find.text('重新回测'), findsOneWidget);
+    // 标题不能被挤到读不了。
+    expect(tester.getSize(find.text('回测对比')).width, greaterThan(40),
+        reason: '窄屏下标题被压扁就是 actions 溢出遮挡');
+    // chips 必须在标题下方独立一行,而不是同一行里挤。
+    expect(tester.getTopLeft(find.text('只看稳健规则')).dy,
+        greaterThan(tester.getBottomRight(find.text('回测对比')).dy),
+        reason: '窄屏下筛选 chips 应下移到 AppBar 下方独立一行');
   });
 
   testWidgets('回测抛异常时显示错误信息', (tester) async {
@@ -522,6 +558,110 @@ int rowRankOf(WidgetTester tester, String target) {
     });
   });
 
+  group('全期超额列红绿（分年一致性口径）', () {
+    BacktestStats st(double avg) => BacktestStats(
+          count: 900,
+          winRate: 0.5,
+          avgReturn: avg,
+          medianReturn: avg,
+          bestReturn: avg,
+          worstReturn: -avg,
+          profitFactor: 1,
+        );
+
+    /// 涨幅规则分年均收都赢基准（红），MA60突破分年都输（绿）。
+    BacktestReport report() {
+      const robust = 'pct_change_up';
+      const loser = 'ma60_breakout';
+      return BacktestReport(
+        generatedAt: generated.toIso8601String(),
+        horizons: const [10],
+        stockCount: 1,
+        baseline: {
+          10: bt.Baseline.fromStats(forwardDays: 10, stats: st(0.5)),
+        },
+        results: {
+          robust: {
+            10: BacktestResult.fromStats(
+                ruleId: robust, forwardDays: 10, stats: st(2.0)),
+          },
+          loser: {
+            10: BacktestResult.fromStats(
+                ruleId: loser, forwardDays: 10, stats: st(-1.0)),
+          },
+        },
+        yearly: {
+          2024: {
+            robust: {10: st(2.0)},
+            loser: {10: st(-1.0)},
+          },
+          2025: {
+            robust: {10: st(2.0)},
+            loser: {10: st(-1.0)},
+          },
+        },
+        yearlyBaseline: {
+          2024: {10: st(0.5)},
+          2025: {10: st(0.5)},
+        },
+      );
+    }
+
+    testWidgets('分年都赢基准的规则超额染红，分年都输染绿', (tester) async {
+      await pump(tester, BacktestPage(
+        dbPath: dbPath,
+        reportPath: reportPath,
+        initialReport: report(),
+        runFn: (_, {reportPath}) async => fail('不应触发'),
+      ));
+
+      expect(tester.widget<Text>(find.text('+1.5')).style?.color,
+          AccentColor.red.color,
+          reason: '分年均收都赢该年基准 → 红（历史有优势）');
+      expect(tester.widget<Text>(find.text('-1.5')).style?.color,
+          AppColors.down,
+          reason: '分年均收都输该年基准 → 绿（历史无优势）');
+    });
+
+    testWidgets('红绿语义挂在「N日超额」列头 Tooltip 上', (tester) async {
+      await pump(tester, BacktestPage(
+        dbPath: dbPath,
+        reportPath: reportPath,
+        initialReport: report(),
+        runFn: (_, {reportPath}) async => fail('不应触发'),
+      ));
+
+      expect(
+          find.byWidgetPredicate((w) =>
+              w is Tooltip && (w.message ?? '').contains('历史有优势')),
+          findsOneWidget);
+    });
+
+    testWidgets('旧格式报告没有分年数据时,超额列不染红', (tester) async {
+      // 旧报告的 JSON 没有 yearly / yearlyBaseline 两个键：fromJson 容错成空 map
+      // （_intKeyedStats3(null) → const {}），而空循环会让"分年都赢"的判定恒真。
+      // 上色若直接用那个返回值，全表超额为正的规则会一起变红——
+      // "历史有优势"是凭空来的。没有可判年份就该保持黑色。
+      final legacyJson = report().toJson()
+        ..remove('yearly')
+        ..remove('yearlyBaseline');
+      expect(legacyJson.containsKey('yearly'), isFalse);
+
+      await pump(tester, BacktestPage(
+        dbPath: dbPath,
+        reportPath: reportPath,
+        initialReport: BacktestReport.fromJson(legacyJson),
+        runFn: (_, {reportPath}) async => fail('不应触发'),
+      ));
+
+      expect(tester.widget<Text>(find.text('+1.5')).style?.color,
+          isNot(AccentColor.red.color),
+          reason: '一个可判年份都没有时不能宣称"历史有优势"');
+      expect(tester.widget<Text>(find.text('-1.5')).style?.color,
+          isNot(AppColors.down), reason: '同理不能宣称"历史无优势"');
+    });
+  });
+
   group('最近半年口径', () {
     /// 构造带 recent 数据的报告:[sig] 为指定规则的窗口日均值。
     BacktestReport recentReport({
@@ -626,6 +766,58 @@ int rowRankOf(WidgetTester tester, String target) {
       ));
 
       expect(find.text('最近半年'), findsNothing);
+    });
+
+    testWidgets('半年视图无任何显著为正规则时,表格上方出现醒目提示', (tester) async {
+      // 规则 C 显著为负、规则 B 样本不足 → 没有一条红。
+      final base = sliceOf({for (var d = 1; d <= 30; d++) d: 0.0});
+      final r = _fakeReport(generated);
+      final report = BacktestReport(
+        generatedAt: r.generatedAt,
+        horizons: r.horizons,
+        stockCount: r.stockCount,
+        baseline: r.baseline,
+        results: r.results,
+        recent: {
+          'close_above_ma20': {for (final h in r.horizons) h: sliceOf({for (var d = 1; d <= 5; d++) d: 1.0})},
+          'macd_golden_cross': {for (final h in r.horizons) h: sliceOf({for (var d = 1; d <= 30; d++) d: -1.0})},
+        },
+        recentBaseline: {for (final h in r.horizons) h: base},
+      );
+      await pump(tester, BacktestPage(
+        dbPath: dbPath,
+        reportPath: reportPath,
+        initialReport: report,
+        runFn: (_, {reportPath}) async => fail('不应触发'),
+      ));
+
+      await tester.tap(find.text('最近半年'));
+      await tester.pump();
+
+      expect(find.textContaining('当前没有任何规则在最近半年显著跑赢基准'),
+          findsOneWidget);
+    });
+
+    testWidgets('半年视图存在显著为正规则时不显示无红提示', (tester) async {
+      final base = sliceOf({for (var d = 1; d <= 30; d++) d: 0.0});
+      final report = recentReport(
+        base: base,
+        ruleA: sliceOf({for (var d = 1; d <= 30; d++) d: 1.0}), // 红
+        ruleB: sliceOf({for (var d = 1; d <= 5; d++) d: 1.0}),
+        ruleC: sliceOf({for (var d = 1; d <= 30; d++) d: -1.0}),
+      );
+      await pump(tester, BacktestPage(
+        dbPath: dbPath,
+        reportPath: reportPath,
+        initialReport: report,
+        runFn: (_, {reportPath}) async => fail('不应触发'),
+      ));
+
+      await tester.tap(find.text('最近半年'));
+      await tester.pump();
+
+      expect(find.textContaining('当前没有任何规则在最近半年显著跑赢基准'),
+          findsNothing);
     });
 
     testWidgets('窗口口径说明随口径出现', (tester) async {

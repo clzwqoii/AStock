@@ -9,6 +9,8 @@ import 'sina_client.dart';
 import 'tencent_client.dart';
 import 'tushare_client.dart';
 
+export 'bar_repository.dart' show backfillFromDate, HistoryCoverage;
+
 class SyncResult {
   const SyncResult({
     required this.dates,
@@ -34,14 +36,6 @@ class SyncResult {
   /// 逐股备源拉取失败的股票只数（单只失败不中断，但必须在回执里可见，
   /// 否则大量失败也显示"回补完成"，用户以为数据齐了）。
   final int failedSymbols;
-}
-
-/// 回补历史的区间下界：今天往前推 [years] 个日历年（`YYYYMMDD`，闭区间）。
-/// 2/29 回补 1 年会滚到 3/1——区间模式只要求"约一年前"，无需精确日。
-String backfillFromDate(DateTime now, int years) {
-  final d = DateTime(now.year - years, now.month, now.day);
-  String p2(int v) => v.toString().padLeft(2, '0');
-  return '${d.year}${p2(d.month)}${p2(d.day)}';
 }
 
 /// 同步规则：
