@@ -24,6 +24,17 @@ class _SortKey {
   final double Function(_Row)? num;
 }
 
+/// PF 之后的固定列表头说明：表头、数据单元格、列数（tableW）三处都从同一份
+/// 列表派生。早先这三处是三份并行的 `if (recentMode)`，各加一列必然对不上宽度。
+class _Col {
+  const _Col(this.label, this.key, this.cell, {this.tip});
+
+  final String label;
+  final _SortKey key;
+  final Widget Function(_Row row) cell;
+  final String? tip;
+}
+
 class BacktestPage extends StatefulWidget {
   const BacktestPage({
     super.key,
@@ -360,9 +371,56 @@ class _BacktestPageState extends State<BacktestPage> {
     const cellW = 62.0;
     // 分年胜率：每年一列。窗口口径没有分年与集中度,换成超额列。
     final years = recentMode ? <int>[] : (r.yearly.keys.toList()..sort());
+    // PF 之后的固定列。全期 2 列(超额/主力月);窗口 5 列(半年超额/独立日/
+    // CI下界/CI上界/连红)。表头、单元格、tableW 都从这里派生,不再各写一份。
+    final tailCols = <_Col>[
+      if (recentMode) ...[
+        _Col('半年超额', _SortKey('excess', (row) => row.excessPp ?? -999),
+            (row) => _excessCell(row, cellW, accent),
+            tip: '固定跟随中间持有期（默认 10 日）：规则日均收益 − 基准日均收益，'
+                '按天重抽 200 轮取 95% 置信区间。'),
+        // 这里不用 -999 哨兵：天数 > 0 ⟺ 有窗口数据，所以真值 0 的那一组
+        // 恰好就是"没数据"那一组，与 CI 两列的 -999 分组逐位相同。
+        _Col('独立日', _SortKey('excessDays', (row) => row.excessDays.toDouble()),
+            (row) => _daysCell(row, cellW),
+            tip: '窗口内有信号的交易日数（不是信号条数）。少于 '
+                '$kMinSignificantDays 个不下结论：超额列显示「样本不足」，'
+                'CI 两列不参与解读。'),
+        _Col('CI下界', _SortKey('ciLow', (row) => row.excessLo ?? -999),
+            (row) => _ciCell(row, cellW, accent, low: true),
+            tip: '95% 置信区间下界，口径同「半年超额」列。> 0 即显著为正；'
+                '单元格数字是点估计，颜色才是结论。'),
+        _Col('CI上界', _SortKey('ciHigh', (row) => row.excessHi ?? -999),
+            (row) => _ciCell(row, cellW, accent, low: false),
+            tip: '95% 置信区间上界，口径同「半年超额」列。< 0 即显著为负。'),
+        _Col(
+            '连红',
+            _SortKey('reds', (row) => (row.consecutiveReds ?? 0).toDouble()),
+            (row) => _redsCell(row, cellW, accent),
+            tip: '连续几期台账都红才显示。一期 = 一次回测快照，两期挨得越近'
+                '窗口重叠越多、证据越弱，隔一个月以上再看才作数。'),
+      ] else ...[
+        // 全期口径:均收 − 同期基准(选股页统计行同口径的表格版)。
+        _Col('$pfH日超额', _SortKey('fullExcess', (row) => row.fullExcess ?? -999),
+            (row) => _cell(
+                  row.fullExcess == null ? '—' : _signedPp0(row.fullExcess!),
+                  cellW,
+                  weight: row.isBaseline ? FontWeight.w800 : FontWeight.w400,
+                  tone: row.isBaseline ? accent : _fullExcessTone(row, accent),
+                ),
+            tip: '规则均收 − 同期基准。红 = 分年每个有数据年份的均收都赢'
+                '该年基准（历史有优势）；绿 = 分年都输（历史无优势）；'
+                '黑色 = 其余。最近是否还灵看「最近半年」的置信区间，两口径互不替代。'),
+        // 主力月占比：最大单月信号数 / 总信号数。超过
+        // kRuleTopMonthShareCeiling 标警示色——那不是"更好"，是"更可疑"。
+        _Col('主力月', _SortKey('share', (row) => row.profile.topMonthShare),
+            (row) => _cell(_topMonthShare(row), cellW,
+                weight: row.isBaseline ? FontWeight.w800 : FontWeight.w400,
+                tone: _shareTone(row))),
+      ],
+    ];
     // +20 是行内左右各 10 的水平内边距，不加会让 Row 溢出。
-    // 全期 3 列(PF/超额/主力月),窗口 3 列(PF/半年超额/连红)。
-    final extraCols = 3;
+    final extraCols = 1 + tailCols.length; // PF + 尾部列
     final tableW = nameW +
         cellW * (hs.length * 3 + extraCols + years.length) +
         20;
@@ -382,10 +440,6 @@ class _BacktestPageState extends State<BacktestPage> {
         const SizedBox(height: 10),
         _notes(),
         const SizedBox(height: 12),
-        if (recentMode) ...[
-          _recentNote(),
-          const SizedBox(height: 12),
-        ],
         Card(
           elevation: 0,
           shape: RoundedRectangleBorder(
@@ -399,15 +453,22 @@ class _BacktestPageState extends State<BacktestPage> {
               child: Column(
                 crossAxisAlignment: CrossAxisAlignment.stretch,
                 children: [
-                  _headerRow(hs, pfH, years, nameW, cellW, sortKey, recentMode),
+                  _headerRow(hs, pfH, years, nameW, cellW, sortKey, tailCols),
                   const Divider(height: 1),
                   for (final row in rows)
-                    _dataRow(row, hs, years, accent, nameW, cellW, recentMode),
+                    _dataRow(row, hs, years, accent, nameW, cellW, tailCols),
                 ],
               ),
             ),
           ),
         ),
+        // 半年口径说明卡放在**表格下方**：表格上方每多一行就把表头往下推一行，
+        // 实测 800×600 下多两行后表格整块滑出 ListView 的构建区（表头 Text 根本
+        // 不在树上，5 个用例连带变红）。字段定义要写全，就只能占表格下方这块空间。
+        if (recentMode) ...[
+          const SizedBox(height: 12),
+          _recentNote(),
+        ],
         const SizedBox(height: 16),
         _legend(),
       ],
@@ -558,7 +619,7 @@ class _BacktestPageState extends State<BacktestPage> {
       );
 
   Widget _headerRow(List<int> hs, int pfH, List<int> years, double nameW,
-          double cellW, _SortKey sortKey, bool recentMode) =>
+          double cellW, _SortKey sortKey, List<_Col> tailCols) =>
       Padding(
         padding: const EdgeInsets.symmetric(horizontal: 10, vertical: 9),
         child: Row(
@@ -577,36 +638,8 @@ class _BacktestPageState extends State<BacktestPage> {
                   _SortKey('avg${hs[i]}', (row) => row.avg[hs[i]] ?? 0), cellW, sortKey),
             ],
             _headCell('$pfH日PF', _SortKey('pf', (row) => row.pf), cellW, sortKey),
-            // 全期口径:均收 − 同期基准(选股页统计行同口径的表格版)。
-            if (!recentMode)
-              _headCell('$pfH日超额',
-                  _SortKey('fullExcess', (row) => row.fullExcess ?? -999), cellW,
-                  sortKey,
-                  tip: '规则均收 − 同期基准。红 = 分年每个有数据年份的均收都赢'
-                      '该年基准（历史有优势）；绿 = 分年都输（历史无优势）；'
-                      '黑色 = 其余。最近是否还灵看「最近半年」的置信区间，两口径互不替代。'),
-            // 窗口口径:日均超额(按天重抽 CI)替代主力月与年份列。
-            if (recentMode)
-              _headCell(
-                  '半年超额',
-                  _SortKey('excess', (row) => row.excessPp ?? -999),
-                  cellW,
-                  sortKey,
-                  tip: '固定跟随中间持有期（默认 10 日）：规则日均收益 − 基准日均收益，'
-                      '按天重抽 200 轮取 95% 置信区间。'),
-            if (recentMode)
-              _headCell(
-                  '连红',
-                  _SortKey('reds', (row) => (row.consecutiveReds ?? 0).toDouble()),
-                  cellW,
-                  sortKey,
-                  tip: '连续几期台账都红才显示。一期 = 一次回测快照，两期挨得越近'
-                      '窗口重叠越多、证据越弱，隔一个月以上再看才作数。'),
-            // 主力月占比：最大单月信号数 / 总信号数。超过
-            // kRuleTopMonthShareCeiling 标警示色——那不是"更好"，是"更可疑"。
-            if (!recentMode)
-              _headCell('主力月', _SortKey('share', (row) => row.profile.topMonthShare),
-                  cellW, sortKey),
+            for (final c in tailCols)
+              _headCell(c.label, c.key, cellW, sortKey, tip: c.tip),
             for (final y in years)
               _headCell('$y年',
                   _SortKey('year$y', (row) => row.yearlyWin[y] ?? -1), cellW, sortKey),
@@ -641,7 +674,7 @@ class _BacktestPageState extends State<BacktestPage> {
   }
 
   Widget _dataRow(_Row row, List<int> hs, List<int> years, Color accent,
-          double nameW, double cellW, bool recentMode) =>
+          double nameW, double cellW, List<_Col> tailCols) =>
       Container(
         color: row.isBaseline ? accent.withValues(alpha: 0.06) : null,
         padding: const EdgeInsets.symmetric(horizontal: 10, vertical: 9),
@@ -660,21 +693,7 @@ class _BacktestPageState extends State<BacktestPage> {
             _cell(row.pf.toStringAsFixed(2), cellW,
                 weight: row.isBaseline ? FontWeight.w800 : FontWeight.w400,
                 tone: row.isBaseline ? accent : AppColors.text),
-            if (!recentMode)
-              _cell(
-                row.fullExcess == null ? '—' : _signedPp0(row.fullExcess!),
-                cellW,
-                weight: row.isBaseline ? FontWeight.w800 : FontWeight.w400,
-                tone: row.isBaseline
-                    ? accent
-                    : _fullExcessTone(row, accent), // 全期红绿:分年一致性口径,见列头 Tooltip
-              ),
-            if (recentMode) _excessCell(row, cellW, accent),
-            if (recentMode) _redsCell(row, cellW, accent),
-            if (!recentMode)
-              _cell(_topMonthShare(row), cellW,
-                  weight: row.isBaseline ? FontWeight.w800 : FontWeight.w400,
-                  tone: _shareTone(row)),
+            for (final c in tailCols) c.cell(row),
             for (final y in years)
               _cell(
                 // -1 表示该年没有可用数据（如 MA250 需要 250 根，早年算不出来）
@@ -686,23 +705,51 @@ class _BacktestPageState extends State<BacktestPage> {
         ),
       );
 
+  /// 半年超额/CI 两列共用的结论样式:显著为正 accent/w800、显著为负绿/w800、
+  /// 不显著与样本不足灰/w400。独立日不足 [kMinSignificantDays] 或基准行不下结论。
+  ///
+  /// 颜色与字重只此一份:CI 下界/上界列只取它的颜色(同一结论的三个数字,
+  /// 但字重不加重——"结论"的视觉主力永远是「半年超额」列)。
+  ({Color tone, FontWeight weight}) _excessStyle(_Row row, Color accent) {
+    if (row.isBaseline || row.excessDays < kMinSignificantDays) {
+      return (tone: AppColors.dim, weight: FontWeight.w400);
+    }
+    if (_recentRed(row)) return (tone: accent, weight: FontWeight.w800); // 红 = 强
+    return (row.excessHi ?? 0) < 0
+        ? (tone: AppColors.down, weight: FontWeight.w800)
+        : (tone: AppColors.dim, weight: FontWeight.w400);
+  }
+
   /// 半年超额单元格:显著为正高亮、显著为负绿、不显著灰、样本不足/基准 —。
   Widget _excessCell(_Row row, double cellW, Color accent) {
-    if (row.isBaseline || row.excessPp == null) {
+    if (row.isBaseline || !row.hasRecentCI) {
       return _cell('—', cellW, tone: AppColors.dim);
     }
     if (row.excessDays < kMinSignificantDays) {
       return _cell('样本不足', cellW, tone: AppColors.dim);
     }
-    final hi = row.excessHi!;
-    // 走到这里 days >= kMinSignificantDays 已由上面的早退保证，
-    // _recentRed 在此等价于 lo > 0。
-    final (Color tone, FontWeight w) = _recentRed(row)
-        ? (accent, FontWeight.w800) // 显著为正:A 股红 = 强
-        : hi < 0
-            ? (AppColors.down, FontWeight.w800) // 显著为负:绿
-            : (AppColors.dim, FontWeight.w400); // 不显著:灰
-    return _cell(_signedPp0(row.excessPp!), cellW, tone: tone, weight: w);
+    final style = _excessStyle(row, accent);
+    return _cell(_signedPp0(row.excessPp!), cellW,
+        tone: style.tone, weight: style.weight);
+  }
+
+  /// 独立日单元格:窗口内有信号的**交易日数**(信号条数 ≠ 独立日数)。
+  /// 日数不足也照实显示数字——"样本不足"的结论挂在超额列,这里给依据。
+  Widget _daysCell(_Row row, double cellW) {
+    if (row.isBaseline || !row.hasRecentCI) {
+      return _cell('—', cellW, tone: AppColors.dim);
+    }
+    return _cell('${row.excessDays}', cellW, tone: AppColors.dim);
+  }
+
+  /// 半年 CI 下界/上界单元格:与超额列同色系(同一个判定的两端),两位小数。
+  /// [hasRecentCI] 保证 lo/hi 与 excessPp 同生同灭,所以这里可以直接取。
+  Widget _ciCell(_Row row, double cellW, Color accent, {required bool low}) {
+    if (row.isBaseline || !row.hasRecentCI) {
+      return _cell('—', cellW, tone: AppColors.dim);
+    }
+    return _cell(_num(low ? row.excessLo! : row.excessHi!), cellW,
+        tone: _excessStyle(row, accent).tone);
   }
 
   String _signedPp0(double v) =>
@@ -753,8 +800,10 @@ class _BacktestPageState extends State<BacktestPage> {
         ),
       );
 
-  /// 窗口口径说明。放在表上,颜色语义不写清楚,"不显著一片"会被误读成页面坏了,
-  /// "红色"会被误读成排行榜第一。
+  /// 窗口口径说明：四列各是什么字段 + 红/绿/灰/样本不足的语义。放在**表格下方**
+  /// （见 [_table] 里的位置注释），所以可以写全——颜色语义不写清楚，"不显著一片"
+  /// 会被误读成页面坏了，"红色"会被误读成排行榜第一，单元格里那个点估计则会
+  /// 被当成"数值大就是好"。
   Widget _recentNote() => Container(
         padding: const EdgeInsets.all(12),
         decoration: BoxDecoration(
@@ -771,11 +820,19 @@ class _BacktestPageState extends State<BacktestPage> {
             Text(
               '「最近半年」= 最近 120 个交易日的可评估日。超额 = 规则日均收益 − '
               '基准日均收益(按日配对),按天重抽 200 轮取 95% 置信区间。\n'
+              '· 四列都固定跟随中间持有期(默认 10 日);表格可左右滑动,列头悬停/长按'
+              '有该列的口径:\n'
+              '  「半年超额」= 日均超额 pp,也就是那个点估计——数字大小不决定颜色,'
+              '判定只看 CI。\n'
+              '  「独立日」= 窗口内有信号的交易日数(不是信号条数),少于 '
+              '$kMinSignificantDays 个不下结论。\n'
+              '  「CI下界」「CI上界」= 95% 置信区间的两端,判定只看它们与 0 的位置:'
+              '下界>0 红、上界<0 绿、跨 0 灰。\n'
               '· 红色 = 显著为正(下界>0):最近半年确实在赚超额。这是及格线,'
               '不是冠军奖牌;多条红色时看「连红」列——连续几期台账都红的才更可信。\n'
               '· 灰色 = 不显著:分不清是真本事还是运气,当"暂时失效"处理,别追。\n'
               '· 绿色 = 显著为负:统计上确认跑输基准,当前市况下避开。\n'
-              '· 样本不足 = 独立信号日少于 20 个,不下结论。\n'
+              '· 样本不足 = 独立信号日少于 $kMinSignificantDays 个,不下结论。\n'
               '· 没有红色 = 当前没有规则值得信,正确动作是降低操作频率与预期,'
               '而不是换一条规则。红色只描述过去 120 个交易日,不是对未来的承诺。\n'
               '· 选股页规则名下的红绿是「最近一个样本够的年份的超额」,口径比这里松;'
@@ -905,6 +962,10 @@ class _Row {
   final double? excessPp;
   final double? excessLo;
   final double? excessHi;
+
+  /// 窗口 CI 三列(超额/独立日/CI 上下界)有没有数据。
+  /// 三者由 ruleRow 一次性赋值、同生同灭，所以判定只此一份。
+  bool get hasRecentCI => excessPp != null;
 
   /// 窗口内独立信号日数,不足 [kMinSignificantDays] 显示"样本不足"。
   final int excessDays;

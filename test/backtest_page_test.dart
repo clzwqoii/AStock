@@ -704,6 +704,10 @@ int rowRankOf(WidgetTester tester, String target) {
 
       expect(find.text('最近半年'), findsNothing);
       expect(find.text('半年超额'), findsNothing);
+      // 窗口口径新增的三列也必须只在窗口口径出现(各列都是 recentMode 守卫)。
+      expect(find.text('独立日'), findsNothing);
+      expect(find.text('CI下界'), findsNothing);
+      expect(find.text('CI上界'), findsNothing);
     });
 
     testWidgets('切到最近半年:超额列出现,显著/不显著/样本不足三态', (tester) async {
@@ -755,6 +759,72 @@ int rowRankOf(WidgetTester tester, String target) {
       // 年份列与主力月列在窗口口径下无意义,应消失
       expect(find.text('2024年'), findsNothing);
       expect(find.text('主力月'), findsNothing);
+    });
+
+    /// 同一天多只股票出信号时信号数 > 独立日数——独立日列必须显示后者。
+    RecentSlice sliceDays(Map<int, double> dayMean, {int perDay = 10}) =>
+        RecentSlice(
+          stats: BacktestStats(
+            count: dayMean.length * perDay,
+            winRate: 0.5,
+            avgReturn: 0.0,
+            medianReturn: 0.0,
+            bestReturn: 0.0,
+            worstReturn: 0.0,
+            profitFactor: 1.0,
+          ),
+          dayMeanReturn: dayMean,
+        );
+
+    testWidgets('半年视图展示「独立日/CI下界/CI上界」三列,与超额列同源着色', (tester) async {
+      // A 显著为正、B 独立日不足、C 显著为负;每天收益恒定 → 重抽区间退化成一点。
+      final base = sliceDays({for (var d = 1; d <= 30; d++) d: 0.0});
+      final report = recentReport(
+        base: base,
+        ruleA: sliceDays({for (var d = 1; d <= 30; d++) d: 1.0}),
+        ruleB: sliceDays({for (var d = 1; d <= 5; d++) d: 2.0}, perDay: 2),
+        ruleC: sliceDays({for (var d = 1; d <= 30; d++) d: -1.0}),
+      );
+      await pump(tester, BacktestPage(
+        dbPath: dbPath,
+        reportPath: reportPath,
+        initialReport: report,
+        runFn: (_, {reportPath}) async => fail('不应触发'),
+      ));
+
+      await tester.tap(find.text('最近半年'));
+      await tester.pump();
+
+      expect(find.text('独立日'), findsOneWidget);
+      expect(find.text('CI下界'), findsOneWidget);
+      expect(find.text('CI上界'), findsOneWidget);
+      // 独立日 = 有信号的交易日数,不是信号条数(A 的 5/10 日信号数是 300)。
+      expect(find.text('30'), findsNWidgets(2)); // A、C
+      expect(find.text('5'), findsOneWidget); // B
+      // CI 两列用两位小数,与超额列的一位小数区分开。
+      expect(find.text('+1.00'), findsNWidgets(2)); // A 的下界与上界
+      expect(find.text('-1.00'), findsNWidgets(2)); // C
+      expect(find.text('+2.00'), findsNWidgets(2)); // B(日数不足也把区间露出来)
+
+      Color tone(String t) =>
+          tester.widgetList<Text>(find.text(t)).first.style!.color!;
+      expect(tone('+1.00'), AccentColor.red.color,
+          reason: '显著为正:CI 两列与超额列同色');
+      expect(tone('-1.00'), AppColors.down, reason: '显著为负:绿');
+      expect(tone('+2.00'), AppColors.dim, reason: '独立日不足 20 不下结论,走灰色');
+
+      // 点「独立日」列头按独立日降序:B(5 日)应排到 C(30 日)下面。
+      // 列头在 800×600 视口外,先滚进可视区再点(否则 tap 命中不到,告警而非生效)。
+      await tester.ensureVisible(find.text('独立日'));
+      await tester.pump();
+      await tester.tap(find.text('独立日'));
+      await tester.pump();
+      expect(
+        tester.getTopLeft(find.text(ruleById('close_above_ma20').name)).dy,
+        greaterThan(
+            tester.getTopLeft(find.text(ruleById('macd_golden_cross').name)).dy),
+        reason: '列头必须挂独立日的排序键,而不是继续按胜率排',
+      );
     });
 
     testWidgets('报告无 recent 数据(旧口径)时不显示「最近半年」chip', (tester) async {
@@ -838,6 +908,14 @@ int rowRankOf(WidgetTester tester, String target) {
 
       await tester.tap(find.text('最近半年'));
       await tester.pump();
+      // 说明卡在表格下方(表格上方每多一行就把表头挤出首屏,见 _table 的注释),
+      // 800×600 下落在 ListView 构建区外,必须滚到才会被构建。
+      await tester.dragUntilVisible(
+        find.text('怎么看「最近半年」'),
+        find.byType(ListView),
+        const Offset(0, -200),
+      );
+      await tester.pump();
       expect(find.textContaining('按天重抽'), findsOneWidget);
       // 颜色语义必须写在页面上:红色是及格线不是冠军、灰色别追、没有红色少动。
       expect(find.text('怎么看「最近半年」'), findsOneWidget);
@@ -845,6 +923,10 @@ int rowRankOf(WidgetTester tester, String target) {
       expect(find.textContaining('没有红色'), findsOneWidget);
       // 与选股页统计行的口径衔接(那边是"最近一个样本够的年份的超额",比这里松)。
       expect(find.textContaining('最近一个样本够的年份的超额'), findsOneWidget);
+      // 四个数据列各自是什么字段,必须写在页面上(用户提问"+0.2 为什么不红")。
+      expect(find.textContaining('「半年超额」'), findsOneWidget);
+      expect(find.textContaining('有信号的交易日数'), findsOneWidget);
+      expect(find.textContaining('95% 置信区间的两端'), findsOneWidget);
       // 超额列固定跟随中间持有期:挂在列头 Tooltip 上而不是多写一行正文
       // (正文多一行会把表头挤出手机首屏)。
       expect(
