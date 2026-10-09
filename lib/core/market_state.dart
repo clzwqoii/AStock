@@ -89,6 +89,82 @@ class MarketState {
       );
 }
 
+/// 预算的全局上下文：从完整交易日历派生，在所有分片间共享。
+/// 把 [assessMarketState] 里的日历准备逻辑（allDays / windowDays / calIndex）
+/// 提到外面，使分片只算 [MarketStateContrib]、合并只走 [marketStateFromContrib]。
+class MarketStateCtx {
+  final List<DateTime> allDays;
+  final Set<DateTime> inWindow;
+  final Map<DateTime, int> calIndex;
+  final int lastCalIndex;
+  final int maPeriod, statWindow, maxLastBarLagTradingDays,
+      corporateActionLookbackBars;
+
+  const MarketStateCtx({
+    required this.allDays,
+    required this.inWindow,
+    required this.calIndex,
+    required this.lastCalIndex,
+    required this.maPeriod,
+    required this.statWindow,
+    required this.maxLastBarLagTradingDays,
+    required this.corporateActionLookbackBars,
+  });
+
+  factory MarketStateCtx.fromCalendar(
+    Set<DateTime> calendar, {
+    int maPeriod = 120,
+    int recentDays = 130,
+    int statWindow = 20,
+    int maxLastBarLagTradingDays = 20,
+    int corporateActionLookbackBars = kCorporateActionLookbackBars,
+  }) {
+    final allDays = calendar.toList()..sort();
+    final minStatBars = statWindow + 1;
+    final need = maPeriod > minStatBars ? maPeriod : minStatBars;
+    final effectiveRecentDays = recentDays < need ? need : recentDays;
+    final windowDays = allDays.length > effectiveRecentDays
+        ? allDays.sublist(allDays.length - effectiveRecentDays)
+        : allDays;
+    return MarketStateCtx(
+      allDays: allDays,
+      inWindow: Set<DateTime>.from(windowDays),
+      calIndex: {for (var i = 0; i < allDays.length; i++) allDays[i]: i},
+      lastCalIndex: allDays.length - 1,
+      maPeriod: maPeriod,
+      statWindow: statWindow,
+      maxLastBarLagTradingDays: maxLastBarLagTradingDays,
+      corporateActionLookbackBars: corporateActionLookbackBars,
+    );
+  }
+}
+
+/// 分片级市场状态贡献：每股可并行算出，再 [mergeMarketStateContrib] 合并。
+/// dayKey = d.year * 10000 + d.month * 100 + d.day（与回测最近窗口的 dayKey 同口径）。
+class MarketStateContrib {
+  final Map<int, double> daySums;
+  final Map<int, int> dayCounts;
+  final int evaluated, above, highs, lows;
+
+  const MarketStateContrib({
+    required this.daySums,
+    required this.dayCounts,
+    required this.evaluated,
+    required this.above,
+    required this.highs,
+    required this.lows,
+  });
+
+  static const empty = MarketStateContrib(
+    daySums: {},
+    dayCounts: {},
+    evaluated: 0,
+    above: 0,
+    highs: 0,
+    lows: 0,
+  );
+}
+
 /// [maPeriod] 等权指数均线窗口；[recentDays] 参与指数计算的最近交易日数；
 /// [statWindow] 近端统计窗口（ret20 / 宽度 MA / 新高新低共用）。
 ///
@@ -105,15 +181,103 @@ MarketState assessMarketState(
   int maxLastBarLagTradingDays = 20,
   int corporateActionLookbackBars = kCorporateActionLookbackBars,
 }) {
-  final allDays = tradingCalendar(stocks).toList()..sort();
-  final asOf = allDays.isEmpty
-      ? ''
-      : '${allDays.last.year}-${allDays.last.month.toString().padLeft(2, '0')}-'
-          '${allDays.last.day.toString().padLeft(2, '0')}';
+  final ctx = MarketStateCtx.fromCalendar(tradingCalendar(stocks),
+      maPeriod: maPeriod,
+      recentDays: recentDays,
+      statWindow: statWindow,
+      maxLastBarLagTradingDays: maxLastBarLagTradingDays,
+      corporateActionLookbackBars: corporateActionLookbackBars);
+  return marketStateFromContrib(marketStateContrib(stocks, ctx), ctx);
+}
 
-  final minStatBars = statWindow + 1;
-  final need = maPeriod > minStatBars ? maPeriod : minStatBars;
-  if (allDays.length < need) {
+/// 分片级市场状态贡献：逐股扫描窗口内每日收盘均值与宽度/新高新低计数。
+/// 与原 [assessMarketState] 内的两段循环逐位等价（sum/count 按股票→bar 序累积，
+/// 宽度/高低是独立整数累加器，合并顺序不影响整数结果）。
+MarketStateContrib marketStateContrib(
+    List<StockData> stocks, MarketStateCtx ctx) {
+  final daySums = <int, double>{};
+  final dayCounts = <int, int>{};
+  final minStatBars = ctx.statWindow + 1;
+  var evaluated = 0, above = 0, highs = 0, lows = 0;
+  for (final s in stocks) {
+    for (final b in s.bars) {
+      if (!ctx.inWindow.contains(b.date)) continue;
+      final dayKey =
+          b.date.year * 10000 + b.date.month * 100 + b.date.day;
+      daySums[dayKey] = (daySums[dayKey] ?? 0) + b.close;
+      dayCounts[dayKey] = (dayCounts[dayKey] ?? 0) + 1;
+    }
+    if (s.bars.length < minStatBars) continue;
+    final at = ctx.calIndex[s.bars.last.date];
+    if (at == null) continue;
+    if (ctx.maxLastBarLagTradingDays >= 0 &&
+        ctx.lastCalIndex - at > ctx.maxLastBarLagTradingDays) {
+      continue;
+    }
+    if (ctx.corporateActionLookbackBars > 0) {
+      if (!isCleanSignalDay(s.symbol, s.bars, s.bars.length - 1,
+          lookbackBars: ctx.corporateActionLookbackBars)) {
+        continue;
+      }
+    }
+    evaluated++;
+    final tailBars = s.bars.sublist(s.bars.length - minStatBars);
+    final tailCloses = [for (final b in tailBars) b.close];
+    final lastClose = tailCloses.last;
+    if (lastClose > sma(tailCloses, ctx.statWindow)) above++;
+    if (lastClose >= tailCloses.reduce((a, b) => a > b ? a : b)) highs++;
+    if (lastClose <= tailCloses.reduce((a, b) => a < b ? a : b)) lows++;
+  }
+  return MarketStateContrib(
+    daySums: daySums,
+    dayCounts: dayCounts,
+    evaluated: evaluated,
+    above: above,
+    highs: highs,
+    lows: lows,
+  );
+}
+
+/// 合并多分片贡献：daySums/dayCounts 按日键累加，宽度整数直接求和。
+/// 浮点 sum 的分组顺序与串行路径可能 ulp 级不同，市场状态测试用 closeTo。
+MarketStateContrib mergeMarketStateContrib(List<MarketStateContrib> parts) {
+  final daySums = <int, double>{};
+  final dayCounts = <int, int>{};
+  var evaluated = 0, above = 0, highs = 0, lows = 0;
+  for (final p in parts) {
+    for (final e in p.daySums.entries) {
+      daySums[e.key] = (daySums[e.key] ?? 0) + e.value;
+    }
+    for (final e in p.dayCounts.entries) {
+      dayCounts[e.key] = (dayCounts[e.key] ?? 0) + e.value;
+    }
+    evaluated += p.evaluated;
+    above += p.above;
+    highs += p.highs;
+    lows += p.lows;
+  }
+  return MarketStateContrib(
+    daySums: daySums,
+    dayCounts: dayCounts,
+    evaluated: evaluated,
+    above: above,
+    highs: highs,
+    lows: lows,
+  );
+}
+
+/// 由合并后的贡献 + 全局上下文重建 [MarketState]。
+/// 逻辑与原 [assessMarketState] 收尾段逐字一致：重建等权指数序列、算
+/// maGap/ret/宽度/新高新低。
+MarketState marketStateFromContrib(
+    MarketStateContrib contrib, MarketStateCtx ctx) {
+  final asOf = ctx.allDays.isEmpty
+      ? ''
+      : '${ctx.allDays.last.year}-${ctx.allDays.last.month.toString().padLeft(2, '0')}-'
+          '${ctx.allDays.last.day.toString().padLeft(2, '0')}';
+  final minStatBars = ctx.statWindow + 1;
+  final need = ctx.maPeriod > minStatBars ? ctx.maPeriod : minStatBars;
+  if (ctx.allDays.length < need) {
     return MarketState(
       regime: MarketRegime.insufficient,
       asOfDate: asOf,
@@ -124,90 +288,36 @@ MarketState assessMarketState(
       newHighLowDiff20: 0,
     );
   }
-
-  // 等权指数：窗口内每个交易日，有行情的股票收盘均值。
-  // recentDays 不得小于 need（至少装得下 maPeriod 与 statWindow+1），
-  // 否则指数序列不足以支撑均线/区间涨跌幅回溯，会抛 RangeError。
-  final effectiveRecentDays = recentDays < need ? need : recentDays;
-  final windowDays = allDays.length > effectiveRecentDays
-      ? allDays.sublist(allDays.length - effectiveRecentDays)
-      : allDays;
-  final inWindow = Set<DateTime>.from(windowDays);
-  final sum = <DateTime, double>{};
-  final count = <DateTime, int>{};
-  for (final s in stocks) {
-    for (final b in s.bars) {
-      if (!inWindow.contains(b.date)) continue;
-      sum[b.date] = (sum[b.date] ?? 0) + b.close;
-      count[b.date] = (count[b.date] ?? 0) + 1;
-    }
-  }
-  final index = [
-    for (final d in windowDays)
-      // [tradingCalendar] 只收「当天行数 ≥ max(1, 中位/2)」的日子，windowDays 又全部
-      // 取自它，所以这里恒有行——0.0 兜底逻辑上不可达。留着是防御：真到了那一步，
-      // 把"当天没行情"当成指数 0 点会把 MA120/ret20 整个拉歪，比抛错更糟；assert
-      // 让"将来日历改成工作日候选"这类改动在测试期当场爆，生产仍走兜底不崩。
-      _indexPoint(d, sum, count),
+  final windowDays = [
+    for (final d in ctx.allDays) if (ctx.inWindow.contains(d)) d,
   ];
-
+  final index = [
+    for (final d in windowDays) _indexPointFromContrib(d, contrib),
+  ];
   final last = index.last;
-  final ma = index.sublist(index.length - maPeriod).reduce((a, b) => a + b) /
-      maPeriod;
+  final ma = index.sublist(index.length - ctx.maPeriod).reduce((a, b) => a + b) /
+      ctx.maPeriod;
   final maGap = (last - ma) / ma * 100;
-  final ret = (last / index[index.length - 1 - statWindow] - 1) * 100;
-
-  // 宽度与新高新低是**逐股布尔计数**，样本本身必须先可信（等权指数不受这两条
-  // 影响：停牌日没有行不进当日均值，除权跳变被全市场摊薄）：
-  // - 停牌/退市股的末根可能滞后数月，用陈旧收盘价参与"今天"的计数，等于把停牌前
-  //   的状态一直冻结进分子（回测池不过滤 ST/退市整理股，实测这类股量级不小）；
-  // - 库内不复权，末根附近除权留下的永久价位断层会让"个股 vs 自身 MA20"与
-  //   "末 N 根高低"误判成破位/新低。
-  final calIndex = {for (var i = 0; i < allDays.length; i++) allDays[i]: i};
-  final lastCalIndex = allDays.length - 1;
-
-  var evaluated = 0;
-  var above = 0;
-  var highs = 0;
-  var lows = 0;
-  for (final s in stocks) {
-    if (s.bars.length < minStatBars) continue;
-    final at = calIndex[s.bars.last.date];
-    if (at == null) continue; // 末根不在共同交易日历里，不参与
-    if (maxLastBarLagTradingDays >= 0 &&
-        lastCalIndex - at > maxLastBarLagTradingDays) {
-      continue; // 停牌/退市：末根已陈旧到不能代表"今天"
-    }
-    if (corporateActionLookbackBars > 0) {
-      if (!isCleanSignalDay(s.symbol, s.bars, s.bars.length - 1,
-          lookbackBars: corporateActionLookbackBars)) {
-        continue; // 末根落在除权断层后不久：MA/高低点还跨着断层
-      }
-    }
-    evaluated++;
-    final tailBars = s.bars.sublist(s.bars.length - minStatBars);
-    final tailCloses = [for (final b in tailBars) b.close];
-    final lastClose = tailCloses.last;
-    if (lastClose > sma(tailCloses, statWindow)) above++;
-    if (lastClose >= tailCloses.reduce((a, b) => a > b ? a : b)) highs++;
-    if (lastClose <= tailCloses.reduce((a, b) => a < b ? a : b)) lows++;
-  }
-
+  final ret = (last / index[index.length - 1 - ctx.statWindow] - 1) * 100;
   return MarketState(
     regime: classifyRegime(maGap: maGap, ret20: ret),
     asOfDate: asOf,
-    stockCount: evaluated,
+    stockCount: contrib.evaluated,
     maGap: maGap,
     ret20: ret,
-    breadthAboveMa20: evaluated == 0 ? 0 : above / evaluated,
-    newHighLowDiff20: evaluated == 0 ? 0 : (highs - lows) / evaluated,
+    breadthAboveMa20:
+        contrib.evaluated == 0 ? 0 : contrib.above / contrib.evaluated,
+    newHighLowDiff20: contrib.evaluated == 0
+        ? 0
+        : (contrib.highs - contrib.lows) / contrib.evaluated,
   );
 }
 
-/// 等权指数在某交易日的点位。抽出成函数只为了能放 assert（集合表达式里写不了）。
-double _indexPoint(
-    DateTime d, Map<DateTime, double> sum, Map<DateTime, int> count) {
-  final n = count[d];
+/// 等权指数在某交易日的点位（从 [MarketStateContrib] 的 dayKey 映射取值）。
+double _indexPointFromContrib(DateTime d, MarketStateContrib contrib) {
+  final dayKey = d.year * 10000 + d.month * 100 + d.day;
+  final n = contrib.dayCounts[dayKey];
   assert(n != null && n > 0, '交易日历含 $d，但全市场当天一行行情都没有');
-  return n == null || n == 0 ? 0.0 : sum[d]! / n;
+  if (n == null || n == 0) return 0.0;
+  return contrib.daySums[dayKey]! / n;
 }

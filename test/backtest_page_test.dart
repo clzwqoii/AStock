@@ -232,6 +232,186 @@ void main() {
     expect(back, 1);
   });
   
+  group('外壳刷新传入新报告(didUpdateWidget)', () {
+    testWidgets('换报告实例后页面显示新报告,不重跑回测', (tester) async {
+      final reportA = _fakeReport(DateTime(2026, 10, 5, 10, 0));
+      final reportB = _fakeReport(DateTime(2026, 10, 6, 15, 0));
+
+      Widget tree(BacktestReport initial) => MaterialApp(
+            home: AccentScope(
+              color: AccentColor.red.color,
+              child: BacktestPage(
+                dbPath: dbPath,
+                reportPath: reportPath,
+                initialReport: initial,
+                runFn: (_, {reportPath}) async =>
+                    fail('外壳刷新报告不应触发回测'),
+              ),
+            ),
+          );
+
+      // 首次挂载:注入 reportA
+      await tester.pumpWidget(tree(reportA));
+      await tester.pump();
+      expect(find.textContaining('生成于 2026-10-05 10:00'), findsOneWidget);
+      expect(find.textContaining('生成于 2026-10-06 15:00'), findsNothing);
+
+      // 外壳重建(同类型 widget):换 initialReport 为 reportB(新实例)
+      // → 触发 didUpdateWidget,页面应更新显示 reportB
+      await tester.pumpWidget(tree(reportB));
+      await tester.pump();
+      expect(
+        find.textContaining('生成于 2026-10-06 15:00'),
+        findsOneWidget,
+        reason: '外壳传入新报告实例,页面必须经 didUpdateWidget 更新显示',
+      );
+      expect(find.textContaining('生成于 2026-10-05 10:00'), findsNothing);
+    });
+
+    testWidgets('换报告实例后连红列跟着重读台账更新(didUpdateWidget)', (tester) async {
+      // 与"生成时间更新"互补:验证 didUpdateWidget 不仅换 _report,
+      // 还重读 _history(连红列才会跟着台账变)。
+      final base = RecentSlice(
+        stats: BacktestStats.of(List.filled(30, 0.0)),
+        dayMeanReturn: {for (var d = 1; d <= 30; d++) d: 0.0},
+      );
+      final ruleA = RecentSlice(
+        stats: BacktestStats.of(List.filled(30, 1.0)),
+        dayMeanReturn: {for (var d = 1; d <= 30; d++) d: 1.0},
+      );
+      final r = _fakeReport(generated);
+      BacktestReport reportWith(DateTime t) => BacktestReport(
+            generatedAt: t.toIso8601String(),
+            horizons: r.horizons,
+            stockCount: r.stockCount,
+            baseline: r.baseline,
+            results: r.results,
+            recent: {
+              'pct_change_up': {for (final h in r.horizons) h: ruleA},
+            },
+            recentBaseline: {for (final h in r.horizons) h: base},
+          );
+      final reportA = reportWith(DateTime(2026, 10, 5, 10));
+      final reportB = reportWith(DateTime(2026, 10, 6, 15));
+
+      final hp = historyPathFor(reportPath);
+      RecentExcessRec red() =>
+          RecentExcessRec(excess: 1.0, ciLow: 0.5, ciHigh: 2.0, days: 100);
+      BacktestSnapshot snap(String date) => BacktestSnapshot(
+            generatedAt: 't',
+            dataDate: date,
+            stockCount: 2,
+            evaluableDays: 100,
+            ruleWinRate: const {},
+            recentExcess: {'pct_change_up': red()},
+          );
+      // 台账先放 2 连红
+      File(hp).writeAsStringSync(jsonEncode(BacktestHistory([
+        snap('20260831'),
+        snap('20260930'),
+      ]).toJson()));
+
+      Widget tree(BacktestReport initial) => MaterialApp(
+            home: AccentScope(
+              color: AccentColor.red.color,
+              child: BacktestPage(
+                dbPath: dbPath,
+                reportPath: reportPath,
+                initialReport: initial,
+                historyPath: hp,
+                runFn: (_, {reportPath}) async => fail('不应触发'),
+              ),
+            ),
+          );
+
+      await tester.pumpWidget(tree(reportA));
+      await tester.pump();
+      await tester.tap(find.text('最近半年'));
+      await tester.pump();
+      expect(find.text('2连红'), findsOneWidget);
+
+      // 改台账为 3 连红,外壳换 reportB(新实例)
+      File(hp).writeAsStringSync(jsonEncode(BacktestHistory([
+        snap('20260731'),
+        snap('20260831'),
+        snap('20260930'),
+      ]).toJson()));
+      await tester.pumpWidget(tree(reportB));
+      await tester.pump();
+      expect(find.text('3连红'), findsOneWidget,
+          reason: '换报告实例后 didUpdateWidget 应重读台账,连红列跟着更新');
+    });
+
+    testWidgets('同一报告实例重新 pump 不重读台账(identical 守卫)', (tester) async {
+      // 守卫:同实例时 didUpdateWidget 不调 setState、不重读台账。
+      // 手法:首挂后删台账文件,再 pump 同实例——若守卫漏了重读了,
+      // _history 变 null → 连红列退成 —;守卫正确则 _history 不变,连红列保持。
+      final base = RecentSlice(
+        stats: BacktestStats.of(List.filled(30, 0.0)),
+        dayMeanReturn: {for (var d = 1; d <= 30; d++) d: 0.0},
+      );
+      final ruleA = RecentSlice(
+        stats: BacktestStats.of(List.filled(30, 1.0)),
+        dayMeanReturn: {for (var d = 1; d <= 30; d++) d: 1.0},
+      );
+      final r = _fakeReport(generated);
+      final report = BacktestReport(
+        generatedAt: r.generatedAt,
+        horizons: r.horizons,
+        stockCount: r.stockCount,
+        baseline: r.baseline,
+        results: r.results,
+        recent: {
+          'pct_change_up': {for (final h in r.horizons) h: ruleA},
+        },
+        recentBaseline: {for (final h in r.horizons) h: base},
+      );
+      final hp = historyPathFor(reportPath);
+      RecentExcessRec red() =>
+          RecentExcessRec(excess: 1.0, ciLow: 0.5, ciHigh: 2.0, days: 100);
+      BacktestSnapshot snap(String date) => BacktestSnapshot(
+            generatedAt: 't',
+            dataDate: date,
+            stockCount: 2,
+            evaluableDays: 100,
+            ruleWinRate: const {},
+            recentExcess: {'pct_change_up': red()},
+          );
+      File(hp).writeAsStringSync(jsonEncode(BacktestHistory([
+        snap('20260831'),
+        snap('20260930'),
+      ]).toJson()));
+
+      Widget tree(BacktestReport initial) => MaterialApp(
+            home: AccentScope(
+              color: AccentColor.red.color,
+              child: BacktestPage(
+                dbPath: dbPath,
+                reportPath: reportPath,
+                initialReport: initial,
+                historyPath: hp,
+                runFn: (_, {reportPath}) async => fail('不应触发'),
+              ),
+            ),
+          );
+
+      await tester.pumpWidget(tree(report));
+      await tester.pump();
+      await tester.tap(find.text('最近半年'));
+      await tester.pump();
+      expect(find.text('2连红'), findsOneWidget);
+
+      // 删台账文件:若守卫漏了重读 → _history null → 连红列 —。
+      File(hp).deleteSync();
+      // 同实例重新 pump(identical 相等 → 不应进 setState 分支)
+      await tester.pumpWidget(tree(report));
+      await tester.pump();
+      // 守卫有效:没重读台账,_history 仍是旧值,连红列保持 2连红
+      expect(find.text('2连红'), findsOneWidget,
+          reason: '同一报告实例重 pump 不应重读台账(identical 守卫)');
+    });
+  });
+
   group('规则介绍与两页联动', () {
     testWidgets('表格里规则名下方显示一句话说明', (tester) async {
       File(reportPath).writeAsStringSync(jsonEncode(_fakeReport(generated).toJson()));

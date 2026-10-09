@@ -2,6 +2,7 @@ import 'dart:io';
 
 import 'package:flutter_test/flutter_test.dart';
 import 'package:sqlite3/sqlite3.dart';
+import 'package:stock/core/market.dart';
 import 'package:stock/core/models.dart';
 import 'package:stock/data/bar_repository.dart';
 import 'package:stock/data/tushare_client.dart';
@@ -52,6 +53,83 @@ void main() {
     final afterBackfill = repo.poolFingerprint();
     repo.upsertBars([row('600000.SH', '20260901', close: 12.0)]); // INSERT OR REPLACE
     expect(repo.poolFingerprint(), isNot(afterBackfill), reason: '替换写入也要被感知');
+  });
+
+  test('poolFingerprintExt：含 maxDate/maxRowid/count 三字段，与 poolFingerprint 字符串同源', () {
+    // 空库：maxDate 为 null（空字符串也行）、maxRowid/count 为 0。
+    var ext = repo.poolFingerprintExt();
+    expect(ext.maxDate, isNull);
+    expect(ext.maxRowid, 0);
+    expect(ext.count, 0);
+
+    repo.upsertBars([
+      row('600000.SH', '20260928'),
+      row('600000.SH', '20260929'),
+      row('000001.SZ', '20260930'),
+    ]);
+    ext = repo.poolFingerprintExt();
+    expect(ext.maxDate, '20260930');
+    expect(ext.maxRowid, greaterThan(0));
+    expect(ext.count, 3);
+
+    // 与字符串指纹同源：maxDate|maxRowid 必须一一对应。
+    expect(repo.poolFingerprint(), '${ext.maxDate}|${ext.maxRowid}');
+  });
+
+  test('barCountUpTo：纯追加不变，REPLACE 旧行或删除旧行会减少（增量失效判据）', () {
+    repo.upsertBars([
+      row('600000.SH', '20260928'),
+      row('600000.SH', '20260929'),
+      row('000001.SZ', '20260930'),
+    ]);
+    final wm = repo.poolFingerprintExt().maxRowid;
+    expect(repo.barCountUpTo(wm), 3);
+
+    // 纯追加：新行 rowid > 水位，水位下行数不变
+    repo.upsertBars([row('600000.SH', '20260930')]);
+    expect(repo.barCountUpTo(wm), 3);
+
+    // INSERT OR REPLACE 旧行：旧行 rowid 消失、新行拿更大 rowid → 计数减少
+    repo.upsertBars([row('600000.SH', '20260928', close: 99.0)]);
+    expect(repo.barCountUpTo(wm), 2);
+
+    // 删除旧行：同理
+    final raw = sqlite3.open('${tmp.path}/test.db');
+    raw.execute("DELETE FROM daily_bars WHERE ts_code='000001.SZ'");
+    raw.dispose();
+    expect(repo.barCountUpTo(wm), 1);
+  });
+
+  test('barsSince：返回 trade_date > 参数 的行，按代码分组升序，带 rowid 范围与计数', () {
+    // 空库 → 空结果
+    var delta = repo.barsSince('20260101');
+    expect(delta.byCode, isEmpty);
+    expect(delta.minRowid, 0);
+    expect(delta.maxRowid, 0);
+    expect(delta.rowCount, 0);
+
+    repo.upsertBars([
+      row('600000.SH', '20260928'),
+      row('600000.SH', '20260929'),
+      row('000001.SZ', '20260930'),
+      row('600000.SH', '20261005'), // 水位前进追加
+      row('000001.SZ', '20261005'),
+    ]);
+
+    // 取水位 20260930 之后：返回 2 行（20261005 × 2 只）
+    delta = repo.barsSince('20260930');
+    expect(delta.byCode.length, 2);
+    expect(delta.byCode['600000.SH']!.single.date, DateTime(2026, 10, 5));
+    expect(delta.byCode['000001.SZ']!.single.date, DateTime(2026, 10, 5));
+    expect(delta.rowCount, 2);
+    expect(delta.maxRowid, greaterThan(0));
+    expect(delta.minRowid, greaterThan(0));
+    expect(delta.maxRowid, greaterThanOrEqualTo(delta.minRowid));
+
+    // 越界：参数 > 水位 → 空结果（但 maxRowid 仍是当前库最大 rowid 用于比对）
+    delta = repo.barsSince('20261009');
+    expect(delta.byCode, isEmpty);
+    expect(delta.rowCount, 0);
   });
 
   test('stockNames 读取股票名单', () {
@@ -364,6 +442,21 @@ void main() {
       expect(repo.loadAllStocks(excludeSpecialStocks: true).map((s) => s.symbol),
           ['600007.SH', '600008.SH', '600009.SH']);
     });
+
+    test('名称含 ST 子串（非开头）也剔除——对齐 SQL GLOB *ST* 语义', () {
+      // SQL 的 name GLOB '*ST*' 是子串匹配，不是前缀。
+      // 过滤口径逐字保留：改造到 Dart 侧也必须用 contains('ST')。
+      repo.upsertStocks(const [
+        (tsCode: '600000.SH', name: '浦发银行'),
+        (tsCode: '600001.SH', name: 'BEST集团'), // 含 ST 子串，非 ST 标记
+      ]);
+      repo.upsertBars([
+        row('600000.SH', '20260930'),
+        row('600001.SH', '20260930'),
+      ]);
+      expect(repo.loadAllStocks(excludeSpecialStocks: true).map((s) => s.symbol),
+          ['600000.SH']);
+    });
   });
 
   group('loadAllStocks 的逐行游标实现', () {
@@ -448,6 +541,88 @@ void main() {
     final date1 = stocks.firstWhere((s) => s.symbol == '000001.SZ').bars.single.date;
     final date2 = stocks.firstWhere((s) => s.symbol == '600000.SH').bars.single.date;
     expect(identical(date1, date2), isTrue);
+  });
+
+  group('loadStocksRange（主键范围分片扫描）', () {
+    test('分片并集 == loadAllStocks，边界不重不漏', () {
+      // 5 只股票各 3 根：按 ts_code 升序排列
+      const codes = [
+        '000001.SZ', '000002.SZ', '000003.SZ', '600000.SH', '600001.SH',
+      ];
+      const dates = ['20260901', '20260902', '20260903'];
+      for (final code in codes) {
+        repo.upsertBars([
+          for (final d in dates) row(code, d),
+        ]);
+      }
+
+      final all = repo.loadAllStocks();
+      expect(all.map((s) => s.symbol).toList(), codes);
+
+      // 连续分片：[000001, 000002), [000002, 600000), [600000, null)
+      final shard0 = repo.loadStocksRange('000001.SZ', toCode: '000002.SZ');
+      final shard1 = repo.loadStocksRange('000002.SZ', toCode: '600000.SH');
+      final shard2 = repo.loadStocksRange('600000.SH');
+
+      expect(shard0.map((s) => s.symbol).toList(), ['000001.SZ']);
+      expect(shard1.map((s) => s.symbol).toList(), ['000002.SZ', '000003.SZ']);
+      expect(shard2.map((s) => s.symbol).toList(), ['600000.SH', '600001.SH']);
+
+      final union = [...shard0, ...shard1, ...shard2];
+      expect(union.length, all.length);
+      for (var i = 0; i < all.length; i++) {
+        expect(union[i].symbol, all[i].symbol, reason: 'stock $i symbol');
+        expect(union[i].bars.length, all[i].bars.length,
+            reason: 'stock $i bar count');
+        for (var j = 0; j < all[i].bars.length; j++) {
+          expect(union[i].bars[j].close, all[i].bars[j].close,
+              reason: 'stock $i bar $j close');
+          expect(union[i].bars[j].date, all[i].bars[j].date,
+              reason: 'stock $i bar $j date');
+        }
+      }
+    });
+
+    test('toCode 上界为半开区间：不含 toCode 自身', () {
+      repo.upsertBars([
+        row('000001.SZ', '20260930'),
+        row('000002.SZ', '20260930'),
+        row('000003.SZ', '20260930'),
+      ]);
+      final shard = repo.loadStocksRange('000001.SZ', toCode: '000003.SZ');
+      expect(shard.map((s) => s.symbol).toList(), ['000001.SZ', '000002.SZ']);
+    });
+
+    test('minBars 过滤在范围扫描下同样生效', () {
+      repo.upsertBars([
+        row('000001.SZ', '20260930'),
+        row('000002.SZ', '20260929'),
+        row('000002.SZ', '20260930'),
+      ]);
+      final shard =
+          repo.loadStocksRange('000001.SZ', toCode: '000003.SZ', minBars: 2);
+      expect(shard.map((s) => s.symbol).toList(), ['000002.SZ']);
+    });
+  });
+
+  test('tradingCalendarFromDb 与 tradingCalendar(loadAllStocks()) 一致', () {
+    // 3 只股票各 3 根，其中一只少一根（模拟停牌）
+    const dates = ['20260901', '20260902', '20260903'];
+    for (final code in ['000001.SZ', '000002.SZ', '600000.SH']) {
+      repo.upsertBars([
+        for (final d in dates) row(code, d),
+      ]);
+    }
+    // 000003.SZ 只有 2 根（模拟 09-03 停牌）
+    repo.upsertBars([row('000003.SZ', '20260901'), row('000003.SZ', '20260902')]);
+
+    final stocks = repo.loadAllStocks();
+    final expected = tradingCalendar(stocks);
+    final actual = repo.tradingCalendarFromDb();
+    expect(actual.length, expected.length);
+    for (final d in expected) {
+      expect(actual.contains(d), isTrue, reason: '$d 应在日历中');
+    }
   });
 }
 

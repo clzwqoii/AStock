@@ -8,6 +8,8 @@ import 'dart:isolate';
 
 import 'package:http/http.dart' as h;
 import 'package:stock/core/backtest.dart';
+import 'package:stock/core/market.dart';
+import 'package:stock/core/market_state.dart';
 import 'package:stock/core/models.dart';
 import 'package:stock/core/rules.dart';
 import 'package:stock/core/features.dart';
@@ -15,6 +17,7 @@ import 'package:stock/core/logreg.dart';
 import 'package:stock/core/score.dart';
 import 'package:stock/core/screener.dart';
 import 'package:stock/data/bar_repository.dart';
+import 'package:stock/data/backtest_detail_store.dart';
 import 'package:stock/data/report_store.dart';
 import 'package:stock/data/eastmoney_client.dart';
 import 'package:stock/data/sina_client.dart';
@@ -354,12 +357,16 @@ Future<ScreenResult> runScreening(String dbPath, List<Rule> rules) =>
 
 /// 选股各阶段耗时（毫秒）。手机端结果区展示，让"慢在哪"可见：
 /// loadMs=池子加载（复用时 0）、screenMs=护栏+快照+规则、assembleMs=命中行组装。
+/// incremental=true 表示本次走了 P1c 增量 append 路径（只读水位之后的新行，
+/// 而非全量重载），loadMs 是毫秒级；与 poolReused 互斥——
+/// 复用时 poolReused=true、incremental=false；增量时 poolReused=false、incremental=true。
 typedef ScreenTimings = ({
   int loadMs,
   int screenMs,
   int assembleMs,
   int totalMs,
   bool poolReused,
+  bool incremental,
 });
 
 /// 一次选股的完整结果（App/CLI/UI 共用；[timings] 见 [ScreenTimings]）。
@@ -388,13 +395,15 @@ _Pool _loadPool(BarRepository repo, String dbPath) => (
       model: loadScoreModel(dbPath),
     );
 
-/// 对已加载的池子跑规则并组装展示行。[loadMs]/[poolReused] 由调用方按加载方式填。
+/// 对已加载的池子跑规则并组装展示行。[loadMs]/[poolReused]/[incremental]
+/// 由调用方按加载方式填。
 ScreenResult _screenWithPool(
   _Pool pool,
   List<Rule> rules, {
   required String? dataDate,
   required int loadMs,
   required bool poolReused,
+  bool incremental = false,
 }) {
   final sw = Stopwatch()..start();
   final screened = screenDiagnostics(pool.stocks, rules);
@@ -454,6 +463,7 @@ ScreenResult _screenWithPool(
       assembleMs: assembleMs,
       totalMs: loadMs + screenMs + assembleMs,
       poolReused: poolReused,
+      incremental: incremental,
     ),
   );
 }
@@ -465,8 +475,9 @@ ScreenResult _screenWithPool(
 /// 必须留在后台 isolate，主 isolate 只收结果行；空闲 [idleTimeout] 后回收 isolate
 /// 释放内存（发关闭消息让它自己关库退出），下次选股重新孵化。
 ///
-/// 失效指纹（[_poolFingerprint]）：库水位+行指纹 ⊕ 回测报告文件 ⊕ 评分模型文件。
-/// 同步推进水位、回补历史改行指纹、回测页重跑报告换文件——任一变化都重载。
+/// 失效指纹分两层（P1b）：股票池层（[BarRepository.poolFingerprint]：库水位+rowid）
+/// ⊕ 评分层（[_scoreFingerprint]：报告+模型文件）。库变 → 重载 360 万行；报告/模型
+/// 变 → 只重读小文件。同步推进水位、回补历史改库指纹 → 重载；回测页重跑换报告文件 → 只换评分。
 class ScreeningService {
   ScreeningService({this.idleTimeout = const Duration(minutes: 5)});
 
@@ -628,8 +639,17 @@ void _screeningWorkerMain(SendPort out) {
   out.send(inbox.sendPort);
   BarRepository? repo;
   String? openedPath;
-  String? fingerprint;
+  // 两层指纹：股票池层（库水位+rowid+count）与评分层（报告+模型文件）独立失效。
+  // 报告/模型变化时只重读小文件，不重载 360 万行库（P1b）。
+  // 池层用结构化 PoolFingerprint：count 让 worker 能判"纯追加"
+  // （新行数 == newCount − oldCount）；否则说明有旧行被 REPLACE，退回全量（P1c）。
+  PoolFingerprint? dbFp;
+  String? scoreFp;
   _Pool? pool;
+  // symbol → 在 pool.stocks 列表中的下标。增量 append 路径用：水位前进 + 纯追加时，
+  // 按此索引把新行 append 到对应 StockData.bars 尾部（停牌股无新行 → 不动），
+  // 池外新代码（IPO）整体加入并登记索引。全量重载后重建此索引。
+  Map<String, int>? codeIndex;
   // ReceivePort 的 async 回调会并发进入，池子状态必须串行演化。
   var busy = Future<void>.value();
 
@@ -640,6 +660,7 @@ void _screeningWorkerMain(SendPort out) {
         repo?.close();
         repo = null;
         pool = null;
+        codeIndex = null;
         inbox.close(); // 没有活动端口后 isolate 自然结束
       });
       return;
@@ -654,24 +675,78 @@ void _screeningWorkerMain(SendPort out) {
           repo?.close();
           repo = BarRepository(dbPath);
           openedPath = dbPath;
-          fingerprint = null;
+          dbFp = null;
+          scoreFp = null;
+          pool = null;
+          codeIndex = null;
         }
-        final key = _poolFingerprint(repo!, dbPath);
+        // 1. 股票池层失效决策：复用 / 增量 append / 全量重载 三选一
         var loadMs = 0;
         var reused = true;
-        if (key != fingerprint) {
+        var incremental = false;
+        final newFp = repo!.poolFingerprintExt();
+        if (pool == null) {
+          // 首次：全量加载 + 建索引
           final sw = Stopwatch()..start();
-          pool = _loadPool(repo!, dbPath);
-          fingerprint = key;
+          final stocks = repo!.loadAllStocks(excludeSpecialStocks: true);
+          final names = repo!.stockNames();
           loadMs = sw.elapsedMilliseconds;
           reused = false;
+          pool = (
+            stocks: stocks,
+            names: names,
+            report: pool?.report,
+            model: pool?.model,
+          );
+          codeIndex = {
+            for (var i = 0; i < stocks.length; i++) stocks[i].symbol: i,
+          };
+          dbFp = newFp;
+        } else if (newFp == dbFp) {
+          // 池子没变：复用
+        } else if (_canIncrement(dbFp!, newFp) &&
+            (loadMs = _tryIncrementalAppend(
+                pool!, codeIndex!, repo!, dbFp!, newFp)) >= 0) {
+          // 增量 append 成功：loadMs 已在 helper 里量过，毫秒级
+          reused = false;
+          incremental = true;
+          dbFp = newFp;
+        } else {
+          // 全量重载（水位后退 / REPLACE 旧行 / count 不匹配 / delta 校验失败）
+          final sw = Stopwatch()..start();
+          final stocks = repo!.loadAllStocks(excludeSpecialStocks: true);
+          final names = repo!.stockNames();
+          loadMs = sw.elapsedMilliseconds;
+          reused = false;
+          pool = (
+            stocks: stocks,
+            names: names,
+            report: pool?.report,
+            model: pool?.model,
+          );
+          codeIndex = {
+            for (var i = 0; i < stocks.length; i++) stocks[i].symbol: i,
+          };
+          dbFp = newFp;
+        }
+        // 2. 评分层：报告/模型文件变了只重读小文件（~12KB），不重载库
+        final newScoreFp = _scoreFingerprint(dbPath);
+        if (newScoreFp != scoreFp) {
+          pool = (
+            stocks: pool!.stocks,
+            names: pool!.names,
+            report: loadBacktestReport(dbPath),
+            model: loadScoreModel(dbPath),
+          );
+          scoreFp = newScoreFp;
         }
         out.send([
           id,
           _screenWithPool(pool!, rules,
               dataDate: repo!.maxTradeDate(),
               loadMs: loadMs,
-              poolReused: reused),
+              poolReused: reused,
+              incremental: incremental),
         ]);
       } catch (e, st) {
         out.send([id, '选股失败: $e\n$st']);
@@ -680,17 +755,67 @@ void _screeningWorkerMain(SendPort out) {
   });
 }
 
-/// 选股池失效指纹：库指纹 ⊕ 报告/模型文件指纹。报告与模型是选股评分的输入，
-/// 回测页重跑后必须跟着换，文件按 长度:mtime 指纹化（缺失记 `-`）。
-String _poolFingerprint(BarRepository repo, String dbPath) {
+/// 增量 append 前置条件：水位前进 + 最大 rowid 增大（说明有新行写入）。
+/// 若水位后退（回补历史不动水位 / 同主键 REPLACE 但没加新日），不算增量。
+/// 任一不满足即全量重载（兜底）。
+bool _canIncrement(PoolFingerprint oldFp, PoolFingerprint newFp) {
+  if (oldFp.maxDate == null || newFp.maxDate == null) return false;
+  if (newFp.maxDate!.compareTo(oldFp.maxDate!) <= 0) return false;
+  if (newFp.maxRowid <= oldFp.maxRowid) return false;
+  return true;
+}
+
+/// 把水位 [oldFp.maxDate] 之后的新行 append 到池内对应股票的 bars 尾部，
+/// 池外新代码（IPO）整体加入 stocks 列表。返回本次 IO 耗时（毫秒）；
+/// 校验失败返回 -1，调用方应退回全量重载。
+///
+/// 纯追加判据（任一不满足即返回 -1）：
+/// 1. [BarsDelta.rowCount] == newFp.count − oldFp.count：REPLACE 旧行时 count
+///    不变（删一根加一根），但 barsSince 仍拿到水位之后的新日行 → 对不上。
+/// 2. [BarsDelta.maxRowid] == newFp.maxRowid：拿到全部新行，没漏。
+/// 3. [BarsDelta.minRowid] > oldFp.maxRowid：这批新行的 rowid 都比旧的大，
+///    无旧行被改写（判据 1 已覆盖 REPLACE，这条做最后保险）。
+///
+/// 校验通过后：按代码分组 append（newBars 已按 trade_date 升序）。
+/// 停牌股（无新行）末根不变；新股整体加入 + 登记 codeIndex。
+/// ST/科创板/退市票按 [BarRepository.isSpecialStock] 跳过（与全量口径一致）。
+/// 新股名补进 pool.names（保持与全量重载后口径一致）。
+int _tryIncrementalAppend(_Pool pool, Map<String, int> codeIndex,
+    BarRepository repo, PoolFingerprint oldFp, PoolFingerprint newFp) {
+  final sw = Stopwatch()..start();
+  final delta = repo.barsSince(oldFp.maxDate!);
+  if (delta.rowCount != newFp.count - oldFp.count) return -1;
+  if (delta.maxRowid != newFp.maxRowid) return -1;
+  if (delta.minRowid <= oldFp.maxRowid) return -1;
+  if (delta.rowCount == 0) return -1;
+
+  final names = repo.stockNames();
+  pool.names.addAll(names);
+  final stocks = pool.stocks;
+  delta.byCode.forEach((ts, newBars) {
+    if (BarRepository.isSpecialStock(ts, pool.names)) return;
+    final idx = codeIndex[ts];
+    if (idx == null) {
+      codeIndex[ts] = stocks.length;
+      stocks.add(StockData(symbol: ts, bars: List<Bar>.of(newBars)));
+    } else {
+      stocks[idx].bars.addAll(newBars);
+    }
+  });
+  return sw.elapsedMilliseconds;
+}
+
+/// 评分层指纹：回测报告 + 评分模型文件的 长度:mtime（缺失记 `-`）。
+/// 与股票池层（[BarRepository.poolFingerprint]）独立失效——
+/// 报告/模型变化时只重读小文件，不重载 360 万行库（P1b）。
+String _scoreFingerprint(String dbPath) {
   String fileFp(String path) {
     final f = File(path);
     if (!f.existsSync()) return '-';
     return '${f.lengthSync()}:${f.lastModifiedSync().millisecondsSinceEpoch}';
   }
 
-  return '${repo.poolFingerprint()}'
-      '|${fileFp(reportPathFor(dbPath))}'
+  return '${fileFp(reportPathFor(dbPath))}'
       '|${fileFp('${File(dbPath).parent.path}/score-model.json')}';
 }
 
@@ -717,29 +842,175 @@ LogRegModel? loadScoreModel(String dbPath, {String? modelPath}) {
 ///
 /// 同时把快照写入同目录的月度台账（同一数据截止日只留最新一条），
 /// 与 `tool/report_all.dart --archive` 同格式——「连红」计数要求两边口径一致。
-Future<BacktestReport> runBacktest(String dbPath, {String? reportPath}) =>
-    Isolate.run(() {
-      final rp = reportPath ?? reportPathFor(dbPath);
-      final store = ReportStore(rp);
-      final repo = BarRepository(dbPath);
-      try {
-        final stocks = repo.loadAllStocks();
-        final report = backtestAll(stocks, builtInRules,
-            horizons: kDefaultHorizons,
-            recentWindowTradingDays: kRecentWindowTradingDays);
-        store.save(report);
-        final dataDate = repo.maxTradeDate();
-        if (dataDate != null) {
-          final hp = historyPathFor(rp);
-          final prev = loadBacktestHistory(hp) ?? const BacktestHistory([]);
-          saveBacktestHistory(
-              hp, prev.upsert(BacktestSnapshot.of(report, dataDate)));
-        }
-        return report;
-      } finally {
-        repo.close();
+///
+/// 同路径并发去重：外壳的「同步后自动回测」与页面的「手动重新回测」可能
+/// 同时触发——不去重就会双跑 20 秒回测、并发写同一报告文件。按报告路径复用
+/// in-flight Future，第二次调用直接拿到同一结果。
+Future<BacktestReport> runBacktest(String dbPath, {String? reportPath}) {
+  final rp = reportPath ?? reportPathFor(dbPath);
+  final existing = _inFlightBacktest[rp];
+  if (existing != null) return existing;
+  final completer = Completer<BacktestReport>();
+  _inFlightBacktest[rp] = completer.future;
+  // 辅助函数隔离作用域:Isolate.run 的闭包不能捕获 completer(不可跨 isolate
+  // 序列化),否则报 "unsendable"。_runBacktestIsolate 只捕获 String 参数。
+  _runBacktestIsolate(dbPath, rp)
+      .then(completer.complete,
+          onError: (Object e, StackTrace s) => completer.completeError(e, s))
+      .whenComplete(() => _inFlightBacktest.remove(rp));
+  return completer.future;
+}
+
+/// 在新 isolate 里跑回测并落盘。闭包只捕获 [dbPath]/[rp]（String，可序列化）。
+/// 内部根据数据量决定串行还是并行：股票 < 500 直接单线程；否则按核数分片，
+/// 在 worker isolate 里各跑一段 [scanStocksShard]，回主 isolate [mergeShards]。
+Future<BacktestReport> _runBacktestIsolate(String dbPath, String rp) =>
+    Isolate.run(() => _runBacktestParallel(dbPath, rp));
+
+/// 增量缓存指纹：规则集 / 持有期 / 近窗口 / 除权与停牌护栏任一变化即失效
+/// （缓存里是旧口径的明细，混用会污染统计）。与序列化格式版本一起构成
+/// `loadBacktestDetail` 的匹配条件。
+String _backtestFingerprint() => [
+      'bkdv1',
+      for (final r in builtInRules) r.id,
+      ...kDefaultHorizons,
+      kRecentWindowTradingDays,
+      kCorporateActionLookbackBars,
+      kSuspensionLookbackBars,
+    ].join('|');
+
+int _dayKeyOf(DateTime d) => d.year * 10000 + d.month * 100 + d.day;
+
+Future<BacktestReport> _runBacktestParallel(String dbPath, String rp) async {
+  final store = ReportStore(rp);
+  final repo = BarRepository(dbPath);
+  try {
+    final calendar = repo.tradingCalendarFromDb();
+    final symbols = repo.allSymbols();
+    final parallelism = Platform.numberOfProcessors.clamp(2, 8);
+    if (symbols.length < 500 || parallelism < 2) {
+      final stocks = repo.loadAllStocks();
+      final report = backtestAll(stocks, builtInRules,
+          horizons: kDefaultHorizons,
+          recentWindowTradingDays: kRecentWindowTradingDays);
+      _saveBacktestResult(store, repo, report, rp);
+      return report;
+    }
+    final ruleIds = [for (final r in builtInRules) r.id];
+    final hs = kDefaultHorizons;
+    final cutoff =
+        recentCutoffDate(calendar, kRecentWindowTradingDays);
+    final msCtx = MarketStateCtx.fromCalendar(calendar,
+        maPeriod: 120,
+        recentDays: 130,
+        statWindow: 20,
+        maxLastBarLagTradingDays: 20,
+        corporateActionLookbackBars: kCorporateActionLookbackBars);
+    // ── P3 增量/全量决策（失效一律退全量，全量永远是后路）──
+    // 水位在 worker 读取之前取样：缓存口径永远 ≤ 水位，水位之后的新行属于
+    // 下一轮增量，两端不会重叠也不会漏。
+    final fp = _backtestFingerprint();
+    final detailPath = backtestDetailPathFor(dbPath);
+    final wm = repo.poolFingerprintExt();
+    final cached = loadBacktestDetail(detailPath, fingerprint: fp);
+    ShardDetail? oldDetail;
+    Map<String, int>? resumeLens;
+    if (cached != null && cutoff != null) {
+      // 股票被删（缓存里的代码集不是当前集的子集）或旧行被 REPLACE/删除
+      //（水位下行数变化）→ 全量。纯追加时两者都通过。
+      final symbolsOk = cached.detail.stockLens.keys.every(symbols.contains);
+      if (symbolsOk &&
+          repo.barCountUpTo(cached.maxRowid) == cached.rowCount) {
+        resumeLens = cached.detail.stockLens;
+        oldDetail = detailForResume(cached.detail,
+            recentCutoffDayKey: _dayKeyOf(cutoff));
       }
-    });
+    }
+    final ranges = _splitSymbols(symbols, parallelism);
+    final details = await Future.wait([
+      for (final (from, to) in ranges)
+        Isolate.run(() => _backtestShardWorker(
+            dbPath, from, to, ruleIds, hs, calendar, cutoff, msCtx, resumeLens)),
+    ]);
+    // 旧明细在前（时间在前的值先加，与串行插入序最接近），新分片按序合并
+    final (report, merged) = mergeAndAggregate(
+      [?oldDetail, ...details],
+      ruleIds: ruleIds,
+      hs: hs,
+      recentCutoffDate: cutoff,
+      msCtx: msCtx,
+    );
+    saveBacktestDetail(detailPath, merged,
+        fingerprint: fp, maxRowid: wm.maxRowid, rowCount: wm.count);
+    _saveBacktestResult(store, repo, report, rp);
+    return report;
+  } finally {
+    repo.close();
+  }
+}
+
+void _saveBacktestResult(
+    ReportStore store, BarRepository repo, BacktestReport report, String rp) {
+  store.save(report);
+  final dataDate = repo.maxTradeDate();
+  if (dataDate != null) {
+    final hp = historyPathFor(rp);
+    final prev = loadBacktestHistory(hp) ?? const BacktestHistory([]);
+    saveBacktestHistory(hp, prev.upsert(BacktestSnapshot.of(report, dataDate)));
+  }
+}
+
+/// 把 symbols 按主键序切成 [n] 段连续半开区间 `[from, to)`。
+/// 最后一段 `to` 为 null（无上界），保证不重不漏。
+List<(String, String?)> _splitSymbols(List<String> symbols, int n) {
+  final result = <(String, String?)>[];
+  final size = symbols.length ~/ n;
+  final remainder = symbols.length % n;
+  var start = 0;
+  for (var i = 0; i < n; i++) {
+    final end = start + size + (i < remainder ? 1 : 0);
+    final from = symbols[start];
+    final to = i < n - 1 ? symbols[end] : null;
+    result.add((from, to));
+    start = end;
+  }
+  return result;
+}
+
+/// Worker isolate 入口：只捕获可序列化值（String / List / Set / MarketStateCtx）。
+/// Rule 闭包不可跨 isolate，传 rule ID 字符串在此还原。
+/// [resumeLens] 非空时走增量续扫（每股只评旧末尾之后的日子）。
+ShardDetail _backtestShardWorker(
+  String dbPath,
+  String fromCode,
+  String? toCode,
+  List<String> ruleIds,
+  List<int> hs,
+  Set<DateTime> calendar,
+  DateTime? recentCutoffDate,
+  MarketStateCtx msCtx,
+  Map<String, int>? resumeLens,
+) {
+  final repo = BarRepository(dbPath);
+  try {
+    final stocks = repo.loadStocksRange(fromCode, toCode: toCode);
+    final rules = [for (final id in ruleIds) ruleById(id)];
+    return scanStocksShard(
+      stocks: stocks,
+      rules: rules,
+      hs: hs,
+      calendar: calendar,
+      recentCutoffDate: recentCutoffDate,
+      msCtx: msCtx,
+      resumeLens: resumeLens,
+    );
+  } finally {
+    repo.close();
+  }
+}
+
+/// 进行中的回测（按报告路径去重）。完成后自动移除。
+final _inFlightBacktest = <String, Future<BacktestReport>>{};
 
 /// 个股详情：单只股票的完整日线 + 末日指标快照。
 /// [name] 为 null 表示本地名单未拉到，UI 降级显示代码。

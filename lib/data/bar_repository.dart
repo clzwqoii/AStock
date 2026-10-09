@@ -1,6 +1,8 @@
 /// 日线 SQLite 存储。trade_date 用 tushare 的 YYYYMMDD 字符串（字典序即时间序）。
 library;
 
+import 'dart:math' as math;
+
 import 'package:sqlite3/sqlite3.dart';
 
 import '../core/models.dart';
@@ -96,6 +98,49 @@ class HistoryCoverage {
   }
 }
 
+/// 池失效指纹（结构化版，[BarRepository.poolFingerprintExt] 返回）。
+///
+/// 与字符串版 [BarRepository.poolFingerprint] 同源（maxDate|maxRowid），多一个
+/// [count]——纯追加增量判据需要它（新行数 == newCount − oldCount 才算纯追加，
+/// 否则有旧行被 REPLACE）。worker 按字段做值比较（record ==）。
+class PoolFingerprint {
+  const PoolFingerprint({
+    required this.maxDate,
+    required this.maxRowid,
+    required this.count,
+  });
+
+  final String? maxDate;
+  final int maxRowid;
+  final int count;
+
+  @override
+  bool operator ==(Object other) =>
+      other is PoolFingerprint &&
+      other.maxDate == maxDate &&
+      other.maxRowid == maxRowid &&
+      other.count == count;
+
+  @override
+  int get hashCode => Object.hash(maxDate, maxRowid, count);
+}
+
+/// [BarRepository.barsSince] 的返回：水位之后的新行，按代码分组升序，
+/// 附带这批新行的 rowid 范围与计数（供 worker 校验"纯追加"）。
+class BarsDelta {
+  const BarsDelta({
+    required this.byCode,
+    required this.minRowid,
+    required this.maxRowid,
+    required this.rowCount,
+  });
+
+  final Map<String, List<Bar>> byCode;
+  final int minRowid;
+  final int maxRowid;
+  final int rowCount;
+}
+
 /// 打开（或创建）日线库。数据量约 5400 股 × N 日，单文件无压力。
 class BarRepository {
   BarRepository(String path) : _db = sqlite3.open(path) {
@@ -186,6 +231,83 @@ class BarRepository {
     return '${r.first.values[0]}|${r.first.values[1]}';
   }
 
+  /// 池失效指纹（结构化版，供 worker 增量决策用）。
+  ///
+  /// 与 [poolFingerprint] 字符串版同源（maxDate|maxRowid 一致），多了一个
+  /// [count]——纯追加增量判据需要它：新行数 == newCount − oldCount 才算纯追加，
+  /// 否则说明有旧行被 REPLACE（count 不变 = 删一根加一根），必须退回全量重载。
+  /// 空库：maxDate=null、maxRowid=0、count=0。
+  PoolFingerprint poolFingerprintExt() {
+    final r = _db.select(
+        'SELECT MAX(trade_date), MAX(rowid), COUNT(*) FROM daily_bars');
+    final v = r.first.values;
+    return PoolFingerprint(
+      maxDate: v[0] as String?,
+      maxRowid: (v[1] as int?) ?? 0,
+      count: v[2] as int,
+    );
+  }
+
+  /// rowid ≤ [watermark] 的行数——增量回测失效检测：与缓存头里的行数不等
+  /// 即有旧行被 INSERT OR REPLACE（旧行 rowid 消失、新行拿更大 rowid）或
+  /// 删除 → 退全量。rowid 主键序，全表量级 ~几十 ms。
+  int barCountUpTo(int watermark) =>
+      _db.select('SELECT COUNT(*) FROM daily_bars WHERE rowid <= ?',
+          [watermark]).first.values[0] as int;
+
+  /// 取水位 [tradeDate] 之后的全部新行（含等于该水位日的回补行），按代码分组
+  /// 升序。worker 的增量 append 路径用：水位前进时拿到这批新行 append 到池内
+  /// 对应股票的 bars 尾部，省掉全量重载（~6.5s → 毫秒级）。
+  ///
+  /// 走 `idx_daily_bars_trade_date` 索引：单日几千行，<100ms。返回的
+  /// [BarsDelta.minRowid] / [BarsDelta.maxRowid] 供 worker 校验"纯追加"——
+  /// 这批新行的 rowid 必须 > 旧池的 maxRowid，否则有旧行被 REPLACE。
+  /// 空结果（参数 ≥ 水位）仍返回当前库的 maxRowid 用于下次比对。
+  BarsDelta barsSince(String tradeDate) {
+    final st = _db.prepare(
+        'SELECT ts_code, trade_date, open, high, low, close, vol, amount, rowid '
+        'FROM daily_bars WHERE trade_date > ? ORDER BY ts_code, trade_date');
+    final byCode = <String, List<Bar>>{};
+    final dateCache = <String, DateTime>{};
+    var minRowid = 0;
+    var maxRowid = 0;
+    var rowCount = 0;
+    try {
+      final cur = st.selectCursor([tradeDate]);
+      while (cur.moveNext()) {
+        final r = cur.current;
+        final ts = r.columnAt(0) as String;
+        final dateStr = r.columnAt(1) as String;
+        final date = dateCache[dateStr] ??= parseTradeDate(dateStr);
+        final rowid = r.columnAt(8) as int;
+        if (rowid > maxRowid) maxRowid = rowid;
+        if (minRowid == 0 || rowid < minRowid) minRowid = rowid;
+        rowCount++;
+        (byCode[ts] ??= <Bar>[]).add(Bar(
+          date: date,
+          open: (r.columnAt(2) as num).toDouble(),
+          high: (r.columnAt(3) as num).toDouble(),
+          low: (r.columnAt(4) as num).toDouble(),
+          close: (r.columnAt(5) as num).toDouble(),
+          volume: (r.columnAt(6) as num).toDouble(),
+          amount: (r.columnAt(7) as num).toDouble(),
+        ));
+      }
+    } finally {
+      st.dispose();
+    }
+    // 越界（参数 ≥ 水位）：byCode 空，但 maxRowid 仍是当前库最大 rowid。
+    if (maxRowid == 0) {
+      final r = _db.select('SELECT MAX(rowid) FROM daily_bars');
+      maxRowid = (r.first.values[0] as int?) ?? 0;
+    }
+    return BarsDelta(
+        byCode: byCode,
+        minRowid: minRowid,
+        maxRowid: maxRowid,
+        rowCount: rowCount);
+  }
+
   /// 日线总行数（进度观感用，CLI 打印同步前后行数）。
   int barCount() {
     final r = _db.select('SELECT COUNT(*) AS n FROM daily_bars');
@@ -217,6 +339,27 @@ class BarRepository {
         for (final r in _db.select('SELECT DISTINCT ts_code FROM daily_bars ORDER BY ts_code'))
           r['ts_code'] as String,
       ];
+
+  /// 从库直接算交易日历，与 `tradingCalendar(loadAllStocks())` 同口径
+  /// （excludeSpecialStocks=false、minBars=0）。不走 loadAllStocks 物化全量行，
+  /// 只 GROUP BY trade_date 取计数，再套 market.dart 的中位/2 启发式。
+  Set<DateTime> tradingCalendarFromDb() {
+    final rows = _db.select(
+        'SELECT trade_date, COUNT(*) AS n FROM daily_bars GROUP BY trade_date');
+    if (rows.isEmpty) return const <DateTime>{};
+    final counts = <int>[];
+    final dates = <DateTime>[];
+    for (final r in rows) {
+      dates.add(parseTradeDate(r['trade_date'] as String));
+      counts.add((r['n'] as num).toInt());
+    }
+    counts.sort();
+    final minStocks = math.max(1, counts[counts.length ~/ 2] ~/ 2);
+    return {
+      for (var i = 0; i < dates.length; i++)
+        if (counts[i] >= minStocks) dates[i],
+    };
+  }
 
   /// 单只股票的日线，按日期升序；无数据返回空列表。
   List<Bar> barsFor(String tsCode) {
@@ -270,17 +413,22 @@ class BarRepository {
     // 2. 日期对象缓存复用：全库实际只有 ~700-1000 个唯一交易日，复用 DateTime 实例，
     //    免去 360 万次 DateTime 分配及千万次 substring，省约 100MB 堆内存。
     // 3. maxBars 就地裁剪，无需在结束后分配第二个 trimmed Map。
+    // 4. ST/科创板过滤挪到 Dart 侧（2026-10-09）：SQL `NOT IN (子查询)` 让 392 万行
+    //    主键序扫描慢一倍（12.6s vs 6.5s），纯 SQL 顺序扫描 + Dart Set/前缀过滤快一倍。
+    //    过滤口径与原 GLOB 模式逐字一致（见 _isSpecialStock）。
     final st = _db.prepare(
         'SELECT ts_code, trade_date, open, high, low, close, vol, amount '
-        'FROM daily_bars ${_specialFilterSql(excludeSpecialStocks)} '
+        'FROM daily_bars '
         'ORDER BY ts_code, trade_date');
+    final names = excludeSpecialStocks ? stockNames() : null;
     final result = <StockData>[];
     final dateCache = <String, DateTime>{};
     String? currentTs;
     var currentBars = <Bar>[];
+    var skipCurrent = false;
 
     void flushCurrent() {
-      if (currentTs == null) return;
+      if (currentTs == null || skipCurrent) return;
       if (maxBars > 0 && currentBars.length > maxBars) {
         currentBars = currentBars.sublist(currentBars.length - maxBars);
       }
@@ -298,7 +446,9 @@ class BarRepository {
           flushCurrent();
           currentTs = ts;
           currentBars = <Bar>[];
+          skipCurrent = excludeSpecialStocks && isSpecialStock(ts, names);
         }
+        if (skipCurrent) continue;
         final dateStr = r.columnAt(1) as String;
         final date = dateCache[dateStr] ??= parseTradeDate(dateStr);
         currentBars.add(Bar(
@@ -318,16 +468,91 @@ class BarRepository {
     return result;
   }
 
-  void close() => _db.dispose();
+  /// 与 [loadAllStocks] 同口径的主键范围分片扫描：只加载 `ts_code ∈ [fromCode, toCode)`
+  /// 的股票。`toCode` 为 null 时无上界。游标流式、日期缓存、ST 过滤逻辑与
+  /// [loadAllStocks] 逐字一致——只是 SQL 多了 `WHERE ts_code >= ? AND ts_code < ?`
+  /// 前缀过滤，走主键索引只扫一段。
+  List<StockData> loadStocksRange(
+    String fromCode, {
+    String? toCode,
+    int minBars = 0,
+    bool excludeSpecialStocks = false,
+  }) {
+    final sql = toCode == null
+        ? 'SELECT ts_code, trade_date, open, high, low, close, vol, amount '
+            'FROM daily_bars WHERE ts_code >= ? ORDER BY ts_code, trade_date'
+        : 'SELECT ts_code, trade_date, open, high, low, close, vol, amount '
+            'FROM daily_bars WHERE ts_code >= ? AND ts_code < ? '
+            'ORDER BY ts_code, trade_date';
+    final args =
+        toCode == null ? [fromCode] : [fromCode, toCode];
+    final st = _db.prepare(sql);
+    final names = excludeSpecialStocks ? stockNames() : null;
+    final result = <StockData>[];
+    final dateCache = <String, DateTime>{};
+    String? currentTs;
+    var currentBars = <Bar>[];
+    var skipCurrent = false;
 
-  /// 选股池过滤的 SQL 片段（参数为 false 时返回空串，查询与不加过滤逐字节相同）。
-  /// GLOB 而非 LIKE：`?` 是 LIKE 的单字符通配符，用它写 `S?ST?*` 会连 `SHST` 之类
-  /// 一起匹配；GLOB 无此坑，且能用主键覆盖索引（实测 360 万行 1.4s，与不过滤同量级）。
-  String _specialFilterSql(bool excludeSpecialStocks) => excludeSpecialStocks
-      ? "WHERE ts_code NOT LIKE '68%' "
-          "AND ts_code NOT IN (SELECT ts_code FROM stocks WHERE "
-          "name GLOB 'ST*' OR name GLOB '*ST*' OR name GLOB 'S*ST*' "
-          "OR name GLOB 'PT*' OR name LIKE '%退%')"
-      : '';
+    void flushCurrent() {
+      if (currentTs == null || skipCurrent) return;
+      if (currentBars.length >= minBars) {
+        result.add(StockData(symbol: currentTs, bars: currentBars));
+      }
+    }
+
+    try {
+      final cur = st.selectCursor(args);
+      while (cur.moveNext()) {
+        final r = cur.current;
+        final ts = r.columnAt(0) as String;
+        if (ts != currentTs) {
+          flushCurrent();
+          currentTs = ts;
+          currentBars = <Bar>[];
+          skipCurrent = excludeSpecialStocks && isSpecialStock(ts, names);
+        }
+        if (skipCurrent) continue;
+        final dateStr = r.columnAt(1) as String;
+        final date = dateCache[dateStr] ??= parseTradeDate(dateStr);
+        currentBars.add(Bar(
+          date: date,
+          open: (r.columnAt(2) as num).toDouble(),
+          high: (r.columnAt(3) as num).toDouble(),
+          low: (r.columnAt(4) as num).toDouble(),
+          close: (r.columnAt(5) as num).toDouble(),
+          volume: (r.columnAt(6) as num).toDouble(),
+          amount: (r.columnAt(7) as num).toDouble(),
+        ));
+      }
+      flushCurrent();
+    } finally {
+      st.dispose();
+    }
+    return result;
+  }
+
+  /// 是否为选股口径应剔除的股票（ST/退市/科创板）。
+  ///
+  /// 与原 SQL `NOT IN (SELECT ... WHERE name GLOB 'ST*' OR name GLOB '*ST*'
+  /// OR name GLOB 'S*ST*' OR name GLOB 'PT*' OR name LIKE '%退%')` 逐字等价：
+  /// - `ST*` / `*ST*` / `S*ST*` 的并集 = 子串含 ST（GLOB 大小写敏感，
+  ///   Dart [String.contains] 同样大小写敏感）
+  /// - `PT*` = 前缀 PT
+  /// - `LIKE '%退%'` = 子串含退
+  /// - 代码 68 开头 = 科创板/CDR
+  ///
+  /// [names] 为 null（名单缺失）时只按代码前缀过滤，不误杀主板。
+  static bool isSpecialStock(String tsCode, Map<String, String>? names) {
+    if (tsCode.startsWith('68')) return true;
+    final name = names?[tsCode];
+    if (name == null) return false;
+    if (name.contains('ST')) return true;
+    if (name.startsWith('PT')) return true;
+    if (name.contains('退')) return true;
+    return false;
+  }
+
+  void close() => _db.dispose();
 }
 

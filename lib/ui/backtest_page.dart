@@ -100,6 +100,28 @@ class _BacktestPageState extends State<BacktestPage> {
     _history = _loadHistory();
   }
 
+  /// 外壳（IndexedStack 常驻）重建时把新报告传进来。没有这个方法，同步后
+  /// 自动回测落盘的新报告永远进不了页面——initState 只在首次挂载跑一次，
+  /// 而 IndexedStack 不卸载页面，setState 才是唯一的更新通道。
+  @override
+  void didUpdateWidget(BacktestPage oldWidget) {
+    super.didUpdateWidget(oldWidget);
+    final incoming = widget.initialReport;
+    // identical 三重守卫：
+    // ① oldWidget.initialReport === incoming → 外壳重建但报告没换，不动；
+    // ② _report === incoming → 页面自己 _run 完成后经 onReport → 外壳 setState
+    //   回流的正是刚 set 的同一实例，不动（否则会重读台账、刷掉连红列）；
+    // ③ incoming == null → 外壳还没读到报告，不覆盖页面已有的缓存。
+    if (!identical(oldWidget.initialReport, incoming) &&
+        !identical(_report, incoming) &&
+        incoming != null) {
+      setState(() {
+        _report = incoming;
+        _history = _loadHistory(); // 台账跟着重读（连红列）
+      });
+    }
+  }
+
   /// 台账路径：注入优先，否则取报告同目录的 `backtest-history.json`。
   String get _historyFile => widget.historyPath ?? historyPathFor(_store.path);
 

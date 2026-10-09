@@ -80,8 +80,21 @@ class ReportStore {
     }
   }
 
+  /// 原子写（tmp + rename）：回测页/选股页在写入中途读报告时不会读到半份 JSON。
+  /// Windows 下目标已存在时 rename 会抛，先删再换（同 [saveBacktestHistory]）。
   void save(BacktestReport report) {
-    File(path).writeAsStringSync(jsonEncode(report.toJson()));
+    final tmp = File('$path.$pid.tmp');
+    tmp.writeAsStringSync(jsonEncode(report.toJson()), flush: true);
+    try {
+      tmp.renameSync(path);
+    } on FileSystemException {
+      if (Platform.isWindows && File(path).existsSync()) {
+        File(path).deleteSync();
+        tmp.renameSync(path);
+      } else {
+        rethrow;
+      }
+    }
   }
 
   void clear() {

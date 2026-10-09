@@ -676,6 +676,10 @@ class RecentSlice {
 /// 持有，全市场规模下带明细会放大到数百 MB。统计与逐规则 [backtestRule] 逐位一致。
 ///
 /// 可评估日取最大持有期的范围；某持有期的前瞻窗口越界时该信号不计入该持有期。
+///
+/// 串行路径：直接建 Tape，单遍扫描。与 [scanStocksShard]+[mergeShards] 的多分片
+/// 路径逐位一致（插入序相同），但省掉收集 Float64List + 重放的双重遍历开销。
+/// 并行路径见 [app_logic.runBacktest]。
 BacktestReport backtestAll(
   List<StockData> stocks,
   List<Rule> rules, {
@@ -689,17 +693,10 @@ BacktestReport backtestAll(
   if (hs.any((h) => h <= 0)) throw ArgumentError('持有期必须为正，实际 $hs');
   final maxH = hs.last;
 
-  // 每条规则 × 每个持有期一条收益带。全市场实测信号收益 2083 万条，
-  // 原实现把它**同时**存进 sigReturns 与 yearlySignals 两套桶——同一批 double
-  // 存了两遍，收尾排序耗时与峰值内存都翻倍。改为只存一份（[Tape]），
-  // 按年分桶、桶内排序，同时服务全样本与全部分年。
   final sigTapes = <String, Map<int, Tape>>{
     for (final r in rules) r.id: {for (final h in hs) h: Tape()},
   };
   final baseTapes = {for (final h in hs) h: Tape()};
-
-  // 把 (规则 → 持有期 → Tape) 摊平成一条列表：热路径里每天要 append 最多
-  // 20×3 次，逐次做 hs[i] / tapes[hs[i]]! 两层哈希查找太贵。
   final sigFlat = <Tape>[];
   for (final r in rules) {
     final byH = sigTapes[r.id]!;
@@ -709,14 +706,10 @@ BacktestReport backtestAll(
   }
   final baseFlat = [for (final h in hs) baseTapes[h]!];
 
-  // 停牌洞要用全市场交易日历判（节假日全市场一起休，只有停牌是个股缺）。
   final calendar = tradingCalendar(stocks);
-
-  // 最近窗口：截止日按**交易日**数（日历日差会把春节/国庆算进去）。
-  // 窗口内可评估日与全样本共用同一套护栏，逐日双写进两套桶。
   final recentCutoff = recentWindowTradingDays == null || recentWindowTradingDays <= 0
       ? null
-      : _recentCutoffDate(calendar, recentWindowTradingDays);
+      : recentCutoffDate(calendar, recentWindowTradingDays);
   final recentSig = <String, Map<int, Tape>>{
     if (recentCutoff != null)
       for (final r in rules) r.id: {for (final h in hs) h: Tape()},
@@ -724,23 +717,18 @@ BacktestReport backtestAll(
   final recentBase = {
     if (recentCutoff != null) for (final h in hs) h: Tape(),
   };
-  // 按日累加器：dayKey → [sum, count]。只存窗口段,内存增量约窗口占比。
   final recentSigDays = <String, Map<int, Map<int, List<double>>>>{
     if (recentCutoff != null)
       for (final r in rules) r.id: {for (final h in hs) h: <int, List<double>>{}},
   };
   final recentBaseDays = {
-    if (recentCutoff != null)
-      for (final h in hs) h: <int, List<double>>{},
+    if (recentCutoff != null) for (final h in hs) h: <int, List<double>>{},
   };
 
   for (final stock in stocks) {
     final bars = stock.bars;
-    // 可评估日统一取最大持有期的范围，保证三个持有期覆盖同一批交易日、彼此可比。
     if (bars.length < IndicatorSnapshot.minBars + maxH) continue;
     final series = IndicatorSeries.from(bars);
-    // 除权/复牌 + 停牌两个护栏：污染日整日跳过——基准与信号一并剔除，
-    // 两侧始终覆盖同一批可评估日（否则"信号从干净日里选、基准还含污染日"会失真）。
     final sinceGap = barsSinceCorporateAction(stock.symbol, bars);
     final gapDays = tradingDaysSincePrevBar(bars, calendar);
     final lastEval = bars.length - 1 - maxH;
@@ -755,14 +743,12 @@ BacktestReport backtestAll(
       }
       final from = bars[t].close;
       final year = bars[t].date.year;
-      // 前瞻收益每个持有期只算一次：原来基准桶与信号桶各算一遍。
       final fwdByH = [for (final h in hs) (bars[t + h].close / from - 1) * 100];
       final inRecent = recentCutoff != null && !bars[t].date.isBefore(recentCutoff);
       final dayKey = inRecent
           ? bars[t].date.year * 10000 + bars[t].date.month * 100 + bars[t].date.day
           : 0;
       for (var i = 0; i < baseFlat.length; i++) {
-        // 基准 tape 不需要 profile()，不记 monthKey（免去千万次 map 更新）。
         baseFlat[i].add(fwdByH[i], year);
         if (inRecent) {
           recentBase[hs[i]]!.add(fwdByH[i], year);
@@ -772,7 +758,6 @@ BacktestReport backtestAll(
           acc[1] += 1;
         }
       }
-      // 逐条规则判定：绝大多数规则在标量条件就返回 false，不碰 Tape。
       final snap = series.at(t);
       String? mk;
       var k = 0;
@@ -795,60 +780,47 @@ BacktestReport backtestAll(
     }
   }
 
-  // 年份取「基准 ∪ 信号」——只要那一年有可评估日就要出现在分年视图里，
-  // 否则某年一条规则都没命中时整年会消失。（信号日必是可评估日，
-  // 故实际上基准年份已覆盖全集，这里仍取并集以免口径随实现漂移。）
   final years = <int>{
     for (final tape in baseTapes.values) ...tape.years,
     for (final byH in sigTapes.values) for (final tape in byH.values) ...tape.years,
   };
-
+  final msCtx = MarketStateCtx.fromCalendar(calendar,
+      maPeriod: 120,
+      recentDays: 130,
+      statWindow: 20,
+      maxLastBarLagTradingDays: 20,
+      corporateActionLookbackBars: corporateActionLookbackBars);
   return BacktestReport(
     generatedAt: DateTime.now().toIso8601String(),
     horizons: hs,
     stockCount: stocks.length,
-    // 原始收益列表在此消化成统计量后随函数结束释放，不进返回值：
-    // 报告会被 Isolate.run 结构化拷贝到主 isolate 并常驻到下次重算。
     baseline: {
       for (final h in hs)
-        h: Baseline.fromStats(
-          forwardDays: h,
-          stats: baseTapes[h]!.overall(),
-        ),
+        h: Baseline.fromStats(forwardDays: h, stats: baseTapes[h]!.overall()),
     },
     results: {
       for (final r in rules)
         r.id: {
           for (final h in hs)
             h: BacktestResult.fromStats(
-              ruleId: r.id,
-              forwardDays: h,
-              stats: sigTapes[r.id]![h]!.overall(),
-            ),
+                ruleId: r.id, forwardDays: h, stats: sigTapes[r.id]![h]!.overall()),
         },
     },
     yearly: {
       for (final y in years)
         y: {
           for (final r in rules)
-            r.id: {
-              for (final h in hs) h: sigTapes[r.id]![h]!.statsOfYear(y),
-            },
+            r.id: {for (final h in hs) h: sigTapes[r.id]![h]!.statsOfYear(y)},
         },
     },
     yearlyBaseline: {
-      for (final y in years)
-        y: {for (final h in hs) h: baseTapes[h]!.statsOfYear(y)},
+      for (final y in years) y: {for (final h in hs) h: baseTapes[h]!.statsOfYear(y)},
     },
-    // 信号集中度。没有它，"全样本胜率最高"会被误读成"最可靠"——
-    // 而实测严格版 73.7% 的信号集中在 2024-02 单月。
     signalProfile: {
       for (final r in rules)
         r.id: {for (final h in hs) h: sigTapes[r.id]![h]!.profile()},
     },
-    // 市场状态仪表：与回测基准同源的等权口径。顺带算比调用方再扫一遍
-    // 全市场便宜（可评估日窗口已在此确定，口径天然一致）。
-    marketState: assessMarketState(stocks),
+    marketState: marketStateFromContrib(marketStateContrib(stocks, msCtx), msCtx),
     recent: recentCutoff == null
         ? const {}
         : {
@@ -873,9 +845,553 @@ BacktestReport backtestAll(
   );
 }
 
+/// Tape 的可序列化快照——跨 Isolate 传递后用 [_mergeTapes] 合并。
+/// 所有字段都是原始类型/可拷贝集合，不含闭包或 late 字段。
+///
+/// [byYear] 各年桶：扫描管线产出为升序（worker 预排序）；旧格式缓存无序，
+/// [_mergeTapes] 按序自检分流，两种输入都能得到正确统计。
+class TapeSnapshot {
+  final Map<int, List<double>> byYear;
+  final Map<String, int> byMonth;
+  final int count;
+  final double sum, gain, loss;
+  final int wins;
+  final double? best, worst;
+  const TapeSnapshot({
+    required this.byYear,
+    required this.byMonth,
+    required this.count,
+    required this.sum,
+    required this.gain,
+    required this.loss,
+    required this.wins,
+    this.best,
+    this.worst,
+  });
+}
+
+/// 从 [Tape] 提取快照（同库内可直接读私有字段）。
+TapeSnapshot _snapshotOf(Tape t) => TapeSnapshot(
+      byYear: t._byYear,
+      byMonth: t._byMonth,
+      count: t._count,
+      sum: t._sum,
+      gain: t._gain,
+      loss: t._loss,
+      wins: t._wins,
+      best: t._best,
+      worst: t._worst,
+    );
+
+/// 单遍升序检查。用 `>=` 取反的写法让 NaN 判为无序（NaN 参与比较恒 false），
+/// 含 NaN 的桶走拼接回退路径，绝不进 k 路归并。
+bool _isSortedAsc(List<double> xs) {
+  for (var i = 1; i < xs.length; i++) {
+    if (!(xs[i] >= xs[i - 1])) return false;
+  }
+  return true;
+}
+
+/// k 路归并：各段已升序 → 输出全局升序。与「拼接后整体排序」产出同一有序
+/// 多重集（相等值的位置无所谓，值相同），分年统计的求和序因此逐位不变。
+List<double> _mergeSortedParts(List<List<double>> parts) {
+  final total = parts.fold<int>(0, (a, p) => a + p.length);
+  final out = List<double>.filled(total, 0);
+  final cursor = List<int>.filled(parts.length, 0);
+  for (var i = 0; i < total; i++) {
+    var bestSeg = -1;
+    var bestVal = double.infinity;
+    for (var k = 0; k < parts.length; k++) {
+      final p = parts[k];
+      final c = cursor[k];
+      if (c < p.length && p[c] < bestVal) {
+        bestVal = p[c];
+        bestSeg = k;
+      }
+    }
+    out[i] = bestVal;
+    cursor[bestSeg]++;
+  }
+  return out;
+}
+
+/// 合并多片快照为一个 [Tape]：数值统计量按分片序求和/取极值；`_byYear` 各年桶
+/// 在全部分片桶升序（worker 预排序）时走 k 路归并直接产出有序桶，任一桶无序
+/// （旧格式缓存/手工构造）则按分片序拼接、收尾照旧懒排序。不再逐值
+/// `tape.add()`（旧实现 3.6M 次 map lookup = 12.8s）。
+///
+/// 注：`_sum`/`_gain`/`_loss` 的求和顺序与串行 `add()` 路径不同 →
+/// `overall()` 的 avgReturn/profitFactor/stdDev 有 ulp 级差异（测试用 closeTo）。
+/// 分年统计由 `_statsOfSorted` 在有序桶上重算 sum，与串行路径逐位一致。
+Tape _mergeTapes(List<TapeSnapshot> snaps) {
+  final t = Tape();
+  double? best, worst;
+  var allSorted = true;
+  for (final y in {for (final s in snaps) ...s.byYear.keys}) {
+    final parts = <List<double>>[
+      for (final s in snaps) if (s.byYear[y] != null) s.byYear[y]!,
+    ];
+    if (parts.any((p) => !_isSortedAsc(p))) {
+      final dst = (t._byYear[y] ??= []);
+      for (final p in parts) {
+        dst.addAll(p);
+      }
+      allSorted = false;
+    } else {
+      t._byYear[y] = _mergeSortedParts(parts);
+    }
+  }
+  t._presortedBuckets = allSorted;
+  for (final s in snaps) {
+    for (final e in s.byMonth.entries) {
+      t._byMonth[e.key] = (t._byMonth[e.key] ?? 0) + e.value;
+    }
+    t._count += s.count;
+    t._sum += s.sum;
+    t._gain += s.gain;
+    t._loss += s.loss;
+    t._wins += s.wins;
+    if (s.best != null && (best == null || s.best! > best)) best = s.best;
+    if (s.worst != null && (worst == null || s.worst! < worst)) worst = s.worst;
+  }
+  t._best = best;
+  t._worst = worst;
+  return t;
+}
+
+/// 分片扫描的可序列化明细。所有字段都是 Tape 快照（原始类型/可拷贝集合），
+/// 不含闭包或 late 字段——可跨 Isolate 边界传递。
+///
+/// recent 按日明细的叶子是**逐值列表**（不是 [sum,count] 累加器）：增量合并
+/// 时新窗口与旧缓存按日键拼接（新旧日集合不重叠，见 [detailForResume]），
+/// 聚合时按日取均值、按日升序重建 Tape（见 [aggregateDetail]）。
+class ShardDetail {
+  final int stockCount;
+
+  /// 每股扫描时的 bars.length——增量续扫的锚点，缓存头原样持久化。
+  final Map<String, int> stockLens;
+  final Map<String, Map<int, TapeSnapshot>> sigTapes;
+  final Map<int, TapeSnapshot> baseTapes;
+  final Map<String, Map<int, Map<int, List<double>>>>? recentSigDays;
+  final Map<int, Map<int, List<double>>>? recentBaseDays;
+  final MarketStateContrib? msContrib;
+  const ShardDetail({
+    required this.stockCount,
+    required this.sigTapes,
+    required this.baseTapes,
+    this.recentSigDays,
+    this.recentBaseDays,
+    this.msContrib,
+    this.stockLens = const {},
+  });
+}
+
+/// 与 [backtestAll] 的扫描循环逐字同构，建 [Tape] 后快照成 [TapeSnapshot]。
+/// 跨 Isolate 传递后由 [mergeShards] 用 [_mergeTapes] 合并。
+///
+/// [resumeLens] 为增量续扫提供每股旧长度：旧跑已评 `t ≤ oldLen−1−maxH`
+/// （前瞻窗口完全落在旧数据内，结果与追加无关），本次只补评
+/// `t ∈ [max(minBars, oldLen−maxH), newLen−1−maxH]`；不在映射里的股票
+/// （新股）从 [IndicatorSnapshot.minBars] 全评。停牌股（长度未变）区间为空。
+ShardDetail scanStocksShard({
+  required List<StockData> stocks,
+  required List<Rule> rules,
+  required List<int> hs,
+  required Set<DateTime> calendar,
+  DateTime? recentCutoffDate,
+  int corporateActionLookbackBars = kCorporateActionLookbackBars,
+  int suspensionLookbackBars = kSuspensionLookbackBars,
+  MarketStateCtx? msCtx,
+  Map<String, int>? resumeLens,
+}) {
+  final maxH = hs.last;
+  final sigTapes = <String, Map<int, Tape>>{
+    for (final r in rules) r.id: {for (final h in hs) h: Tape()},
+  };
+  final baseTapes = {for (final h in hs) h: Tape()};
+  final sigFlat = <Tape>[];
+  for (final r in rules) {
+    final byH = sigTapes[r.id]!;
+    for (final h in hs) {
+      sigFlat.add(byH[h]!);
+    }
+  }
+  final baseFlat = [for (final h in hs) baseTapes[h]!];
+  final hasRecent = recentCutoffDate != null;
+  final recentSigDays = hasRecent
+      ? <String, Map<int, Map<int, List<double>>>>{
+          for (final r in rules) r.id: {for (final h in hs) h: <int, List<double>>{}},
+        }
+      : null;
+  final recentBaseDays =
+      hasRecent ? {for (final h in hs) h: <int, List<double>>{}} : null;
+
+  for (final stock in stocks) {
+    final bars = stock.bars;
+    if (bars.length < IndicatorSnapshot.minBars + maxH) continue;
+    final series = IndicatorSeries.from(bars);
+    final sinceGap = barsSinceCorporateAction(stock.symbol, bars);
+    final gapDays = tradingDaysSincePrevBar(bars, calendar);
+    final lastEval = bars.length - 1 - maxH;
+    // 增量续扫起点：oldLen=0（新股）时从 minBars 全评；长度未变（停牌）时
+    // resumeFrom > lastEval，区间为空。
+    var tStart = IndicatorSnapshot.minBars;
+    final resumeFrom = (resumeLens?[stock.symbol] ?? 0) - maxH;
+    if (resumeFrom > tStart) tStart = resumeFrom;
+    for (var t = tStart; t <= lastEval; t++) {
+      if (corporateActionLookbackBars > 0 &&
+          sinceGap[t] < corporateActionLookbackBars) {
+        continue;
+      }
+      if (hasSuspensionGapNearby(gapDays, t,
+          lookbackBars: suspensionLookbackBars)) {
+        continue;
+      }
+      final from = bars[t].close;
+      final year = bars[t].date.year;
+      final fwdByH = [for (final h in hs) (bars[t + h].close / from - 1) * 100];
+      final inRecent =
+          hasRecent && !bars[t].date.isBefore(recentCutoffDate);
+      final dayKey = inRecent
+          ? bars[t].date.year * 10000 +
+              bars[t].date.month * 100 +
+              bars[t].date.day
+          : 0;
+      for (var i = 0; i < baseFlat.length; i++) {
+        baseFlat[i].add(fwdByH[i], year);
+        if (inRecent) {
+          recentBaseDays![hs[i]]!.putIfAbsent(dayKey, () => []).add(fwdByH[i]);
+        }
+      }
+      final snap = series.at(t);
+      String? mk;
+      var k = 0;
+      for (final r in rules) {
+        if (r.test(snap)) {
+          mk ??=
+              '${bars[t].date.year}-${bars[t].date.month.toString().padLeft(2, '0')}';
+          for (var i = 0; i < hs.length; i++) {
+            sigFlat[k + i].add(fwdByH[i], year, monthKey: mk);
+            if (inRecent) {
+              recentSigDays![r.id]![hs[i]]!
+                  .putIfAbsent(dayKey, () => [])
+                  .add(fwdByH[i]);
+            }
+          }
+        }
+        k += hs.length;
+      }
+    }
+  }
+
+  // worker 内就地预排序各年桶：收尾聚合对有序桶走 k 路归并，主 isolate
+  // 免掉整体重排（收尾排序实测 ~10s，本在主 isolate 串行发生）。
+  for (final t in sigFlat) {
+    t.presortBuckets();
+  }
+  for (final t in baseFlat) {
+    t.presortBuckets();
+  }
+
+  Map<String, Map<int, TapeSnapshot>> snapSig(Map<String, Map<int, Tape>> m) =>
+      {
+        for (final r in m.entries)
+          r.key: {for (final h in r.value.entries) h.key: _snapshotOf(h.value)},
+      };
+  Map<int, TapeSnapshot> snapBase(Map<int, Tape> m) =>
+      {for (final e in m.entries) e.key: _snapshotOf(e.value)};
+
+  return ShardDetail(
+    stockCount: stocks.length,
+    sigTapes: snapSig(sigTapes),
+    baseTapes: snapBase(baseTapes),
+    recentSigDays: recentSigDays,
+    recentBaseDays: recentBaseDays,
+    msContrib: msCtx != null ? marketStateContrib(stocks, msCtx) : null,
+    stockLens: {for (final s in stocks) s.symbol: s.bars.length},
+  );
+}
+
+/// 增量续扫前处理缓存明细：recent 按日明细过滤掉滚出新窗口的 dayKey
+/// （窗口右移后 [新窗口起点, 旧末次评估日] 完整落在缓存覆盖范围内，不会缺日；
+/// 续扫区间与新缓存按日键拼接不重不漏），overall 明细原样保留。
+/// stockCount/msContrib/stockLens 归零——市场状态依赖每股末根（全部变了），
+/// 必须整体重算；合并时这三者一律以本次扫描的新分片为准。
+ShardDetail detailForResume(
+  ShardDetail cached, {
+  required int recentCutoffDayKey,
+}) {
+  return ShardDetail(
+    stockCount: 0,
+    sigTapes: cached.sigTapes,
+    baseTapes: cached.baseTapes,
+    recentSigDays: cached.recentSigDays == null
+        ? null
+        : {
+            for (final e in cached.recentSigDays!.entries)
+              e.key: {
+                for (final h in e.value.entries)
+                  h.key: {
+                    for (final d in h.value.entries)
+                      if (d.key >= recentCutoffDayKey) d.key: d.value,
+                  },
+              },
+          },
+    recentBaseDays: cached.recentBaseDays == null
+        ? null
+        : {
+            for (final h in cached.recentBaseDays!.entries)
+              h.key: {
+                for (final d in h.value.entries)
+                  if (d.key >= recentCutoffDayKey) d.key: d.value,
+              },
+          },
+    msContrib: null,
+  );
+}
+
+/// 合并分片明细（不聚合）：overall Tape 用 [_mergeTapes] 批量拼接
+/// （O(分片数) 统计 + O(值数) 拷贝），recent 按日明细按日键拼接值列表
+/// （各分片的日集合不重叠），整数计数累加。产出可直接落盘为明细缓存
+/// （见 `lib/data/backtest_detail_store.dart`）。
+ShardDetail mergeShardDetails(List<ShardDetail> shards) {
+  final ruleIds = <String>{
+    for (final s in shards) ...s.sigTapes.keys,
+  };
+  final sigTapes = <String, Map<int, TapeSnapshot>>{
+    for (final id in ruleIds)
+      id: {
+        for (final h in {for (final s in shards) ...?s.sigTapes[id]?.keys})
+          h: _snapshotOf(_mergeTapes([
+            for (final s in shards) s.sigTapes[id]?[h],
+          ].whereType<TapeSnapshot>().toList())),
+      },
+  };
+  final baseTapes = <int, TapeSnapshot>{
+    for (final h in {for (final s in shards) ...s.baseTapes.keys})
+      h: _snapshotOf(_mergeTapes([
+        for (final s in shards) s.baseTapes[h],
+      ].whereType<TapeSnapshot>().toList())),
+  };
+
+  final rsig = <String, Map<int, Map<int, List<double>>>>{};
+  final rbase = <int, Map<int, List<double>>>{};
+  for (final s in shards) {
+    if (s.recentSigDays != null) {
+      for (final re in s.recentSigDays!.entries) {
+        final byH = rsig.putIfAbsent(re.key, () => {});
+        for (final he in re.value.entries) {
+          final byDay = byH.putIfAbsent(he.key, () => {});
+          for (final de in he.value.entries) {
+            (byDay[de.key] ??= []).addAll(de.value);
+          }
+        }
+      }
+    }
+    if (s.recentBaseDays != null) {
+      for (final he in s.recentBaseDays!.entries) {
+        final byDay = rbase.putIfAbsent(he.key, () => {});
+        for (final de in he.value.entries) {
+          (byDay[de.key] ??= []).addAll(de.value);
+        }
+      }
+    }
+  }
+
+  var stockCount = 0;
+  final lens = <String, int>{};
+  final msParts = <MarketStateContrib>[];
+  for (final s in shards) {
+    stockCount += s.stockCount;
+    lens.addAll(s.stockLens);
+    if (s.msContrib != null) msParts.add(s.msContrib!);
+  }
+  return ShardDetail(
+    stockCount: stockCount,
+    sigTapes: sigTapes,
+    baseTapes: baseTapes,
+    recentSigDays: rsig.isEmpty ? null : rsig,
+    recentBaseDays: rbase.isEmpty ? null : rbase,
+    msContrib: msParts.isEmpty ? null : mergeMarketStateContrib(msParts),
+    stockLens: lens,
+  );
+}
+
+/// 从合并态明细聚合报告——全量与增量共用同一条聚合路径（P3）。
+/// recent Tape 从按日明细重建：日升序逐值 `add`（year = dayKey ÷ 10000）。
+/// sum 类统计量的加法顺序与串行 `backtestAll` 不同 → overall 统计 ulp 级差异
+/// （测试 closeTo 1e-9）；分年统计由 `_statsOfSorted` 在有序桶上重算，逐位一致；
+/// 按日均值直接取自明细列表（值序 = 股票序），与串行逐位一致。
+BacktestReport aggregateDetail(
+  ShardDetail d, {
+  required List<String> ruleIds,
+  required List<int> hs,
+  DateTime? recentCutoffDate,
+  required MarketStateCtx? msCtx,
+}) {
+  // 直接接管快照里的列表引用（同库可触私有字段），免一整轮值拷贝；桶已升序
+  // 时置位免重排。列表与合并态明细共享：聚合只读（旧格式缓存的无序桶会在
+  // _ensureSorted 就地排序，多重集不变，随后落盘的缓存即转成新格式）。
+  Tape tapeOf(TapeSnapshot s) {
+    final t = Tape();
+    var sorted = true;
+    for (final e in s.byYear.entries) {
+      t._byYear[e.key] = e.value;
+      if (!_isSortedAsc(e.value)) sorted = false;
+    }
+    t._byMonth.addAll(s.byMonth);
+    t._count = s.count;
+    t._sum = s.sum;
+    t._gain = s.gain;
+    t._loss = s.loss;
+    t._wins = s.wins;
+    t._best = s.best;
+    t._worst = s.worst;
+    t._presortedBuckets = sorted;
+    return t;
+  }
+  final sigTapes = <String, Map<int, Tape>>{
+    for (final e in d.sigTapes.entries)
+      e.key: {for (final h in e.value.entries) h.key: tapeOf(h.value)},
+  };
+  final baseTapes = <int, Tape>{
+    for (final e in d.baseTapes.entries) e.key: tapeOf(e.value),
+  };
+  Tape tapeFromDays(Map<int, List<double>> days) {
+    final t = Tape();
+    final keys = days.keys.toList()..sort();
+    for (final k in keys) {
+      final year = k ~/ 10000;
+      for (final v in days[k]!) {
+        t.add(v, year);
+      }
+    }
+    return t;
+  }
+
+  Map<int, double> dayMeansOf(Map<int, List<double>> days) => {
+        for (final e in days.entries)
+          e.key: e.value.reduce((a, b) => a + b) / e.value.length,
+      };
+
+  final years = <int>{
+    for (final tape in baseTapes.values) ...tape.years,
+    for (final byH in sigTapes.values)
+      for (final tape in byH.values) ...tape.years,
+  };
+  MarketState? marketState;
+  if (msCtx != null && d.msContrib != null) {
+    marketState = marketStateFromContrib(d.msContrib!, msCtx);
+  }
+  final hasRecent = recentCutoffDate != null;
+
+  return BacktestReport(
+    generatedAt: DateTime.now().toIso8601String(),
+    horizons: hs,
+    stockCount: d.stockCount,
+    baseline: {
+      for (final h in hs)
+        h: Baseline.fromStats(
+          forwardDays: h,
+          stats: baseTapes[h]?.overall() ?? BacktestStats.empty,
+        ),
+    },
+    results: {
+      for (final id in ruleIds)
+        id: {
+          for (final h in hs)
+            h: BacktestResult.fromStats(
+              ruleId: id,
+              forwardDays: h,
+              stats: sigTapes[id]?[h]?.overall() ?? BacktestStats.empty,
+            ),
+        },
+    },
+    yearly: {
+      for (final y in years)
+        y: {
+          for (final id in ruleIds)
+            id: {
+              for (final h in hs)
+                h: sigTapes[id]?[h]?.statsOfYear(y) ?? BacktestStats.empty,
+            },
+        },
+    },
+    yearlyBaseline: {
+      for (final y in years)
+        y: {
+          for (final h in hs)
+            h: baseTapes[h]?.statsOfYear(y) ?? BacktestStats.empty,
+        },
+    },
+    signalProfile: {
+      for (final id in ruleIds)
+        id: {
+          for (final h in hs)
+            h: sigTapes[id]?[h]?.profile() ?? RuleProfile.empty,
+        },
+    },
+    marketState: marketState,
+    recent: !hasRecent
+        ? const {}
+        : {
+            for (final id in ruleIds)
+              id: {
+                for (final h in hs)
+                  h: RecentSlice(
+                    stats:
+                        tapeFromDays(d.recentSigDays?[id]?[h] ?? const {}).overall(),
+                    dayMeanReturn:
+                        dayMeansOf(d.recentSigDays?[id]?[h] ?? const {}),
+                  ),
+              },
+          },
+    recentBaseline: !hasRecent
+        ? const {}
+        : {
+            for (final h in hs)
+              h: RecentSlice(
+                stats: tapeFromDays(d.recentBaseDays?[h] ?? const {}).overall(),
+                dayMeanReturn: dayMeansOf(d.recentBaseDays?[h] ?? const {}),
+              ),
+          },
+  );
+}
+
+/// 合并并聚合：返回报告与合并态明细（后者供 P3 明细缓存落盘）。
+(BacktestReport, ShardDetail) mergeAndAggregate(
+  List<ShardDetail> shards, {
+  required List<String> ruleIds,
+  required List<int> hs,
+  DateTime? recentCutoffDate,
+  required MarketStateCtx? msCtx,
+}) {
+  final merged = mergeShardDetails(shards);
+  final report = aggregateDetail(merged,
+      ruleIds: ruleIds, hs: hs, recentCutoffDate: recentCutoffDate, msCtx: msCtx);
+  return (report, merged);
+}
+
+/// P2 兼容入口（既有测试与 app_logic 零改动）。
+BacktestReport mergeShards(
+  List<ShardDetail> shards, {
+  required List<Rule> rules,
+  required List<int> hs,
+  required Set<DateTime> calendar,
+  DateTime? recentCutoffDate,
+  required MarketStateCtx? msCtx,
+}) =>
+    mergeAndAggregate(
+      shards,
+      ruleIds: [for (final r in rules) r.id],
+      hs: hs,
+      recentCutoffDate: recentCutoffDate,
+      msCtx: msCtx,
+    ).$1;
+
 /// 窗口起始日：按交易日序取倒数第 [windowDays] 个；交易日不足时取最早一天
 /// （等于全部日子进窗口）。
-DateTime? _recentCutoffDate(Set<DateTime> calendar, int windowDays) {
+DateTime? recentCutoffDate(Set<DateTime> calendar, int windowDays) {
   if (calendar.isEmpty) return null;
   final days = calendar.toList()..sort();
   return days.length > windowDays ? days[days.length - windowDays] : days.first;
@@ -946,8 +1462,23 @@ class Tape {
   int _wins = 0;
   double? _best, _worst;
 
+  /// 各年桶已就地排好序（worker 预排序或 [_mergeTapes] 归并产出）：
+  /// [_ensureSorted] 据此跳过重排。置位后不得再 [add]。
+  bool _presortedBuckets = false;
+
+  /// worker 快照前调用：把各年桶就地排序并置 [_presortedBuckets]，
+  /// 收尾聚合对有序桶做 k 路归并，主 isolate 不再整体重排
+  /// （实测 33M 值收尾排序 ~10s，是并行回测最大的串行尾巴）。
+  void presortBuckets() {
+    for (final b in _byYear.values) {
+      b.sort();
+    }
+    _presortedBuckets = true;
+  }
+
   void add(double value, int year, {String? monthKey}) {
-    assert(_sortedYearsCache == null, 'Tape.add 不得在统计之后调用（桶已被就地排序）');
+    assert(_sortedYearsCache == null && !_presortedBuckets,
+        'Tape.add 不得在统计或预排序之后调用（桶已被就地排序）');
     (_byYear[year] ??= []).add(value);
     if (monthKey != null) _byMonth[monthKey] = (_byMonth[monthKey] ?? 0) + 1;
     // 顺序敏感的统计量按插入序累积，与旧实现的收尾单遍统计逐位一致。
@@ -978,8 +1509,10 @@ class Tape {
     final cached = _sortedYearsCache;
     if (cached != null) return cached;
     final ys = _byYear.keys.toList()..sort();
-    for (final y in ys) {
-      _byYear[y]!.sort();
+    if (!_presortedBuckets) {
+      for (final y in ys) {
+        _byYear[y]!.sort();
+      }
     }
     return _sortedYearsCache = ys;
   }
@@ -1045,16 +1578,17 @@ class Tape {
     if (_count == 0) return const <double>[];
     final ys = _ensureSorted();
     if (ys.length == 1) return _byYear[ys.first]!;
+    // 桶列表提升出内层循环：旧实现每元素×每年做一次 map lookup。
+    final parts = [for (final y in ys) _byYear[y]!];
     final out = List<double>.filled(_count, 0);
-    final cursor = List<int>.filled(ys.length, 0);
+    final cursor = List<int>.filled(parts.length, 0);
     for (var i = 0; i < _count; i++) {
       var bestSeg = -1;
       var bestVal = double.infinity;
-      for (var k = 0; k < ys.length; k++) {
-        final bucket = _byYear[ys[k]]!;
+      for (var k = 0; k < parts.length; k++) {
+        final bucket = parts[k];
         final c = cursor[k];
-        if (c >= bucket.length) continue;
-        if (bucket[c] < bestVal) {
+        if (c < bucket.length && bucket[c] < bestVal) {
           bestVal = bucket[c];
           bestSeg = k;
         }
@@ -1100,47 +1634,13 @@ class Tape {
     );
   }
 
-  /// 全样本中位数：对各年份有序桶做多路归并，只走到中位数位置就停。
-  ///
-  /// 段数 = 年份数（全市场约 3），所以这是 O(中位数位置 × 年份数) 的线性扫描，
-  /// 比对全部元素再整体排序便宜一个数量级，且**仍是精确值**。
+  /// 全样本中位数：直接从已缓存的 [_sortedUnion] 取中位位置，O(1)。
+  /// `_sortedUnion` 在 `overall()` 中已被访问触发计算，这里复用。
   double _medianOfUnion() {
     if (_count == 0) return 0;
-    if (_count == 1) return _byYear.values.first[0];
-    final ys = _ensureSorted();
-    final segCount = ys.length;
-    // 奇数取第 (n~/2) 位；偶数取第 (n~/2 - 1) 与 (n~/2) 位的均值。
-    final wantHi = _count ~/ 2;
-    final wantLo = _count.isEven ? wantHi - 1 : wantHi;
-    final cursor = List<int>.filled(segCount, 0);
-    var emitted = 0;
-    double? vLo, vHi;
-    while (emitted <= wantHi) {
-      // 取各段当前最小值
-      var bestSeg = -1;
-      var bestVal = double.infinity;
-      for (var k = 0; k < segCount; k++) {
-        final bucket = _byYear[ys[k]]!;
-        final i = cursor[k];
-        if (i >= bucket.length) continue;
-        final v = bucket[i];
-        if (v < bestVal) {
-          bestVal = v;
-          bestSeg = k;
-        }
-      }
-      if (bestSeg < 0) break; // 已排完
-      if (emitted == wantLo) vLo = bestVal;
-      if (emitted == wantHi) {
-        vHi = bestVal;
-        break;
-      }
-      cursor[bestSeg]++;
-      emitted++;
-    }
-    if (vHi == null) return 0;
-    if (vLo == null) return vHi;
-    return (vLo + vHi) / 2;
+    final sorted = _sortedUnion;
+    final mid = _count ~/ 2;
+    return _count.isOdd ? sorted[mid] : (sorted[mid - 1] + sorted[mid]) / 2;
   }
 }
 

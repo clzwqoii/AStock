@@ -74,9 +74,13 @@ class StockApp extends StatefulWidget {
   State<StockApp> createState() => _StockAppState();
 }
 
-class _StockAppState extends State<StockApp> {
+class _StockAppState extends State<StockApp> with WidgetsBindingObserver {
   /// 桌面端：false = 选股工作台，true = 回测对比页。
   bool _showBacktest = false;
+
+  /// 桌面端常驻选股池（P1d）：跨次复用、空闲自动回收，与移动端 MobileHome 同构。
+  /// 测试注入 screenFn 时走注入路径，不经过它。
+  final _screening = ScreeningService();
 
   late AppConfig _config = widget.config;
   bool _syncing = false;
@@ -140,6 +144,7 @@ class _StockAppState extends State<StockApp> {
   @override
   void initState() {
     super.initState();
+    WidgetsBinding.instance.addObserver(this);
     // 回测报告是纯读的小 JSON（约 12KB），启动时顺手读掉；读失败不影响选股。
     _report = loadBacktestReport(_config.dbPath);
     // 原生菜单（macOS）回调：Swift 端点菜单项 → 这里打开对应弹框。
@@ -157,6 +162,16 @@ class _StockAppState extends State<StockApp> {
     if (widget.showOnboarding && widget.config.tushareToken.isEmpty) {
       WidgetsBinding.instance.addPostFrameCallback((_) => _openOnboarding());
     }
+  }
+
+  @override
+  void didHaveMemoryPressure() => _screening.releasePool();
+
+  @override
+  void dispose() {
+    WidgetsBinding.instance.removeObserver(this);
+    _screening.dispose();
+    super.dispose();
   }
 
   /// 读一次本地库覆盖情况。失败只影响诊断卡片（不出现），不该拖垮主流程，
@@ -405,6 +420,7 @@ class _StockAppState extends State<StockApp> {
                 children: [
                   ScreeningPage(
                     dbPath: _config.dbPath,
+                    screenFn: widget.screenFn ?? _screening.screen,
                     syncing: _syncing,
                     syncStatus: _syncMsg,
                     onOpenSettings: () => _openSettings(ctx),

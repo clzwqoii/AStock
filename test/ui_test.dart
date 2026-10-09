@@ -1114,4 +1114,43 @@ Future<void> scrollTo(WidgetTester tester, Finder finder) =>
         expect(find.text('收盘价站上MA20'), findsOneWidget);
       });
     });
+
+  group('桌面端常驻选股池（P1d）', () {
+    void desktop(WidgetTester tester) {
+      tester.view.physicalSize = const Size(1920, 1080);
+      tester.view.devicePixelRatio = 1.0;
+      addTearDown(tester.view.resetPhysicalSize);
+      addTearDown(tester.view.resetDevicePixelRatio);
+    }
+
+    testWidgets('注入 screenFn 时桌面走注入路径（不调默认 runScreening）', (tester) async {
+      desktop(tester);
+      var called = false;
+      await tester.pumpWidget(StockApp(
+        config: AppConfig(tushareToken: '', dbPath: dbPath),
+        showOnboarding: false,
+        screenFn: (dbPath, rules) async {
+          called = true;
+          return (
+            total: 1,
+            picked: [fakeRow('600000.SH', name: '浦发银行')],
+            dataDate: '20260930',
+            blockedStale: 0,
+            blockedCorporateAction: 0,
+            blockedSuspension: 0,
+            timings: null,
+          );
+        },
+      ));
+      await tester.pump();
+      await tester.pump();
+
+      await tester.tap(find.text('收盘价站上MA20'));
+      await tester.pump();
+      await tester.tap(find.text('开始选股'));
+      await tester.pump();
+      await tester.pump(const Duration(milliseconds: 100));
+      expect(called, isTrue, reason: '桌面端应走注入的 screenFn，不是默认 runScreening');
+    });
+  });
 }

@@ -6,7 +6,9 @@ import 'package:http/http.dart' as http;
 import 'package:http/testing.dart';
 import 'package:stock/app_logic.dart';
 import 'package:stock/core/backtest.dart';
+import 'package:stock/core/market.dart';
 import 'package:stock/core/rules.dart';
+import 'package:stock/data/backtest_detail_store.dart';
 import 'package:stock/data/bar_repository.dart';
 import 'package:stock/data/eastmoney_client.dart';
 import 'package:stock/data/report_store.dart';
@@ -138,11 +140,26 @@ void main() {
     );
   });
 
-  test('ScreeningService 失效重载：新交易日、回补旧日期、报告更新都会触发重载', () async {
+  test('ScreeningService 失效重载：水位变化全量重载；报告变化只换评分不重载池（P1b）', () async {
     seedStocks(dbPath);
+    // 先存一份报告（baseWin=0.8）让选股有评分基准
+    ReportStore(reportPathFor(dbPath)).save(BacktestReport(
+      generatedAt: DateTime.now().toIso8601String(),
+      horizons: const [10],
+      stockCount: 2,
+      baseline: {
+        10: Baseline.fromStats(forwardDays: 10, stats: const BacktestStats(
+            count: 100, winRate: 0.8, avgReturn: 5, medianReturn: 5,
+            bestReturn: 20, worstReturn: -10, profitFactor: 2)),
+      },
+      results: const {},
+    ));
     final svc = ScreeningService();
     addTearDown(svc.dispose);
-    await svc.screen(dbPath, [ruleById('pct_change_up')]);
+    final r0 = await svc.screen(dbPath, [ruleById('pct_change_up')]);
+    expect(r0.timings!.poolReused, isFalse);
+    expect(r0.picked.first.score!.score, closeTo(80, 0.5),
+        reason: 'baseWin=0.8, 无命中规则 → score=80');
 
     void addBar(String date) {
       final repo = BarRepository(dbPath);
@@ -160,7 +177,7 @@ void main() {
       repo.close();
     }
 
-    addBar('20261003'); // 新交易日
+    addBar('20261003'); // 新交易日 → 水位变了 → 全量重载
     final r3 = await svc.screen(dbPath, [ruleById('pct_change_up')]);
     expect(r3.timings!.poolReused, isFalse, reason: '水位线变了必须重载');
 
@@ -168,16 +185,214 @@ void main() {
     final r4 = await svc.screen(dbPath, [ruleById('pct_change_up')]);
     expect(r4.timings!.poolReused, isFalse, reason: '回补不改水位线，按行指纹仍要重载');
 
-    // 回测报告更新（选股评分依赖它）：文件内容变了也要重载
+    // 报告更新（baseWin 从 0.8 → 0.3）：只换评分，不重载股票池
     ReportStore(reportPathFor(dbPath)).save(BacktestReport(
       generatedAt: DateTime.now().toIso8601String(),
       horizons: const [10],
       stockCount: 2,
-      baseline: const {},
+      baseline: {
+        10: Baseline.fromStats(forwardDays: 10, stats: const BacktestStats(
+            count: 100, winRate: 0.3, avgReturn: -2, medianReturn: -2,
+            bestReturn: 10, worstReturn: -20, profitFactor: 0.5)),
+      },
       results: const {},
     ));
     final r5 = await svc.screen(dbPath, [ruleById('pct_change_up')]);
-    expect(r5.timings!.poolReused, isFalse, reason: '回测报告变了，评分缓存必须跟着换');
+    expect(r5.timings!.poolReused, isTrue, reason: '报告变了不重载股票池（P1b）');
+    expect(r5.timings!.loadMs, 0, reason: '池子复用，不读库');
+    expect(r5.picked.first.score!.score, closeTo(30, 0.5),
+        reason: '评分用上新报告：baseWin=0.3 → score=30');
+  });
+
+  // ── P1c 同步后池增量 append ──
+
+  test('P1c 增量 append：纯追加水位前进 → 走增量路径，结果与全量逐位一致', () async {
+    seedStocks(dbPath); // S1.SH, S2.SZ × 40 日（水位 20261002）
+    final svc = ScreeningService();
+    addTearDown(svc.dispose);
+    final r1 = await svc.screen(dbPath, [ruleById('pct_change_up')]);
+    expect(r1.timings!.poolReused, isFalse);
+    expect(r1.timings!.incremental, isFalse, reason: '首次必须全量');
+
+    void addBar(String code, String date, {double close = 10.5}) {
+      final r = BarRepository(dbPath);
+      r.upsertBars([
+        DailyRow(
+            tsCode: code,
+            tradeDate: date,
+            open: 10.0,
+            high: 10.0,
+            low: 10.0,
+            close: close,
+            vol: 100.0,
+            amount: 1),
+      ]);
+      r.close();
+    }
+
+    // 纯追加水位前进：两票都加 20261005
+    addBar('S1.SH', '20261005', close: 11.0);
+    addBar('S2.SZ', '20261005', close: 9.5);
+
+    final r2 = await svc.screen(dbPath, [ruleById('pct_change_up')]);
+    expect(r2.timings!.poolReused, isFalse, reason: '池内容变了，不算复用');
+    expect(r2.timings!.incremental, isTrue, reason: '纯追加水位前进 → 走增量 append');
+    expect(r2.timings!.loadMs, lessThan(1000), reason: '增量路径几行新数据，读库毫秒级');
+
+    // 对照：新建 svc 走全量路径，结果逐位一致
+    final svcFull = ScreeningService();
+    addTearDown(svcFull.dispose);
+    final rFull = await svcFull.screen(dbPath, [ruleById('pct_change_up')]);
+    expect([for (final p in r2.picked) p.symbol], [for (final p in rFull.picked) p.symbol],
+        reason: '增量与全量的命中代码集合必须一致');
+    for (var i = 0; i < r2.picked.length; i++) {
+      final a = r2.picked[i], b = rFull.picked[i];
+      expect(a.close, closeTo(b.close, 1e-9));
+      expect(a.change, closeTo(b.change, 1e-9));
+      expect(a.changePct, closeTo(b.changePct, 1e-9));
+      expect(a.volumeRatio, closeTo(b.volumeRatio, 1e-9));
+      expect(a.ma20, closeTo(b.ma20, 1e-9));
+      expect(a.amountWan, closeTo(b.amountWan, 1e-9));
+    }
+  });
+
+  test('P1c 增量 append：新股（IPO）追加水位之后的新行 → 整体加入池', () async {
+    seedStocks(dbPath);
+    final svc = ScreeningService();
+    addTearDown(svc.dispose);
+    await svc.screen(dbPath, [ruleById('pct_change_up')]);
+
+    // 新股 IPO：只加水位前进的新行（纯追加场景，不回补早日期）
+    final r = BarRepository(dbPath);
+    r.upsertBars([
+      DailyRow(
+          tsCode: 'NEW.SH',
+          tradeDate: '20261005',
+          open: 10.0,
+          high: 10.6,
+          low: 10.0,
+          close: 10.6,
+          vol: 100.0,
+          amount: 1),
+    ]);
+    r.close();
+
+    final r2 = await svc.screen(dbPath, [ruleById('pct_change_up')]);
+    expect(r2.timings!.incremental, isTrue, reason: '水位前进且纯追加 → 增量');
+    // 与全量路径对照
+    final svcFull = ScreeningService();
+    addTearDown(svcFull.dispose);
+    final rFull = await svcFull.screen(dbPath, [ruleById('pct_change_up')]);
+    expect([for (final p in r2.picked) p.symbol], [for (final p in rFull.picked) p.symbol]);
+    expect(r2.total, rFull.total, reason: 'total = 池内股票数，新股必须算入');
+  });
+
+  test('P1c 增量 append：停牌股（无新行）末根不变', () async {
+    seedStocks(dbPath); // S1、S2 都到 20261002
+    final svc = ScreeningService();
+    addTearDown(svc.dispose);
+    final r1 = await svc.screen(dbPath, [ruleById('pct_change_up')]);
+    // 记录 S1 在第一次选股时的末根 close（来自 r1 的 close 字段）
+
+    // 只给 S2 追加新行，S1 停牌没新行
+    final r = BarRepository(dbPath);
+    r.upsertBars([
+      DailyRow(
+          tsCode: 'S2.SZ',
+          tradeDate: '20261005',
+          open: 10.0,
+          high: 10.0,
+          low: 10.0,
+          close: 10.5,
+          vol: 100.0,
+          amount: 1),
+    ]);
+    r.close();
+
+    final r2 = await svc.screen(dbPath, [ruleById('pct_change_up')]);
+    expect(r2.timings!.incremental, isTrue);
+
+    // 停牌股 S1 的末根 close 不变（没新行 append）
+    final s1Row1 = r1.picked.firstWhere((p) => p.symbol == 'S1.SH',
+        orElse: () => throw StateError('S1 必须在两次结果中都命中'));
+    final s1Row2 = r2.picked.firstWhere((p) => p.symbol == 'S1.SH',
+        orElse: () => throw StateError('S1 必须在两次结果中都命中'));
+    expect(s1Row2.close, closeTo(s1Row1.close, 1e-9),
+        reason: 'S1 没有新行 → 末根 close 必须不变');
+    expect(s1Row2.signalDate, s1Row1.signalDate, reason: 'S1 末根日期不变');
+
+    // 对照全量
+    final svcFull = ScreeningService();
+    addTearDown(svcFull.dispose);
+    final rFull = await svcFull.screen(dbPath, [ruleById('pct_change_up')]);
+    expect([for (final p in r2.picked) p.symbol], [for (final p in rFull.picked) p.symbol]);
+  });
+
+  test('P1c 增量 append：REPLACE 旧行（非纯追加）→ 退回全量重载', () async {
+    seedStocks(dbPath);
+    final svc = ScreeningService();
+    addTearDown(svc.dispose);
+    await svc.screen(dbPath, [ruleById('pct_change_up')]);
+
+    // 追加新行 + 同时 REPLACE 旧行（同主键换值）
+    final r = BarRepository(dbPath);
+    r.upsertBars([
+      DailyRow(
+          tsCode: 'S1.SH',
+          tradeDate: '20261005', // 新日（水位前进）
+          open: 10.0,
+          high: 10.0,
+          low: 10.0,
+          close: 11.0,
+          vol: 100.0,
+          amount: 1),
+      DailyRow(
+          tsCode: 'S1.SH',
+          tradeDate: '20260930', // 旧行 REPLACE（同主键换 close）
+          open: 10.0,
+          high: 10.0,
+          low: 10.0,
+          close: 99.0,
+          vol: 100.0,
+          amount: 1),
+    ]);
+    r.close();
+
+    final r2 = await svc.screen(dbPath, [ruleById('pct_change_up')]);
+    expect(r2.timings!.incremental, isFalse, reason: 'REPLACE 旧行 → count 不变 → 退回全量');
+    expect(r2.timings!.poolReused, isFalse);
+
+    // 与全量路径逐位一致（确保退回全量后结果正确）
+    final svcFull = ScreeningService();
+    addTearDown(svcFull.dispose);
+    final rFull = await svcFull.screen(dbPath, [ruleById('pct_change_up')]);
+    expect([for (final p in r2.picked) p.symbol], [for (final p in rFull.picked) p.symbol]);
+  });
+
+  test('P1c 增量 append：水位后退（回补更早历史）→ 全量重载', () async {
+    seedStocks(dbPath);
+    final svc = ScreeningService();
+    addTearDown(svc.dispose);
+    await svc.screen(dbPath, [ruleById('pct_change_up')]);
+
+    // 回补更早历史：水位不变但库内容变了（旧行被加进更早日期）
+    final r = BarRepository(dbPath);
+    r.upsertBars([
+      DailyRow(
+          tsCode: 'S1.SH',
+          tradeDate: '20260701', // 早于水位
+          open: 10.0,
+          high: 10.0,
+          low: 10.0,
+          close: 10.0,
+          vol: 100.0,
+          amount: 1),
+    ]);
+    r.close();
+
+    final r2 = await svc.screen(dbPath, [ruleById('pct_change_up')]);
+    expect(r2.timings!.incremental, isFalse, reason: '水位没前进 → 不走增量');
+    expect(r2.timings!.poolReused, isFalse);
   });
 
   test('runBacktest 报告携带 recent 窗口数据,并把快照写入台账(同日去重)', () async {
@@ -204,6 +419,34 @@ void main() {
     final leftovers =
         tmp.listSync().where((e) => e.path.endsWith('.tmp')).toList();
     expect(leftovers, isEmpty, reason: '原子写不许留临时文件：$leftovers');
+  });
+
+  test('runBacktest 同路径并发去重:复用同一 Future(避免自动+手动双跑)', () async {
+    seedStocks(dbPath);
+    final rp = '${tmp.path}/report.json';
+    // 并发两次同路径:第二次应复用第一次的 in-flight Future
+    final f1 = runBacktest(dbPath, reportPath: rp);
+    final f2 = runBacktest(dbPath, reportPath: rp);
+    expect(f2, same(f1), reason: '同路径进行中的 runBacktest 必须复用同一 Future');
+    final r1 = await f1;
+    final r2 = await f2;
+    expect(r2, same(r1));
+  });
+
+  test('runBacktest 不同路径不去重', () async {
+    seedStocks(dbPath);
+    // 不同 dbPath 避免两 isolate 同时开同一库设 WAL 的 lock；
+    // 不同子目录避免 historyPathFor 解析到同一台账文件并发写冲突。
+    final dbPath2 = '${tmp.path}/t2.db';
+    seedStocks(dbPath2);
+    final sub1 = Directory('${tmp.path}/sub1')..createSync();
+    final sub2 = Directory('${tmp.path}/sub2')..createSync();
+    final rp1 = '${sub1.path}/r.json';
+    final rp2 = '${sub2.path}/r.json';
+    final f1 = runBacktest(dbPath, reportPath: rp1);
+    final f2 = runBacktest(dbPath2, reportPath: rp2);
+    expect(f2, isNot(same(f1)), reason: '不同路径应各自独立回测');
+    await Future.wait([f1, f2]);
   });
 
   test('loadStockDetail 返回单只股票 bars+快照+名称；无数据返回 null', () async {
@@ -548,6 +791,199 @@ void main() {
     final repo = BarRepository(dbPath);
     expect(repo.rowCountOnDate('20261005'), 2);
     repo.close();
+  });
+
+  // ── P3 增量回测编排 ──────────────────────────────────────────────
+  // 520 只（≥500 触发并行分片路径），40 根里第 16 根 +10%（信号日 t=15）。
+  // maxH=20 → 全量可评 t∈[20,19] 中的 t=15 一类信号日；追加 1 日后
+  // lastEval=20，每股恰好补评 1 个信号日，maxH 的前瞻窗口恰好贴边。
+  final p3Base = DateTime(2026, 8, 10);
+  String p3Date(DateTime d) =>
+      '${d.year}${d.month.toString().padLeft(2, '0')}${d.day.toString().padLeft(2, '0')}';
+  String p3Code(int s) => '6${s.toString().padLeft(5, '0')}.SH';
+
+  void seedP3(String dbPath, {int count = 520, int days = 40}) {
+    final repo = BarRepository(dbPath);
+    final rows = <DailyRow>[];
+    for (var s = 0; s < count; s++) {
+      for (var i = 0; i < days; i++) {
+        final close = i == 15 ? 11.0 : 10.0;
+        rows.add(DailyRow(
+          tsCode: p3Code(s),
+          tradeDate: p3Date(p3Base.add(Duration(days: i))),
+          open: close,
+          high: close,
+          low: close,
+          close: close,
+          vol: 100,
+          amount: 1,
+        ));
+      }
+    }
+    repo.upsertBars(rows);
+    repo.close();
+  }
+
+  /// 与 app_logic 的 `_backtestFingerprint` 同构——组合一变这里就该红，
+  /// 否则旧缓存会被新口径静默复用。
+  String p3Fingerprint() => [
+        'bkdv1',
+        for (final r in builtInRules) r.id,
+        ...kDefaultHorizons,
+        kRecentWindowTradingDays,
+        kCorporateActionLookbackBars,
+        kSuspensionLookbackBars,
+      ].join('|');
+
+  void expectStatsNear(
+      BacktestStats a, BacktestStats b, String what, bool exact) {
+    expect(a.count, b.count, reason: '$what count');
+    expect(a.winRate, b.winRate, reason: '$what winRate');
+    expect(a.medianReturn, b.medianReturn, reason: '$what medianReturn');
+    expect(a.bestReturn, b.bestReturn, reason: '$what bestReturn');
+    expect(a.worstReturn, b.worstReturn, reason: '$what worstReturn');
+    expect(a.p10, b.p10, reason: '$what p10');
+    expect(a.p25, b.p25, reason: '$what p25');
+    expect(a.p75, b.p75, reason: '$what p75');
+    expect(a.p90, b.p90, reason: '$what p90');
+    if (exact) {
+      expect(a.avgReturn, b.avgReturn, reason: '$what avgReturn');
+      expect(a.profitFactor, b.profitFactor, reason: '$what profitFactor');
+      expect(a.stdDev, b.stdDev, reason: '$what stdDev');
+    } else {
+      expect(a.avgReturn, closeTo(b.avgReturn, 1e-9), reason: '$what avgReturn');
+      expect(a.profitFactor, closeTo(b.profitFactor, 1e-9),
+          reason: '$what profitFactor');
+      expect(a.stdDev, b.stdDev == null ? isNull : closeTo(b.stdDev!, 1e-9),
+          reason: '$what stdDev');
+    }
+  }
+
+  void expectSameReports(BacktestReport a, BacktestReport b,
+      {bool recentExact = true}) {
+    for (final h in b.horizons) {
+      expectStatsNear(a.baseline[h]!.stats, b.baseline[h]!.stats,
+          'baseline h=$h', false);
+    }
+    for (final id in b.results.keys) {
+      for (final h in b.horizons) {
+        expectStatsNear(a.results[id]![h]!.stats, b.results[id]![h]!.stats,
+            'results $id h=$h', false);
+      }
+    }
+    for (final y in b.yearly.keys) {
+      for (final id in b.yearly[y]!.keys) {
+        for (final h in b.horizons) {
+          final x = a.yearly[y]![id]![h]!, w = b.yearly[y]![id]![h]!;
+          expect(x.count, w.count, reason: 'yearly $y $id h=$h count');
+          expect(x.avgReturn, w.avgReturn, reason: 'yearly $y $id h=$h avg');
+        }
+      }
+    }
+    for (final y in b.yearlyBaseline.keys) {
+      for (final h in b.horizons) {
+        expect(a.yearlyBaseline[y]![h]!.count, b.yearlyBaseline[y]![h]!.count,
+            reason: 'yearlyBaseline $y h=$h count');
+      }
+    }
+    for (final id in b.signalProfile.keys) {
+      for (final h in b.horizons) {
+        final x = a.signalProfile[id]![h]!, w = b.signalProfile[id]![h]!;
+        expect(x.signalCount, w.signalCount, reason: 'profile $id h=$h');
+        expect(x.monthsWithSignals, w.monthsWithSignals, reason: 'profile $id h=$h');
+        expect(x.topMonthShare, w.topMonthShare, reason: 'profile $id h=$h');
+      }
+    }
+    for (final id in b.recent.keys) {
+      for (final h in b.horizons) {
+        expectStatsNear(a.recent[id]![h]!.stats, b.recent[id]![h]!.stats,
+            'recent $id h=$h', recentExact);
+        expect(a.recent[id]![h]!.dayMeanReturn, b.recent[id]![h]!.dayMeanReturn,
+            reason: 'recent $id h=$h dayMeans');
+      }
+    }
+    for (final h in b.horizons) {
+      expectStatsNear(a.recentBaseline[h]!.stats, b.recentBaseline[h]!.stats,
+          'recentBaseline h=$h', recentExact);
+      expect(a.recentBaseline[h]!.dayMeanReturn,
+          b.recentBaseline[h]!.dayMeanReturn,
+          reason: 'recentBaseline h=$h dayMeans');
+    }
+    expect(a.marketState!.regime, b.marketState!.regime);
+    expect(a.marketState!.stockCount, b.marketState!.stockCount);
+    expect(a.marketState!.asOfDate, b.marketState!.asOfDate);
+    expect(a.marketState!.maGap, b.marketState!.maGap);
+    expect(a.marketState!.ret20, b.marketState!.ret20);
+    expect(a.marketState!.breadthAboveMa20, b.marketState!.breadthAboveMa20);
+    expect(a.marketState!.newHighLowDiff20, b.marketState!.newHighLowDiff20);
+  }
+
+  test('P3 增量回测：全量→缓存→追加K线→增量，与删缓存后的全量重跑一致', () async {
+    seedP3(dbPath);
+    final rp = '${tmp.path}/r.json';
+    await runBacktest(dbPath, reportPath: rp); // 全量（并行分片路径）
+    final detailPath = backtestDetailPathFor(dbPath);
+    expect(File(detailPath).existsSync(), isTrue, reason: '全量后应写明细缓存');
+
+    // 追加 1 个交易日：每 5 只停 1 只（416 只追加、104 只停牌）
+    final suspended = {for (var s = 0; s < 520; s += 5) s};
+    final repo = BarRepository(dbPath);
+    final day = p3Date(p3Base.add(const Duration(days: 40)));
+    repo.upsertBars([
+      for (var s = 0; s < 520; s++)
+        if (!suspended.contains(s))
+          DailyRow(
+            tsCode: p3Code(s),
+            tradeDate: day,
+            open: 11,
+            high: 11,
+            low: 11,
+            close: 11,
+            vol: 100,
+            amount: 1,
+          ),
+    ]);
+    repo.close();
+
+    final r2 = await runBacktest(dbPath, reportPath: rp); // 增量续扫
+
+    // 缓存头滚到新水位；指纹与 App 侧一致（否则下次永远退全量）
+    final cached = loadBacktestDetail(detailPath, fingerprint: p3Fingerprint())!;
+    expect(cached.rowCount, 520 * 40 + (520 - suspended.length));
+    expect(cached.detail.stockLens[p3Code(0)], 40, reason: '停牌股长度不变');
+    expect(cached.detail.stockLens[p3Code(1)], 41);
+
+    // 对照：删缓存 → 全量重跑
+    File(detailPath).deleteSync();
+    final r3 = await runBacktest(dbPath, reportPath: rp);
+    expectSameReports(r2, r3);
+  });
+
+  test('P3 失效退全量：旧行被 INSERT OR REPLACE 后结果与全量一致', () async {
+    seedP3(dbPath);
+    final rp = '${tmp.path}/r.json';
+    await runBacktest(dbPath, reportPath: rp); // 全量写缓存
+
+    // REPLACE 旧行：rowid 消失 → 水位下行数变化 → 自动退全量
+    final repo = BarRepository(dbPath);
+    repo.upsertBars([
+      DailyRow(
+        tsCode: p3Code(1),
+        tradeDate: p3Date(p3Base.add(const Duration(days: 15))),
+        open: 99,
+        high: 99,
+        low: 99,
+        close: 99,
+        vol: 100,
+        amount: 1,
+      ),
+    ]);
+    repo.close();
+
+    final r2 = await runBacktest(dbPath, reportPath: rp);
+    File(backtestDetailPathFor(dbPath)).deleteSync();
+    final r3 = await runBacktest(dbPath, reportPath: rp);
+    expectSameReports(r2, r3);
   });
 }
 
