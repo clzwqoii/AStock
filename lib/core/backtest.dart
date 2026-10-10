@@ -239,6 +239,42 @@ double _stdDevOfSorted(List<double> sorted, double sum) {
   return math.sqrt(acc / (n - 1));
 }
 
+/// 有序列表的单遍统计。
+BacktestStats _statsOfSortedList(List<double> sorted) {
+    final n = sorted.length;
+    if (n == 0) return BacktestStats.empty;
+    var sum = 0.0, gain = 0.0, loss = 0.0;
+    var best = sorted[0], worst = sorted[0];
+    var wins = 0;
+    for (final v in sorted) {
+      sum += v;
+      if (v > 0) {
+        gain += v;
+        wins++;
+      } else if (v < 0) {
+        loss += -v;
+      }
+      if (v > best) best = v;
+      if (v < worst) worst = v;
+    }
+    final mid = n ~/ 2;
+    final a = sorted[mid];
+    return BacktestStats(
+      count: n,
+      winRate: wins / n,
+      avgReturn: sum / n,
+      medianReturn: n.isOdd ? a : (sorted[mid - 1] + a) / 2,
+      bestReturn: best,
+      worstReturn: worst,
+      profitFactor: (gain == 0 || loss == 0) ? 0 : gain / loss,
+      p10: _percentileOfSorted(sorted, 0.10),
+      p25: _percentileOfSorted(sorted, 0.25),
+      p75: _percentileOfSorted(sorted, 0.75),
+      p90: _percentileOfSorted(sorted, 0.90),
+      stdDev: _stdDevOfSorted(sorted, sum),
+    );
+  }
+
 /// 同一起点集合、同一时间窗内的无条件收益基准。
 class Baseline {
   Baseline({required this.forwardDays, required this.returns})
@@ -892,27 +928,60 @@ bool _isSortedAsc(List<double> xs) {
   return true;
 }
 
-/// k 路归并：各段已升序 → 输出全局升序。与「拼接后整体排序」产出同一有序
-/// 多重集（相等值的位置无所谓，值相同），分年统计的求和序因此逐位不变。
-List<double> _mergeSortedParts(List<List<double>> parts) {
-  final total = parts.fold<int>(0, (a, p) => a + p.length);
-  final out = List<double>.filled(total, 0);
-  final cursor = List<int>.filled(parts.length, 0);
-  for (var i = 0; i < total; i++) {
-    var bestSeg = -1;
-    var bestVal = double.infinity;
-    for (var k = 0; k < parts.length; k++) {
-      final p = parts[k];
-      final c = cursor[k];
-      if (c < p.length && p[c] < bestVal) {
-        bestVal = p[c];
-        bestSeg = k;
-      }
+/// 二路归并：两段已升序 → 输出升序。
+List<double> _merge2(List<double> a, List<double> b) {
+  final out = List<double>.filled(a.length + b.length, 0);
+  var i = 0;
+  var j = 0;
+  for (var k = 0; k < out.length; k++) {
+    if (j >= b.length || (i < a.length && a[i] <= b[j])) {
+      out[k] = a[i++];
+    } else {
+      out[k] = b[j++];
     }
-    out[i] = bestVal;
-    cursor[bestSeg]++;
   }
   return out;
+}
+
+/// 二叉树成对归并：O(n log k) 比较（每轮 2 路，1 次/值），vs 线性 k 路 O(nk)。
+/// k≤4 线性更快（常数小，无中间分配），k>4 走二叉树成对归并。
+List<double> _mergeSortedParts(List<List<double>> parts) {
+  if (parts.isEmpty) return const [];
+  if (parts.length == 1) return parts[0];
+  if (parts.length == 2) return _merge2(parts[0], parts[1]);
+  if (parts.length <= 4) {
+    final total = parts.fold<int>(0, (a, p) => a + p.length);
+    final out = List<double>.filled(total, 0);
+    final cursor = List<int>.filled(parts.length, 0);
+    for (var i = 0; i < total; i++) {
+      var bestSeg = -1;
+      var bestVal = double.infinity;
+      for (var k = 0; k < parts.length; k++) {
+        final p = parts[k];
+        final c = cursor[k];
+        if (c < p.length && p[c] < bestVal) {
+          bestVal = p[c];
+          bestSeg = k;
+        }
+      }
+      out[i] = bestVal;
+      cursor[bestSeg]++;
+    }
+    return out;
+  }
+  var level = parts;
+  while (level.length > 1) {
+    final next = <List<double>>[];
+    for (var i = 0; i < level.length; i += 2) {
+      if (i + 1 < level.length) {
+        next.add(_merge2(level[i], level[i + 1]));
+      } else {
+        next.add(level[i]);
+      }
+    }
+    level = next;
+  }
+  return level[0];
 }
 
 /// 合并多片快照为一个 [Tape]：数值统计量按分片序求和/取极值；`_byYear` 各年桶
@@ -1257,17 +1326,6 @@ BacktestReport aggregateDetail(
   final baseTapes = <int, Tape>{
     for (final e in d.baseTapes.entries) e.key: tapeOf(e.value),
   };
-  Tape tapeFromDays(Map<int, List<double>> days) {
-    final t = Tape();
-    final keys = days.keys.toList()..sort();
-    for (final k in keys) {
-      final year = k ~/ 10000;
-      for (final v in days[k]!) {
-        t.add(v, year);
-      }
-    }
-    return t;
-  }
 
   Map<int, double> dayMeansOf(Map<int, List<double>> days) => {
         for (final e in days.entries)
@@ -1284,6 +1342,18 @@ BacktestReport aggregateDetail(
     marketState = marketStateFromContrib(d.msContrib!, msCtx);
   }
   final hasRecent = recentCutoffDate != null;
+
+  // recent 的 overall 不走 Tape 年桶——直接收集值列表 + sort + 统计，
+  // 省掉 Tape.add 的 map 开销与年桶中间层（4.7M recent 值）。
+  BacktestStats overallFromDays(Map<int, List<double>> days) {
+    final all = <double>[];
+    for (final v in days.values) {
+      all.addAll(v);
+    }
+    if (all.isEmpty) return BacktestStats.empty;
+    all.sort();
+    return _statsOfSortedList(all);
+  }
 
   return BacktestReport(
     generatedAt: DateTime.now().toIso8601String(),
@@ -1340,7 +1410,7 @@ BacktestReport aggregateDetail(
                 for (final h in hs)
                   h: RecentSlice(
                     stats:
-                        tapeFromDays(d.recentSigDays?[id]?[h] ?? const {}).overall(),
+                        overallFromDays(d.recentSigDays?[id]?[h] ?? const {}),
                     dayMeanReturn:
                         dayMeansOf(d.recentSigDays?[id]?[h] ?? const {}),
                   ),
@@ -1351,7 +1421,7 @@ BacktestReport aggregateDetail(
         : {
             for (final h in hs)
               h: RecentSlice(
-                stats: tapeFromDays(d.recentBaseDays?[h] ?? const {}).overall(),
+                stats: overallFromDays(d.recentBaseDays?[h] ?? const {}),
                 dayMeanReturn: dayMeansOf(d.recentBaseDays?[h] ?? const {}),
               ),
           },
@@ -1578,25 +1648,8 @@ class Tape {
     if (_count == 0) return const <double>[];
     final ys = _ensureSorted();
     if (ys.length == 1) return _byYear[ys.first]!;
-    // 桶列表提升出内层循环：旧实现每元素×每年做一次 map lookup。
     final parts = [for (final y in ys) _byYear[y]!];
-    final out = List<double>.filled(_count, 0);
-    final cursor = List<int>.filled(parts.length, 0);
-    for (var i = 0; i < _count; i++) {
-      var bestSeg = -1;
-      var bestVal = double.infinity;
-      for (var k = 0; k < parts.length; k++) {
-        final bucket = parts[k];
-        final c = cursor[k];
-        if (c < bucket.length && bucket[c] < bestVal) {
-          bestVal = bucket[c];
-          bestSeg = k;
-        }
-      }
-      out[i] = bestVal;
-      cursor[bestSeg]++;
-    }
-    return out;
+    return _mergeSortedParts(parts);
   }();
 
   /// 有序列表的单遍统计：与旧 `_statsOfRange` 逐位一致（同一批值、同一求和顺序）。
