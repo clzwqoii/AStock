@@ -985,6 +985,39 @@ void main() {
     final r3 = await runBacktest(dbPath, reportPath: rp);
     expectSameReports(r2, r3);
   });
+
+  test('P3 无新数据复用磁盘报告：不重算（generatedAt 哨兵原样返回）', () async {
+    seedP3(dbPath);
+    final rp = '${tmp.path}/r.json';
+    await runBacktest(dbPath, reportPath: rp); // 全量：写报告 + detail 缓存
+
+    // 把报告改成哨兵值：走重算路径 generatedAt 会是当前时间，
+    // 只有复用磁盘报告才会把哨兵原样带出来。
+    final f = File(rp);
+    final sentinel = jsonDecode(f.readAsStringSync()) as Map<String, dynamic>;
+    sentinel['generatedAt'] = '2000-01-01T00:00:00.000Z';
+    f.writeAsStringSync(jsonEncode(sentinel));
+
+    final r2 = await runBacktest(dbPath, reportPath: rp);
+    expect(r2.generatedAt, '2000-01-01T00:00:00.000Z',
+        reason: 'daily_bars 逐位未变 → 报告是同一数据的纯重算，直接复用');
+
+    // detail 缓存原样保留（下一次数据前进时的增量锚点）
+    final cached = loadBacktestDetail(
+        backtestDetailPathFor(dbPath), fingerprint: p3Fingerprint());
+    expect(cached, isNotNull);
+  });
+
+  test('P3 复用兜底：报告文件缺失时照常重算并恢复报告', () async {
+    seedP3(dbPath);
+    final rp = '${tmp.path}/r.json';
+    await runBacktest(dbPath, reportPath: rp);
+    File(rp).deleteSync();
+
+    final r2 = await runBacktest(dbPath, reportPath: rp);
+    expect(File(rp).existsSync(), isTrue, reason: '重算后报告恢复落盘');
+    expect(r2.stockCount, 520);
+  });
 }
 
 final dailySeen = <String>[];

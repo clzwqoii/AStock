@@ -921,6 +921,19 @@ Future<BacktestReport> _runBacktestParallel(String dbPath, String rp) async {
       final symbolsOk = cached.detail.stockLens.keys.every(symbols.contains);
       if (symbolsOk &&
           repo.barCountUpTo(cached.maxRowid) == cached.rowCount) {
+        // 无新数据（maxRowid 没动 = 水位后零插入；行数相等 = 水位内无
+        // REPLACE/删除）→ daily_bars 与缓存落盘时逐位相同，报告是同一数据
+        // 的纯重算 → 直接复用磁盘报告，跳过 worker 读库与整个聚合
+        //（无新数据时 8 个 worker 全量读库却评不出任何信号，纯浪费）。
+        // 依赖写序：报告先落盘、detail 缓存后落盘——崩溃窗口里报告只会比
+        // 缓存新（此时 maxRowid 对不上、不走复用），绝不会读到旧报告。
+        if (wm.maxRowid == cached.maxRowid) {
+          final reused = store.load();
+          if (reused != null) {
+            _saveBacktestResult(store, repo, reused, rp);
+            return reused;
+          }
+        }
         resumeLens = cached.detail.stockLens;
         oldDetail = detailForResume(cached.detail,
             recentCutoffDayKey: _dayKeyOf(cutoff));
@@ -940,9 +953,10 @@ Future<BacktestReport> _runBacktestParallel(String dbPath, String rp) async {
       recentCutoffDate: cutoff,
       msCtx: msCtx,
     );
+    // 报告先落盘、detail 缓存后落盘（写序见上方复用判据的注释）。
+    _saveBacktestResult(store, repo, report, rp);
     saveBacktestDetail(detailPath, merged,
         fingerprint: fp, maxRowid: wm.maxRowid, rowCount: wm.count);
-    _saveBacktestResult(store, repo, report, rp);
     return report;
   } finally {
     repo.close();
