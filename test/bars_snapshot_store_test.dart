@@ -148,5 +148,119 @@ void main() {
       }
     }
   });
+
+  test('增量 append：append 结果与全量重建逐位一致', () async {
+    DailyRow dr(String code, DateTime d, int i) => DailyRow(
+          tsCode: code,
+          tradeDate:
+              '${d.year}${d.month.toString().padLeft(2, '0')}${d.day.toString().padLeft(2, '0')}',
+          open: 10 + i * 0.01,
+          high: 10.5 + i * 0.01,
+          low: 9.5 + i * 0.01,
+          close: 10.2 + i * 0.01,
+          vol: 100.0 + i,
+          amount: 1000.0 + i,
+        );
+    void expectStocksEqual(List<StockData> a, List<StockData> b) {
+      expect(a.length, b.length);
+      for (var s = 0; s < a.length; s++) {
+        expect(a[s].symbol, b[s].symbol);
+        expect(a[s].bars.length, b[s].bars.length, reason: '${b[s].symbol} 根数');
+        for (var i = 0; i < b[s].bars.length; i++) {
+          final x = a[s].bars[i], y = b[s].bars[i];
+          expect(x.date, y.date, reason: '${b[s].symbol}[$i].date');
+          expect(x.open, y.open);
+          expect(x.high, y.high);
+          expect(x.low, y.low);
+          expect(x.close, y.close);
+          expect(x.volume, y.volume);
+          expect(x.amount, y.amount);
+        }
+      }
+    }
+
+    final dbPath = '${tmp.path}/t.db';
+    final repo = BarRepository(dbPath);
+    final path = barsSnapshotPathFor(dbPath);
+    final rows0 = <DailyRow>[
+      for (final code in ['000001.SZ', '600519.SH'])
+        for (var i = 0; i < 25; i++) dr(code, DateTime(2026, 1, 1 + i), i),
+    ];
+    repo.upsertBars(rows0);
+    var wm = repo.poolFingerprintExt();
+    writeBarsSnapshot(path, repo.loadStocksRange('000001.SZ'),
+        maxRowid: wm.maxRowid, rowCount: wm.count);
+
+    // 追加：存量股续 5 天 + 新股 600600.SH（字典序插在 600519 之前，块要整体重排）
+    final rows1 = <DailyRow>[
+      for (final code in ['000001.SZ', '600519.SH'])
+        for (var i = 25; i < 30; i++) dr(code, DateTime(2026, 1, 1 + i), i),
+      for (var i = 0; i < 10; i++) dr('600600.SH', DateTime(2026, 1, 1 + i), i),
+    ];
+    rows1.sort((a, b) {
+      final c = a.tsCode.compareTo(b.tsCode);
+      return c != 0 ? c : a.tradeDate.compareTo(b.tradeDate);
+    });
+    repo.upsertBars(rows1);
+    wm = repo.poolFingerprintExt();
+
+    final old = loadBarsSnapshot(path)!;
+    expect(appendBarsSnapshot(path, old, rows1, maxRowid: wm.maxRowid), isTrue);
+
+    // 对照：全量重建
+    writeBarsSnapshot('${tmp.path}/full.bin', repo.loadStocksRange('000001.SZ'),
+        maxRowid: wm.maxRowid, rowCount: wm.count);
+    final a = loadBarsSnapshot(path)!;
+    final b = loadBarsSnapshot('${tmp.path}/full.bin')!;
+    expect(a.maxRowid, b.maxRowid);
+    expect(a.rowCount, b.rowCount);
+    expect(a.symbols, b.symbols);
+    expectStocksEqual(stocksFromSnapshot(a, '000001.SZ'),
+        stocksFromSnapshot(b, '000001.SZ'));
+    repo.close();
+  });
+
+  test('append 违规：新行日期 ≤ 存量股末根 → 返回 false 且原文件不动', () async {
+    final dbPath = '${tmp.path}/t.db';
+    final repo = BarRepository(dbPath);
+    final path = barsSnapshotPathFor(dbPath);
+    final rows0 = <DailyRow>[
+      for (var i = 0; i < 25; i++)
+        DailyRow(
+          tsCode: '000001.SZ',
+          tradeDate: (20260101 + i).toString(),
+          open: 10,
+          high: 10.5,
+          low: 9.5,
+          close: 10.2,
+          vol: 100,
+          amount: 1000,
+        ),
+    ];
+    repo.upsertBars(rows0);
+    final wm = repo.poolFingerprintExt();
+    writeBarsSnapshot(path, repo.loadStocksRange('000001.SZ'),
+        maxRowid: wm.maxRowid, rowCount: wm.count);
+    final old = loadBarsSnapshot(path)!;
+    final before = File(path).readAsBytesSync();
+
+    // 日期早于末根 20260125：append 会破坏时间升序，必须拒绝
+    final bad = [
+      DailyRow(
+        tsCode: '000001.SZ',
+        tradeDate: '20260103',
+        open: 10,
+        high: 10.5,
+        low: 9.5,
+        close: 10.2,
+        vol: 100,
+        amount: 1000,
+      ),
+    ];
+    expect(appendBarsSnapshot(path, old, bad, maxRowid: wm.maxRowid + 1),
+        isFalse);
+    expect(File(path).readAsBytesSync(), before, reason: '拒绝时不得动原文件');
+    repo.close();
+  });
 }
 

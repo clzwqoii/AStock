@@ -258,6 +258,40 @@ class BarRepository {
       _db.select('SELECT COUNT(*) FROM daily_bars WHERE rowid <= ?',
           [watermark]).first.values[0] as int;
 
+  /// rowid ∈ ([minRowid], [maxRowid]] 的新行，ts_code/trade_date 升序——
+  /// 快照增量 append 用（rowid > 快照水位 = 快照落盘之后插入的行）。
+  /// SQL 只做 rowid 范围扫（新行量级几千），排序在 Dart 侧做，避免优化器
+  /// 为了免排序去走主键索引全扫。
+  List<DailyRow> barsSinceRowid(int minRowid, int maxRowid) {
+    final st = _db.prepare(
+        'SELECT ts_code, trade_date, open, high, low, close, vol, amount '
+        'FROM daily_bars WHERE rowid > ? AND rowid <= ?');
+    try {
+      final rows = <DailyRow>[];
+      final cur = st.selectCursor([minRowid, maxRowid]);
+      while (cur.moveNext()) {
+        final r = cur.current;
+        rows.add(DailyRow(
+          tsCode: r.columnAt(0) as String,
+          tradeDate: r.columnAt(1) as String,
+          open: (r.columnAt(2) as num).toDouble(),
+          high: (r.columnAt(3) as num).toDouble(),
+          low: (r.columnAt(4) as num).toDouble(),
+          close: (r.columnAt(5) as num).toDouble(),
+          vol: (r.columnAt(6) as num).toDouble(),
+          amount: (r.columnAt(7) as num).toDouble(),
+        ));
+      }
+      rows.sort((a, b) {
+        final c = a.tsCode.compareTo(b.tsCode);
+        return c != 0 ? c : a.tradeDate.compareTo(b.tradeDate);
+      });
+      return rows;
+    } finally {
+      st.dispose();
+    }
+  }
+
   /// 取水位 [tradeDate] 之后的全部新行（含等于该水位日的回补行），按代码分组
   /// 升序。worker 的增量 append 路径用：水位前进时拿到这批新行 append 到池内
   /// 对应股票的 bars 尾部，省掉全量重载（~6.5s → 毫秒级）。

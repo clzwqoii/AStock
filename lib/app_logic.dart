@@ -1011,20 +1011,31 @@ List<StockData> _loadWorkerStocks(
   return repo.loadStocksRange(fromCode, toCode: toCode);
 }
 
-/// 重建日线列式快照（runSync 收尾调用，隔离内全量读库 + 原子写）。
-/// 库未变（快照水位与行数都还等于当前指纹）时直接跳过，避免无谓的
-/// 几秒全量读。快照缺失/损坏/过期都会在这里重写。
+/// 重建日线列式快照（runSync 收尾调用，隔离内执行 + 原子写）。
+/// 三级决策：库未变 → 跳过；纯追加 → 增量 append（只读新行，几千行 vs
+/// 全量 5.4M 行的 3.9s 读库）；其余（缺失/损坏/REPLACE/回补更早历史）→
+/// 全量重建兜底。快照缺失/过期都不会错——worker 自校验不过会回退 SQL。
 Future<void> rebuildBarsSnapshot(String dbPath) => Isolate.run(() {
       final repo = BarRepository(dbPath);
       try {
         final wm = repo.poolFingerprintExt();
-        final old = loadBarsSnapshot(barsSnapshotPathFor(dbPath));
+        final path = barsSnapshotPathFor(dbPath);
+        final old = loadBarsSnapshot(path);
         if (old != null &&
             old.maxRowid == wm.maxRowid &&
             old.rowCount == wm.count) {
           return;
         }
-        writeBarsSnapshot(barsSnapshotPathFor(dbPath), repo.loadAllStocks(),
+        if (old != null &&
+            wm.maxRowid > old.maxRowid &&
+            repo.barCountUpTo(old.maxRowid) == old.rowCount) {
+          if (appendBarsSnapshot(path, old,
+              repo.barsSinceRowid(old.maxRowid, wm.maxRowid),
+              maxRowid: wm.maxRowid)) {
+            return;
+          }
+        }
+        writeBarsSnapshot(path, repo.loadAllStocks(),
             maxRowid: wm.maxRowid, rowCount: wm.count);
       } finally {
         repo.close();

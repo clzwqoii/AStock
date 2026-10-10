@@ -17,6 +17,7 @@ import 'dart:io';
 import 'dart:typed_data';
 
 import '../core/models.dart';
+import 'tushare_client.dart' show DailyRow;
 
 const int _recBytes = 4 + 6 * 8; // i32 ymd + 6×f64
 const int _kSnapshotVersion = 1;
@@ -52,8 +53,35 @@ class BarsSnapshot {
   final List<int> offsets;
 }
 
-/// 写快照（原子写 tmp+rename，Windows 先删再换，同 saveBacktestHistory）。
-/// [stocks] 的 symbol 顺序即块顺序，读取端按同序重建。
+/// 一根 K 线的列存编码（小端）：i32 ymd + open/high/low/close/vol/amount。
+void _putRec(ByteData bd, int o, int ymd, double open, double high, double low,
+    double close, double vol, double amount) {
+  bd.setInt32(o, ymd, Endian.little);
+  bd.setFloat64(o + 4, open, Endian.little);
+  bd.setFloat64(o + 12, high, Endian.little);
+  bd.setFloat64(o + 20, low, Endian.little);
+  bd.setFloat64(o + 28, close, Endian.little);
+  bd.setFloat64(o + 36, vol, Endian.little);
+  bd.setFloat64(o + 44, amount, Endian.little);
+}
+
+/// 原子写（tmp+rename，Windows 先删再换，同 saveBacktestHistory）。
+void _atomicWriteSync(String path, Uint8List out) {
+  final tmp = File('$path.$pid.tmp');
+  tmp.writeAsBytesSync(out, flush: true);
+  try {
+    tmp.renameSync(path);
+  } on FileSystemException {
+    if (Platform.isWindows && File(path).existsSync()) {
+      File(path).deleteSync();
+      tmp.renameSync(path);
+    } else {
+      rethrow;
+    }
+  }
+}
+
+/// 写快照（原子写）。[stocks] 的 symbol 顺序即块顺序，读取端按同序重建。
 void writeBarsSnapshot(
   String path,
   List<StockData> stocks, {
@@ -87,31 +115,89 @@ void writeBarsSnapshot(
     bd.setInt32(o, s.bars.length, Endian.little);
     o += 4;
     for (final b in s.bars) {
-      bd.setInt32(o, b.date.year * 10000 + b.date.month * 100 + b.date.day,
-          Endian.little);
-      bd.setFloat64(o + 4, b.open, Endian.little);
-      bd.setFloat64(o + 12, b.high, Endian.little);
-      bd.setFloat64(o + 20, b.low, Endian.little);
-      bd.setFloat64(o + 28, b.close, Endian.little);
-      bd.setFloat64(o + 36, b.volume, Endian.little);
-      bd.setFloat64(o + 44, b.amount, Endian.little);
+      _putRec(bd, o, b.date.year * 10000 + b.date.month * 100 + b.date.day,
+          b.open, b.high, b.low, b.close, b.volume, b.amount);
       o += _recBytes;
     }
   }
+  _atomicWriteSync(path, out);
+}
 
-  final tmp = File('$path.$pid.tmp');
-  tmp.writeAsBytesSync(out, flush: true);
-  try {
-    tmp.renameSync(path);
-  } on FileSystemException {
-    // Windows 下目标已存在时 rename 会抛，先删再换。
-    if (Platform.isWindows && File(path).existsSync()) {
-      File(path).deleteSync();
-      tmp.renameSync(path);
-    } else {
-      rethrow;
+/// 增量 append：把新行（[rows]，ts_code/trade_date 升序，rowid ∈
+/// (old.maxRowid, maxRowid]）写上 [old] 并原子替换。成功返回 true。
+///
+/// 任一存量股的新行日期 ≤ 其旧末根时返回 false 且**不动原文件**——append 会
+/// 破坏时间升序（回补更早历史），调用方须退回 [writeBarsSnapshot] 全量重建。
+/// 旧块字节按原样拷贝（含根数前缀），仅新行做列存编码，重排只发生在
+/// 新股插入字典序中间时。
+bool appendBarsSnapshot(
+  String path,
+  BarsSnapshot old,
+  List<DailyRow> rows, {
+  required int maxRowid,
+}) {
+  final newByCode = <String, List<DailyRow>>{};
+  for (final r in rows) {
+    newByCode.putIfAbsent(r.tsCode, () => []).add(r);
+  }
+  // 排序护栏：存量股的新行必须严格晚于旧末根（相等也不行——那是 REPLACE 的样子）
+  for (final e in newByCode.entries) {
+    final idx = old.symbols.indexOf(e.key);
+    if (idx < 0) continue;
+    final n = old.lens[idx];
+    final lastYmd = ByteData.sublistView(
+            old.bytes, old.offsets[idx] + 4 + (n - 1) * _recBytes)
+        .getInt32(0, Endian.little);
+    if (int.parse(e.value.first.tradeDate) <= lastYmd) return false;
+  }
+
+  final syms = <String>{...old.symbols, ...newByCode.keys}.toList()..sort();
+  final lens = <int>[];
+  var dataBytes = 0;
+  for (final sym in syms) {
+    final oldIdx = old.symbols.indexOf(sym);
+    final oldN = oldIdx < 0 ? 0 : old.lens[oldIdx];
+    final newN = newByCode[sym]?.length ?? 0;
+    lens.add(oldN + newN);
+    dataBytes += 4 + (oldN + newN) * _recBytes;
+  }
+  final head = jsonEncode({
+    'v': _kSnapshotVersion,
+    'maxRowid': maxRowid,
+    'rowCount': old.rowCount + rows.length,
+    'syms': syms,
+    'lens': lens,
+  });
+  final headBytes = utf8.encode(head);
+
+  final out = Uint8List(4 + headBytes.length + dataBytes);
+  final bd = ByteData.sublistView(out);
+  bd.setUint32(0, headBytes.length, Endian.little);
+  out.setRange(4, 4 + headBytes.length, headBytes);
+
+  var o = 4 + headBytes.length;
+  for (var s = 0; s < syms.length; s++) {
+    final oldIdx = old.symbols.indexOf(syms[s]);
+    final newRows = newByCode[syms[s]];
+    final n = lens[s];
+    bd.setInt32(o, n, Endian.little);
+    o += 4;
+    if (oldIdx >= 0) {
+      // 旧块自带 4 字节根数前缀（值是旧根数），跳过只拷数据，前缀由上面统一写新值
+      final oldData = old.lens[oldIdx] * _recBytes;
+      out.setRange(o, o + oldData, old.bytes, old.offsets[oldIdx] + 4);
+      o += oldData;
+    }
+    if (newRows != null) {
+      for (final r in newRows) {
+        _putRec(bd, o, int.parse(r.tradeDate), r.open, r.high, r.low, r.close,
+            r.vol, r.amount);
+        o += _recBytes;
+      }
     }
   }
+  _atomicWriteSync(path, out);
+  return true;
 }
 
 /// 读快照。文件缺失 / 截断 / 版本不符 / 任何解析异常 → null（调用方回退 SQL 路径）。
