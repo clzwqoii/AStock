@@ -236,6 +236,146 @@ BarsSnapshot? loadBarsSnapshot(String path) {
   }
 }
 
+/// 快照头（不含块数据）：水位自校验 + 块定位所需的最小信息。
+/// 几百 KB 级，回测 worker 只读它就能判有效性并定位自己那一段。
+class SnapshotHeader {
+  SnapshotHeader({
+    required this.maxRowid,
+    required this.rowCount,
+    required this.symbols,
+    required this.lens,
+    required this.dataStart,
+  });
+
+  final int maxRowid;
+  final int rowCount;
+  final List<String> symbols;
+  final List<int> lens;
+
+  /// 第一个块（含其 4 字节根数前缀）的文件偏移。
+  final int dataStart;
+}
+
+/// 只读快照头，不碰块区。缺失 / 截断 / 版本不符 / 任何解析异常 → null。
+SnapshotHeader? readSnapshotHeader(String path) {
+  try {
+    final f = File(path);
+    if (!f.existsSync()) return null;
+    final raf = f.openSync();
+    try {
+      final lenBytes = _readFully(raf, 4);
+      if (lenBytes == null) return null;
+      final headLen = ByteData.sublistView(lenBytes).getUint32(0, Endian.little);
+      if (headLen <= 0 || headLen > 64 * 1024 * 1024) return null;
+      final headBytes = _readFully(raf, headLen);
+      if (headBytes == null) return null;
+      final head =
+          jsonDecode(utf8.decode(headBytes)) as Map<String, dynamic>;
+      if (head['v'] != _kSnapshotVersion) return null;
+      final syms = (head['syms'] as List).cast<String>();
+      final lens = (head['lens'] as List).cast<int>();
+      if (syms.length != lens.length) return null;
+      return SnapshotHeader(
+        maxRowid: head['maxRowid'] as int,
+        rowCount: head['rowCount'] as int,
+        symbols: syms,
+        lens: lens,
+        dataStart: 4 + headLen,
+      );
+    } finally {
+      raf.closeSync();
+    }
+  } catch (_) {
+    return null;
+  }
+}
+
+/// 读满 [n] 字节；文件不足则返回 null（[RandomAccessFile.readSync] 允许短读）。
+Uint8List? _readFully(RandomAccessFile raf, int n) {
+  final buf = Uint8List(n);
+  var off = 0;
+  while (off < n) {
+    final got = raf.readIntoSync(buf, off, n);
+    if (got <= 0) return null;
+    off += got;
+  }
+  return buf;
+}
+
+/// 从快照文件重建 `[fromCode, toCode)` 半开区间的股票，**只读头 + 需要的块**：
+/// 回测 8 分片各读整份快照会在手机内存上叠加成尖峰（8 × 数百 MB），
+/// 这里每分片只碰自己那一段。任一需要的块读不满 → null（调用方回退 SQL）。
+/// 头不完整或版本不符同样返回 null。
+List<StockData>? stocksFromSnapshotFile(
+  String path,
+  String fromCode, {
+  String? toCode,
+}) {
+  final h = readSnapshotHeader(path);
+  if (h == null) return null;
+  try {
+    final raf = File(path).openSync();
+    try {
+      final dateCache = <int, DateTime>{};
+      final out = <StockData>[];
+      var o = h.dataStart;
+      for (var s = 0; s < h.symbols.length; s++) {
+        final n = h.lens[s];
+        final blockBytes = 4 + n * _recBytes;
+        final sym = h.symbols[s];
+        final wanted =
+            sym.compareTo(fromCode) >= 0 && (toCode == null || sym.compareTo(toCode) < 0);
+        if (wanted) {
+          raf.setPositionSync(o);
+          final blk = _readFully(raf, blockBytes);
+          if (blk == null) return null;
+          out.add(_rebuildStock(sym, blk, dateCache));
+        }
+        o += blockBytes;
+      }
+      return out;
+    } finally {
+      raf.closeSync();
+    }
+  } catch (_) {
+    return null;
+  }
+}
+
+/// 用一块「4 字节根数前缀 + 根数×52 字节」的字节重建一只股票。
+StockData _rebuildStock(String symbol, Uint8List blk, Map<int, DateTime> dateCache) {
+  final bd = ByteData.sublistView(blk);
+  return StockData(
+      symbol: symbol,
+      bars: _readBars(bd, 4, bd.getInt32(0, Endian.little), dateCache));
+}
+
+final _zeroBar = Bar(date: DateTime(1970), open: 0, high: 0, low: 0, close: 0, volume: 0);
+
+/// 从 [bd] 的 [start] 偏移起读 [n] 根（每根 52 字节，小端）建成 bars。
+/// 唯一的列存解码点——[stocksFromSnapshot]（整份已在内存）与
+/// [stocksFromSnapshotFile]（按需读块）共用，避免两套解码漂移。
+List<Bar> _readBars(ByteData bd, int start, int n, Map<int, DateTime> dateCache) {
+  var o = start;
+  final bars = List<Bar>.filled(n, _zeroBar, growable: false);
+  for (var i = 0; i < n; i++) {
+    final ymd = bd.getInt32(o, Endian.little);
+    final d = dateCache.putIfAbsent(
+        ymd, () => DateTime(ymd ~/ 10000, (ymd ~/ 100) % 100, ymd % 100));
+    bars[i] = Bar(
+      date: d,
+      open: bd.getFloat64(o + 4, Endian.little),
+      high: bd.getFloat64(o + 12, Endian.little),
+      low: bd.getFloat64(o + 20, Endian.little),
+      close: bd.getFloat64(o + 28, Endian.little),
+      volume: bd.getFloat64(o + 36, Endian.little),
+      amount: bd.getFloat64(o + 44, Endian.little),
+    );
+    o += _recBytes;
+  }
+  return bars;
+}
+
 /// 从快照重建 `[fromCode, toCode)` 半开区间的股票（与 SQL loadStocksRange
 /// 的切片语义一致，toCode 为 null 即到末尾）。ymd→DateTime 建缓存复用实例：
 /// `DateTime(y,m,d)` 构造含时区计算（12.7µs/行），无缓存时并行重建反而比串行慢。
@@ -251,28 +391,11 @@ List<StockData> stocksFromSnapshot(
     if (sym.compareTo(fromCode) < 0) continue;
     if (toCode != null && sym.compareTo(toCode) >= 0) continue;
     final n = snap.lens[s];
-    final bd = ByteData.sublistView(snap.bytes, snap.offsets[s],
-        snap.offsets[s] + 4 + n * _recBytes);
-    var o = 4;
-    final bars = List<Bar>.filled(n, Bar(date: DateTime(1970), open: 0, high: 0, low: 0, close: 0, volume: 0), growable: false);
-    for (var i = 0; i < n; i++) {
-      final ymd = bd.getInt32(o, Endian.little);
-      final d = dateCache.putIfAbsent(
-          ymd,
-          () => DateTime(
-              ymd ~/ 10000, (ymd ~/ 100) % 100, ymd % 100));
-      bars[i] = Bar(
-        date: d,
-        open: bd.getFloat64(o + 4, Endian.little),
-        high: bd.getFloat64(o + 12, Endian.little),
-        low: bd.getFloat64(o + 20, Endian.little),
-        close: bd.getFloat64(o + 28, Endian.little),
-        volume: bd.getFloat64(o + 36, Endian.little),
-        amount: bd.getFloat64(o + 44, Endian.little),
-      );
-      o += _recBytes;
-    }
-    out.add(StockData(symbol: sym, bars: bars));
+    out.add(StockData(
+      symbol: sym,
+      bars: _readBars(ByteData.sublistView(snap.bytes), snap.offsets[s] + 4, n,
+          dateCache),
+    ));
   }
   return out;
 }

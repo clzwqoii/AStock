@@ -160,9 +160,26 @@ class BarRepository {
     // 否则每次都整体扫主键索引（360 万行实测 ~80ms → 建索引后 ~5ms，磁盘 ~58MB）。
     _db.execute(
         'CREATE INDEX IF NOT EXISTS idx_daily_bars_trade_date ON daily_bars(trade_date)');
+    // 同步心跳：单键值表（见 syncCheckedAt / setSyncCheckedAt）。
+    _db.execute('CREATE TABLE IF NOT EXISTS sync_meta('
+        'k TEXT PRIMARY KEY, v INTEGER NOT NULL)');
   }
 
   final Database _db;
+
+  /// 最近一次「确认库内已补齐到最近收盘日」的时刻（epoch 毫秒），未同步过为 null。
+  /// 启动同步早退判据用（见 app_logic 的 runSync）：trade_cal 限 1 次/小时、
+  /// stock_basic 限 1 次/分，重复启动不该反复打网络。存库内而非旁挂文件——
+  /// 少一个会与应用数据不同步的孤儿文件。
+  int? syncCheckedAt() {
+    final r = _db.select("SELECT v FROM sync_meta WHERE k = 'checkedAt'");
+    return r.isEmpty ? null : r.first.values[0] as int;
+  }
+
+  void setSyncCheckedAt(int epochMs) {
+    _db.execute('INSERT OR REPLACE INTO sync_meta(k, v) VALUES (?, ?)',
+        ['checkedAt', epochMs]);
+  }
 
   void upsertStocks(List<({String tsCode, String name})> stocks) {
     if (stocks.isEmpty) return;

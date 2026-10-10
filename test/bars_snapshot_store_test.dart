@@ -262,5 +262,66 @@ void main() {
     expect(File(path).readAsBytesSync(), before, reason: '拒绝时不得动原文件');
     repo.close();
   });
+
+  test('B 区间读快照只取所需块：与全量读切片逐位一致，且不依赖被截断的尾部', () async {
+    final dbPath = '${tmp.path}/t.db';
+    final repo = BarRepository(dbPath);
+    final path = barsSnapshotPathFor(dbPath);
+    repo.upsertBars([
+      for (final code in ['600000.SH', '600001.SH', '600002.SH'])
+        for (var i = 0; i < 10; i++)
+          DailyRow(
+            tsCode: code,
+            tradeDate: (20260101 + i).toString(),
+            open: 10 + i * 0.1,
+            high: 10.5,
+            low: 9.5,
+            close: 10.2,
+            vol: 100,
+            amount: 1000,
+          ),
+    ]);
+    final wm = repo.poolFingerprintExt();
+    writeBarsSnapshot(path, repo.loadAllStocks(),
+        maxRowid: wm.maxRowid, rowCount: wm.count);
+
+    // 头只读（几百字节级），含定位所需信息
+    final h = readSnapshotHeader(path);
+    expect(h, isNotNull);
+    expect(h!.symbols, ['600000.SH', '600001.SH', '600002.SH']);
+    expect(h.maxRowid, wm.maxRowid);
+    expect(h.rowCount, wm.count);
+
+    final full =
+        stocksFromSnapshot(loadBarsSnapshot(path)!, '600001.SH', toCode: '600002.SH');
+    final ranged = stocksFromSnapshotFile(path, '600001.SH', toCode: '600002.SH');
+    expect(ranged, isNotNull);
+    expect(ranged!.length, 1);
+    expect(ranged.single.symbol, '600001.SH');
+    expect(full.length, 1);
+    expect(ranged.single.bars.length, full.single.bars.length);
+    for (var i = 0; i < full.single.bars.length; i++) {
+      expect(ranged.single.bars[i].date, full.single.bars[i].date);
+      expect(ranged.single.bars[i].close, full.single.bars[i].close);
+      expect(ranged.single.bars[i].amount, full.single.bars[i].amount);
+    }
+
+    // 截掉最后一个块（600002.SH）：区间读不受影响（证明只读了前两块），
+    // 但整段读必须失败——尾部缺失时不能静默返回不全的数据。
+    var cut = h.dataStart;
+    for (var s = 0; s < h.symbols.indexOf('600002.SH'); s++) {
+      cut += 4 + h.lens[s] * 52;
+    }
+    final bytes = File(path).readAsBytesSync().sublist(0, cut);
+    File(path).writeAsBytesSync(bytes);
+
+    expect(stocksFromSnapshotFile(path, '600001.SH', toCode: '600002.SH'), isNotNull,
+        reason: '所需块完整时必须成功');
+    expect(stocksFromSnapshotFile(path, '600001.SH'), isNull,
+        reason: '尾部块缺失时必须失败回退');
+    expect(readSnapshotHeader(path), isNotNull,
+        reason: '头完整时仍可读（截断只影响块区）');
+    repo.close();
+  });
 }
 

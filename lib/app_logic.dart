@@ -390,7 +390,8 @@ typedef _Pool = ({
 });
 
 _Pool _loadPool(BarRepository repo, String dbPath) => (
-      stocks: repo.loadAllStocks(excludeSpecialStocks: true),
+      stocks: loadPoolFromSnapshot(repo, dbPath, excludeSpecialStocks: true) ??
+          repo.loadAllStocks(excludeSpecialStocks: true),
       names: repo.stockNames(),
       report: loadBacktestReport(dbPath),
       model: loadScoreModel(dbPath),
@@ -687,9 +688,11 @@ void _screeningWorkerMain(SendPort out) {
         var incremental = false;
         final newFp = repo!.poolFingerprintExt();
         if (pool == null) {
-          // 首次：全量加载 + 建索引
+          // 首次：全量加载 + 建索引（优先快照，失效回退 SQL）
           final sw = Stopwatch()..start();
-          final stocks = repo!.loadAllStocks(excludeSpecialStocks: true);
+          final stocks = loadPoolFromSnapshot(repo!, dbPath,
+                  excludeSpecialStocks: true) ??
+              repo!.loadAllStocks(excludeSpecialStocks: true);
           final names = repo!.stockNames();
           loadMs = sw.elapsedMilliseconds;
           reused = false;
@@ -715,7 +718,9 @@ void _screeningWorkerMain(SendPort out) {
         } else {
           // 全量重载（水位后退 / REPLACE 旧行 / count 不匹配 / delta 校验失败）
           final sw = Stopwatch()..start();
-          final stocks = repo!.loadAllStocks(excludeSpecialStocks: true);
+          final stocks = loadPoolFromSnapshot(repo!, dbPath,
+                  excludeSpecialStocks: true) ??
+              repo!.loadAllStocks(excludeSpecialStocks: true);
           final names = repo!.stockNames();
           loadMs = sw.elapsedMilliseconds;
           reused = false;
@@ -994,19 +999,50 @@ List<(String, String?)> _splitSymbols(List<String> symbols, int n) {
   return result;
 }
 
-/// worker 读库：优先列式快照（重建 Bar 比 SQL 逐行映射快 5-9 倍）。
-/// 两条判据合起来 = 快照内容与当前库逐位相同，任一不过即回退 SQL：
-/// - `MAX(rowid)` 相等：快照落盘后无插入（INSERT OR REPLACE 旧行也会换更大 rowid）；
-/// - 水位内行数相等：无旧行被 REPLACE（旧行 rowid 消失）或删除。
+/// 快照有效性判据（两条同时成立才可用）：`MAX(rowid)` 相等 + 水位内行数等于
+/// 快照头记录的行数 = 快照内容与当前 daily_bars 逐位相同。任一不过返回 false。
+/// 这是全项目唯一的快照校验口径——别在别处另写一套。
+bool _snapshotFresh(BarRepository repo, int maxRowid, int rowCount) {
+  final cur = repo.poolFingerprintExt();
+  return cur.maxRowid == maxRowid &&
+      repo.barCountUpTo(maxRowid) == rowCount;
+}
+
+/// 选股池加载：优先列式快照（重建 Bar 比 SQL 逐行映射快数倍），
+/// 快照缺失/过期回退 null 由调用方走 SQL。手机端首次选股的主要耗时
+/// 就在这一步的全库加载。
+///
+/// 走 [stocksFromSnapshotFile] 按块流式读（而不是整份读进内存）：全库
+/// 快照数百 MB，一次性分配在手机上就是内存尖峰。
+///
+/// [excludeSpecialStocks] 的口径与 [BarRepository.loadAllStocks] 逐字一致
+/// （ST 系 + 科创板/退市），过滤挪到 Dart 侧——快照存的是全库，含特殊票。
+List<StockData>? loadPoolFromSnapshot(
+  BarRepository repo,
+  String dbPath, {
+  bool excludeSpecialStocks = false,
+}) {
+  final path = barsSnapshotPathFor(dbPath);
+  final h = readSnapshotHeader(path);
+  if (h == null || !_snapshotFresh(repo, h.maxRowid, h.rowCount)) return null;
+  final all = stocksFromSnapshotFile(path, '');
+  if (all == null) return null;
+  if (!excludeSpecialStocks) return all;
+  final names = repo.stockNames();
+  return [
+    for (final s in all)
+      if (!BarRepository.isSpecialStock(s.symbol, names)) s
+  ];
+}
+
+/// worker 读库：优先列式快照，只读头 + 本分片需要的块（8 分片各读整份
+/// 快照会在手机内存上叠加成尖峰），失效即回退 SQL 分片扫描。
 List<StockData> _loadWorkerStocks(
     BarRepository repo, String snapshotPath, String fromCode, String? toCode) {
-  final snap = loadBarsSnapshot(snapshotPath);
-  if (snap != null) {
-    final cur = repo.poolFingerprintExt();
-    if (cur.maxRowid == snap.maxRowid &&
-        repo.barCountUpTo(snap.maxRowid) == snap.rowCount) {
-      return stocksFromSnapshot(snap, fromCode, toCode: toCode);
-    }
+  final h = readSnapshotHeader(snapshotPath);
+  if (h != null && _snapshotFresh(repo, h.maxRowid, h.rowCount)) {
+    final stocks = stocksFromSnapshotFile(snapshotPath, fromCode, toCode: toCode);
+    if (stocks != null) return stocks;
   }
   return repo.loadStocksRange(fromCode, toCode: toCode);
 }
@@ -1135,6 +1171,25 @@ Future<SyncResult> runSync({
 }) async {
   final repo = BarRepository(dbPath);
   try {
+    final t = (now ?? DateTime.now)();
+    // C：同一收盘边界内重复启动直接早退（不发任何 HTTP）。
+    // 判据 = 上次「确认补齐」的时刻不早于最近一个已收盘交易日边界
+    // （[ _lastCloseBoundary ]），期间不可能出现新的已收盘交易日。只在可
+    // 证明无新数据时跳过，所以不会漏数据；节假日会多判一次边界（多跑一次
+    // 同步、拉到空数据），代价可接受。
+    if (fromDate == null && !force) {
+      final last = repo.syncCheckedAt();
+      if (last != null &&
+          !DateTime.fromMillisecondsSinceEpoch(last)
+              .isBefore(_lastCloseBoundary(t))) {
+        return SyncResult(
+            dates: 0,
+            rows: 0,
+            latestDate: repo.maxTradeDate(),
+            earliestDate: repo.minTradeDate(),
+            failedSymbols: 0);
+      }
+    }
     final client = clientFactory?.call(token) ?? TushareClient(token: token);
     final result = await SyncService(client, repo, now: now,
             eastmoney: eastmoneyFactory?.call() ?? EastmoneyClient(),
@@ -1144,6 +1199,10 @@ Future<SyncResult> runSync({
             fromDate: fromDate,
             force: force,
             rateDelay: rateDelay);
+    // 只有本轮无失败才记心跳：有备源失败时库内仍缺数据，下次启动必须重试。
+    if (result.failedSymbols == 0) {
+      repo.setSyncCheckedAt(t.millisecondsSinceEpoch);
+    }
     // 收尾 best-effort 重建快照（P5）：失败不吞同步结果——快照缺失/过期时
     // 回测 worker 自校验不过，自动回退 SQL 路径。
     try {
@@ -1153,6 +1212,17 @@ Future<SyncResult> runSync({
   } finally {
     repo.close();
   }
+}
+
+/// 最近一个「已收盘交易日边界」：不晚于 [t] 的最近一个工作日 17:00。
+/// 只按工作日算（不查交易日历），与 tushare 的 17:00 收盘可用口径一致。
+DateTime _lastCloseBoundary(DateTime t) {
+  var d = DateTime(t.year, t.month, t.day, 17);
+  if (d.isAfter(t)) d = d.subtract(const Duration(days: 1));
+  while (d.weekday == DateTime.saturday || d.weekday == DateTime.sunday) {
+    d = d.subtract(const Duration(days: 1));
+  }
+  return d;
 }
 
 /// tushare daily 低积分限 50 次/分 → 间隔 ≥1.2s 才能整段区间不撞 40203。

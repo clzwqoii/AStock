@@ -1091,6 +1091,136 @@ void main() {
     final r3 = await runBacktest(dbPath, reportPath: rp); // 全量 SQL 兜底对照
     expectSameReports(r2, r3);
   });
+
+  test('A 选股池优先走快照：新鲜取快照、过期回退 null，口径与 SQL 逐位一致', () async {
+    seedStocks(dbPath);
+    String d(int i) => '2026${(1 + i ~/ 28).toString().padLeft(2, '0')}'
+        '${(1 + i % 28).toString().padLeft(2, '0')}';
+    // 补一只科创板（68 开头）与一只名称含 ST 的票：扣口径与 SQL 逐字一致
+    final repo0 = BarRepository(dbPath);
+    repo0.upsertStocks([
+      (tsCode: 'S1.SH', name: '正常股'),
+      (tsCode: 'S2.SZ', name: '*ST 风险'),
+      (tsCode: '688001.SH', name: '科创股'),
+    ]);
+    repo0.upsertBars([
+      for (var i = 0; i < 40; i++)
+        DailyRow(
+          tsCode: '688001.SH',
+          tradeDate: d(i),
+          open: 10,
+          high: 10,
+          low: 10,
+          close: 10,
+          vol: 100,
+          amount: 1,
+        ),
+    ]);
+    repo0.close();
+
+    final repo = BarRepository(dbPath);
+    expect(loadPoolFromSnapshot(repo, dbPath, excludeSpecialStocks: true), isNull,
+        reason: '无快照时必须返回 null（回退 SQL）');
+
+    final wm = repo.poolFingerprintExt();
+    writeBarsSnapshot(barsSnapshotPathFor(dbPath), repo.loadAllStocks(),
+        maxRowid: wm.maxRowid, rowCount: wm.count);
+
+    final fromSnap =
+        loadPoolFromSnapshot(repo, dbPath, excludeSpecialStocks: true);
+    expect(fromSnap, isNotNull, reason: '新鲜快照必须命中');
+    final fromSql = repo.loadAllStocks(excludeSpecialStocks: true);
+    expect(fromSnap!.length, fromSql.length, reason: '扣口径一致（ST/科创板剔除）');
+    for (var s = 0; s < fromSql.length; s++) {
+      expect(fromSnap[s].symbol, fromSql[s].symbol);
+      expect(fromSnap[s].bars.length, fromSql[s].bars.length);
+      for (var i = 0; i < fromSql[s].bars.length; i++) {
+        final a = fromSnap[s].bars[i], b = fromSql[s].bars[i];
+        expect(a.date, b.date);
+        expect(a.open, b.open);
+        expect(a.high, b.high);
+        expect(a.low, b.low);
+        expect(a.close, b.close);
+        expect(a.volume, b.volume);
+        expect(a.amount, b.amount);
+      }
+    }
+    expect(fromSnap.map((e) => e.symbol), isNot(contains('688001.SH')));
+    expect(fromSnap.map((e) => e.symbol), isNot(contains('S2.SZ')));
+
+    // 追加 1 行（未重建快照）→ 水位不符，必须回退
+    repo.upsertBars([
+      DailyRow(
+        tsCode: 'S1.SH',
+        tradeDate: '20261003',
+        open: 10,
+        high: 10,
+        low: 10,
+        close: 10,
+        vol: 100,
+        amount: 1,
+      ),
+    ]);
+    expect(loadPoolFromSnapshot(repo, dbPath, excludeSpecialStocks: true), isNull,
+        reason: '快照落后于库时必须拒绝');
+    repo.close();
+  });
+
+  test('A 选股有快照与无快照结果一致（runScreening 端到端）', () async {
+    seedStocks(dbPath);
+    await rebuildBarsSnapshot(dbPath);
+    final withSnap =
+        await runScreening(dbPath, [ruleById('volume_surge'), ruleById('pct_change_up')]);
+    File(barsSnapshotPathFor(dbPath)).deleteSync();
+    final withoutSnap =
+        await runScreening(dbPath, [ruleById('volume_surge'), ruleById('pct_change_up')]);
+    expect(withSnap.total, withoutSnap.total);
+    expect(withSnap.picked.map((e) => e.symbol),
+        withoutSnap.picked.map((e) => e.symbol));
+    expect(withSnap.dataDate, withoutSnap.dataDate);
+  });
+
+  test('C 同一收盘边界内重复启动同步早退：不再发网络请求，跨边界必须真同步', () async {
+    seedStocks(dbPath);
+    var clients = 0;
+    final client = fakeSyncClient((td) => [
+          ['S1.SH', td, 1.0, 1.0, 1.0, 1.0, 100.0, 10.0],
+        ]);
+    // 首次：2026-09-30（周三）18:00，收盘后正常同步并记录检查时刻
+    await runSync(
+      dbPath: dbPath,
+      token: 'tok',
+      now: () => DateTime(2026, 9, 30, 18),
+      clientFactory: (_) {
+        clients++;
+        return client;
+      },
+    );
+    expect(clients, 1, reason: '首次必须真同步');
+
+    // 同一收盘边界内（当天 20:00）再启动：必须早退，连客户端都不创建
+    final r2 = await runSync(
+      dbPath: dbPath,
+      token: 'tok',
+      now: () => DateTime(2026, 9, 30, 20),
+      clientFactory: (_) => throw StateError('早退时不得创建客户端'),
+    );
+    expect(r2.dates, 0);
+    expect(r2.rows, 0);
+    expect(r2.latestDate, isNotNull, reason: '早退仍要回执库内水位');
+
+    // 越过新的收盘边界（次日 18:00）→ 必须正常同步，不得早退
+    await runSync(
+      dbPath: dbPath,
+      token: 'tok',
+      now: () => DateTime(2026, 10, 1, 18),
+      clientFactory: (_) {
+        clients++;
+        return client;
+      },
+    );
+    expect(clients, 2, reason: '新收盘边界后必须真同步');
+  });
 }
 
 final dailySeen = <String>[];
