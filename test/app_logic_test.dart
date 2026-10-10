@@ -10,6 +10,7 @@ import 'package:stock/core/market.dart';
 import 'package:stock/core/rules.dart';
 import 'package:stock/data/backtest_detail_store.dart';
 import 'package:stock/data/bar_repository.dart';
+import 'package:stock/data/bars_snapshot_store.dart';
 import 'package:stock/data/eastmoney_client.dart';
 import 'package:stock/data/report_store.dart';
 import 'package:stock/data/sina_client.dart';
@@ -1017,6 +1018,78 @@ void main() {
     final r2 = await runBacktest(dbPath, reportPath: rp);
     expect(File(rp).existsSync(), isTrue, reason: '重算后报告恢复落盘');
     expect(r2.stockCount, 520);
+  });
+
+  test('P5 runSync 后重建快照：水位与库一致', () async {
+    final client = fakeSyncClient((td) {
+      return [['S1.SH', td, 1.0, 1.0, 1.0, 1.0, 100.0, 10.0]];
+    });
+    await runSync(
+      dbPath: dbPath,
+      token: 'tok',
+      now: () => DateTime(2026, 9, 30, 18),
+      clientFactory: (_) => client,
+    );
+
+    final snapPath = barsSnapshotPathFor(dbPath);
+    final snap = loadBarsSnapshot(snapPath);
+    expect(snap, isNotNull, reason: '同步完成后应重建快照');
+    final repo = BarRepository(dbPath);
+    final wm = repo.poolFingerprintExt();
+    repo.close();
+    expect(snap!.maxRowid, wm.maxRowid, reason: '快照水位 = 库 MAX(rowid)');
+    expect(snap.rowCount, wm.count);
+  });
+
+  test('P5 快照回测与 SQL 回测一致：有快照跑一遍，删快照+删缓存再跑一遍', () async {
+    seedP3(dbPath);
+    final rp = '${tmp.path}/r.json';
+    await rebuildBarsSnapshot(dbPath); // 模拟同步后的快照重建
+    final r1 = await runBacktest(dbPath, reportPath: rp); // worker 走快照路径
+
+    final detailPath = backtestDetailPathFor(dbPath);
+    if (File(detailPath).existsSync()) File(detailPath).deleteSync();
+    File(barsSnapshotPathFor(dbPath)).deleteSync();
+    final r2 = await runBacktest(dbPath, reportPath: rp); // worker 退 SQL 路径
+
+    expect(r1.stockCount, 520);
+    expect(r2.stockCount, 520);
+    expectSameReports(r1, r2);
+  });
+
+  test('P5 过期快照自动回退：快照落后于库时结果与全量 SQL 一致', () async {
+    seedP3(dbPath);
+    final rp = '${tmp.path}/r.json';
+    await rebuildBarsSnapshot(dbPath);
+    await runBacktest(dbPath, reportPath: rp);
+
+    // 追加 1 个交易日：快照落后于库（库里多了 rowid > snap.maxRowid 的行），
+    // worker 必须拒绝这份快照，否则会丢掉新数据
+    final repo = BarRepository(dbPath);
+    final day = p3Date(p3Base.add(const Duration(days: 40)));
+    repo.upsertBars([
+      for (var s = 0; s < 520; s++)
+        DailyRow(
+          tsCode: p3Code(s),
+          tradeDate: day,
+          open: 11,
+          high: 11,
+          low: 11,
+          close: 11,
+          vol: 100,
+          amount: 1,
+        ),
+    ]);
+    repo.close();
+
+    final r2 = await runBacktest(dbPath, reportPath: rp); // 增量续扫，走 SQL
+    expect(r2.stockCount, 520);
+
+    final detailPath = backtestDetailPathFor(dbPath);
+    if (File(detailPath).existsSync()) File(detailPath).deleteSync();
+    File(barsSnapshotPathFor(dbPath)).deleteSync();
+    final r3 = await runBacktest(dbPath, reportPath: rp); // 全量 SQL 兜底对照
+    expectSameReports(r2, r3);
   });
 }
 

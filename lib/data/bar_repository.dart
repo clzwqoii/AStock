@@ -146,6 +146,9 @@ class BarRepository {
   BarRepository(String path) : _db = sqlite3.open(path) {
     // WAL：自动同步（写）与选股（读）可能并发，避免读写互锁。
     _db.execute('PRAGMA journal_mode=WAL');
+    // mmap 读：回测 worker 全量扫 daily_bars（~540 万行），mmap 省掉页拷贝
+    // （实测 8 分片并行 load 5.8s → 5.1s）。只影响本连接的读路径，写照旧走 WAL。
+    _db.execute('PRAGMA mmap_size=536870912');
     _db.execute('CREATE TABLE IF NOT EXISTS stocks ('
         'ts_code TEXT PRIMARY KEY, name TEXT NOT NULL)');
     _db.execute('CREATE TABLE IF NOT EXISTS daily_bars ('

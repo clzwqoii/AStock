@@ -17,6 +17,7 @@ import 'package:stock/core/logreg.dart';
 import 'package:stock/core/score.dart';
 import 'package:stock/core/screener.dart';
 import 'package:stock/data/bar_repository.dart';
+import 'package:stock/data/bars_snapshot_store.dart';
 import 'package:stock/data/backtest_detail_store.dart';
 import 'package:stock/data/report_store.dart';
 import 'package:stock/data/eastmoney_client.dart';
@@ -940,10 +941,12 @@ Future<BacktestReport> _runBacktestParallel(String dbPath, String rp) async {
       }
     }
     final ranges = _splitSymbols(symbols, parallelism);
+    final snapPath = barsSnapshotPathFor(dbPath);
     final details = await Future.wait([
       for (final (from, to) in ranges)
         Isolate.run(() => _backtestShardWorker(
-            dbPath, from, to, ruleIds, hs, calendar, cutoff, msCtx, resumeLens)),
+            dbPath, from, to, ruleIds, hs, calendar, cutoff, msCtx, resumeLens,
+            snapPath)),
     ]);
     // 旧明细在前（时间在前的值先加，与串行插入序最接近），新分片按序合并
     final (report, merged) = mergeAndAggregate(
@@ -991,9 +994,48 @@ List<(String, String?)> _splitSymbols(List<String> symbols, int n) {
   return result;
 }
 
+/// worker 读库：优先列式快照（重建 Bar 比 SQL 逐行映射快 5-9 倍）。
+/// 两条判据合起来 = 快照内容与当前库逐位相同，任一不过即回退 SQL：
+/// - `MAX(rowid)` 相等：快照落盘后无插入（INSERT OR REPLACE 旧行也会换更大 rowid）；
+/// - 水位内行数相等：无旧行被 REPLACE（旧行 rowid 消失）或删除。
+List<StockData> _loadWorkerStocks(
+    BarRepository repo, String snapshotPath, String fromCode, String? toCode) {
+  final snap = loadBarsSnapshot(snapshotPath);
+  if (snap != null) {
+    final cur = repo.poolFingerprintExt();
+    if (cur.maxRowid == snap.maxRowid &&
+        repo.barCountUpTo(snap.maxRowid) == snap.rowCount) {
+      return stocksFromSnapshot(snap, fromCode, toCode: toCode);
+    }
+  }
+  return repo.loadStocksRange(fromCode, toCode: toCode);
+}
+
+/// 重建日线列式快照（runSync 收尾调用，隔离内全量读库 + 原子写）。
+/// 库未变（快照水位与行数都还等于当前指纹）时直接跳过，避免无谓的
+/// 几秒全量读。快照缺失/损坏/过期都会在这里重写。
+Future<void> rebuildBarsSnapshot(String dbPath) => Isolate.run(() {
+      final repo = BarRepository(dbPath);
+      try {
+        final wm = repo.poolFingerprintExt();
+        final old = loadBarsSnapshot(barsSnapshotPathFor(dbPath));
+        if (old != null &&
+            old.maxRowid == wm.maxRowid &&
+            old.rowCount == wm.count) {
+          return;
+        }
+        writeBarsSnapshot(barsSnapshotPathFor(dbPath), repo.loadAllStocks(),
+            maxRowid: wm.maxRowid, rowCount: wm.count);
+      } finally {
+        repo.close();
+      }
+    });
+
 /// Worker isolate 入口：只捕获可序列化值（String / List / Set / MarketStateCtx）。
 /// Rule 闭包不可跨 isolate，传 rule ID 字符串在此还原。
 /// [resumeLens] 非空时走增量续扫（每股只评旧末尾之后的日子）。
+/// [snapshotPath] 为列式快照（[rebuildBarsSnapshot] 产物），worker 自校验水位，
+/// 快照与库逐位相同才用，否则回退 SQL——正确性不依赖快照存在与否。
 ShardDetail _backtestShardWorker(
   String dbPath,
   String fromCode,
@@ -1004,10 +1046,11 @@ ShardDetail _backtestShardWorker(
   DateTime? recentCutoffDate,
   MarketStateCtx msCtx,
   Map<String, int>? resumeLens,
+  String snapshotPath,
 ) {
   final repo = BarRepository(dbPath);
   try {
-    final stocks = repo.loadStocksRange(fromCode, toCode: toCode);
+    final stocks = _loadWorkerStocks(repo, snapshotPath, fromCode, toCode);
     final rules = [for (final id in ruleIds) ruleById(id)];
     return scanStocksShard(
       stocks: stocks,
@@ -1082,7 +1125,7 @@ Future<SyncResult> runSync({
   final repo = BarRepository(dbPath);
   try {
     final client = clientFactory?.call(token) ?? TushareClient(token: token);
-    return await SyncService(client, repo, now: now,
+    final result = await SyncService(client, repo, now: now,
             eastmoney: eastmoneyFactory?.call() ?? EastmoneyClient(),
             sina: sinaFactory?.call() ?? SinaClient())
         .sync(
@@ -1090,6 +1133,12 @@ Future<SyncResult> runSync({
             fromDate: fromDate,
             force: force,
             rateDelay: rateDelay);
+    // 收尾 best-effort 重建快照（P5）：失败不吞同步结果——快照缺失/过期时
+    // 回测 worker 自校验不过，自动回退 SQL 路径。
+    try {
+      await rebuildBarsSnapshot(dbPath);
+    } catch (_) {}
+    return result;
   } finally {
     repo.close();
   }

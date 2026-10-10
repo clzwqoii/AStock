@@ -1,0 +1,192 @@
+/// 日线列式快照缓存：同步完成后把全库 K 线落成二进制列存，回测 worker
+/// 从快照重建 Bar，替代逐行 SQL 映射（5.39M 行实测：SQL load 2.2–4.5s →
+/// 快照并行重建 wall 0.48s）。
+///
+/// 布局（小端）：`[u32 头 JSON 字节数][头 JSON(utf-8)][每股块…]`；
+/// 每股块 = `i32 根数 + 根数×52 字节`，每行 = `i32 ymd + 6×f64`
+/// （open/high/low/close/vol/amount）。头 JSON：
+/// `{"v":1,"maxRowid":N,"rowCount":N,"syms":[…],"lens":[…]}`。
+///
+/// 有效性由水位自校验保证（调用方比对 maxRowid + barCountUpTo 与头里的
+/// rowCount），快照与落盘时的 daily_bars 逐位相同；校验失败自动回退 SQL
+/// 路径，正确性不依赖快照本身。
+library;
+
+import 'dart:convert';
+import 'dart:io';
+import 'dart:typed_data';
+
+import '../core/models.dart';
+
+const int _recBytes = 4 + 6 * 8; // i32 ymd + 6×f64
+const int _kSnapshotVersion = 1;
+
+/// 快照路径：与数据库同目录，`<数据库主名>-bars-snap.bin`（同 [reportPathFor] 的 stem 逻辑）。
+String barsSnapshotPathFor(String dbPath) {
+  final name = dbPath.split(Platform.pathSeparator).last;
+  final dot = name.lastIndexOf('.');
+  final stem = dot <= 0 ? name : name.substring(0, dot);
+  final dir = dbPath.substring(0, dbPath.length - name.length);
+  return '$dir$stem-bars-snap.bin';
+}
+
+/// 已加载的快照：原始字节 + 头信息 + 每股块偏移（顺序扫描建表，零额外分配）。
+class BarsSnapshot {
+  BarsSnapshot({
+    required this.maxRowid,
+    required this.rowCount,
+    required this.bytes,
+    required this.symbols,
+    required this.lens,
+    required this.offsets,
+  });
+
+  /// 写快照时库的 MAX(rowid)（水位自校验用）。
+  final int maxRowid;
+
+  /// 写快照时 daily_bars 总行数（与 barCountUpTo(maxRowid) 比对）。
+  final int rowCount;
+  final Uint8List bytes;
+  final List<String> symbols;
+  final List<int> lens;
+  final List<int> offsets;
+}
+
+/// 写快照（原子写 tmp+rename，Windows 先删再换，同 saveBacktestHistory）。
+/// [stocks] 的 symbol 顺序即块顺序，读取端按同序重建。
+void writeBarsSnapshot(
+  String path,
+  List<StockData> stocks, {
+  required int maxRowid,
+  required int rowCount,
+}) {
+  final syms = <String>[];
+  final lens = <int>[];
+  var dataBytes = 0;
+  for (final s in stocks) {
+    syms.add(s.symbol);
+    lens.add(s.bars.length);
+    dataBytes += 4 + s.bars.length * _recBytes;
+  }
+  final head = jsonEncode({
+    'v': _kSnapshotVersion,
+    'maxRowid': maxRowid,
+    'rowCount': rowCount,
+    'syms': syms,
+    'lens': lens,
+  });
+  final headBytes = utf8.encode(head);
+
+  final out = Uint8List(4 + headBytes.length + dataBytes);
+  final bd = ByteData.sublistView(out);
+  bd.setUint32(0, headBytes.length, Endian.little);
+  out.setRange(4, 4 + headBytes.length, headBytes);
+
+  var o = 4 + headBytes.length;
+  for (final s in stocks) {
+    bd.setInt32(o, s.bars.length, Endian.little);
+    o += 4;
+    for (final b in s.bars) {
+      bd.setInt32(o, b.date.year * 10000 + b.date.month * 100 + b.date.day,
+          Endian.little);
+      bd.setFloat64(o + 4, b.open, Endian.little);
+      bd.setFloat64(o + 12, b.high, Endian.little);
+      bd.setFloat64(o + 20, b.low, Endian.little);
+      bd.setFloat64(o + 28, b.close, Endian.little);
+      bd.setFloat64(o + 36, b.volume, Endian.little);
+      bd.setFloat64(o + 44, b.amount, Endian.little);
+      o += _recBytes;
+    }
+  }
+
+  final tmp = File('$path.$pid.tmp');
+  tmp.writeAsBytesSync(out, flush: true);
+  try {
+    tmp.renameSync(path);
+  } on FileSystemException {
+    // Windows 下目标已存在时 rename 会抛，先删再换。
+    if (Platform.isWindows && File(path).existsSync()) {
+      File(path).deleteSync();
+      tmp.renameSync(path);
+    } else {
+      rethrow;
+    }
+  }
+}
+
+/// 读快照。文件缺失 / 截断 / 版本不符 / 任何解析异常 → null（调用方回退 SQL 路径）。
+BarsSnapshot? loadBarsSnapshot(String path) {
+  try {
+    final f = File(path);
+    if (!f.existsSync()) return null;
+    final bytes = f.readAsBytesSync();
+    if (bytes.length < 4) return null;
+    final bd = ByteData.sublistView(bytes);
+    final headLen = bd.getUint32(0, Endian.little);
+    if (headLen <= 0 || 4 + headLen > bytes.length) return null;
+    final head =
+        jsonDecode(utf8.decode(bytes.sublist(4, 4 + headLen))) as Map<String, dynamic>;
+    if (head['v'] != _kSnapshotVersion) return null;
+    final syms = (head['syms'] as List).cast<String>();
+    final lens = (head['lens'] as List).cast<int>();
+    if (syms.length != lens.length) return null;
+    final offsets = <int>[];
+    var o = 4 + headLen;
+    for (final n in lens) {
+      offsets.add(o);
+      o += 4 + n * _recBytes;
+    }
+    if (o > bytes.length) return null; // 截断
+    return BarsSnapshot(
+      maxRowid: head['maxRowid'] as int,
+      rowCount: head['rowCount'] as int,
+      bytes: bytes,
+      symbols: syms,
+      lens: lens,
+      offsets: offsets,
+    );
+  } catch (_) {
+    return null;
+  }
+}
+
+/// 从快照重建 `[fromCode, toCode)` 半开区间的股票（与 SQL loadStocksRange
+/// 的切片语义一致，toCode 为 null 即到末尾）。ymd→DateTime 建缓存复用实例：
+/// `DateTime(y,m,d)` 构造含时区计算（12.7µs/行），无缓存时并行重建反而比串行慢。
+List<StockData> stocksFromSnapshot(
+  BarsSnapshot snap,
+  String fromCode, {
+  String? toCode,
+}) {
+  final dateCache = <int, DateTime>{};
+  final out = <StockData>[];
+  for (var s = 0; s < snap.symbols.length; s++) {
+    final sym = snap.symbols[s];
+    if (sym.compareTo(fromCode) < 0) continue;
+    if (toCode != null && sym.compareTo(toCode) >= 0) continue;
+    final n = snap.lens[s];
+    final bd = ByteData.sublistView(snap.bytes, snap.offsets[s],
+        snap.offsets[s] + 4 + n * _recBytes);
+    var o = 4;
+    final bars = List<Bar>.filled(n, Bar(date: DateTime(1970), open: 0, high: 0, low: 0, close: 0, volume: 0), growable: false);
+    for (var i = 0; i < n; i++) {
+      final ymd = bd.getInt32(o, Endian.little);
+      final d = dateCache.putIfAbsent(
+          ymd,
+          () => DateTime(
+              ymd ~/ 10000, (ymd ~/ 100) % 100, ymd % 100));
+      bars[i] = Bar(
+        date: d,
+        open: bd.getFloat64(o + 4, Endian.little),
+        high: bd.getFloat64(o + 12, Endian.little),
+        low: bd.getFloat64(o + 20, Endian.little),
+        close: bd.getFloat64(o + 28, Endian.little),
+        volume: bd.getFloat64(o + 36, Endian.little),
+        amount: bd.getFloat64(o + 44, Endian.little),
+      );
+      o += _recBytes;
+    }
+    out.add(StockData(symbol: sym, bars: bars));
+  }
+  return out;
+}
