@@ -181,11 +181,14 @@ void main() {
   });
 
   test('backtestDetailPathFor：stock.db → 同目录 stock-backtest-detail.bin', () {
+    // 输入路径必须用平台分隔符——实现按 Platform.pathSeparator 切目录。
+    final sep = Platform.pathSeparator;
+    String p(List<String> parts) => parts.join(sep);
     expect(
-        backtestDetailPathFor('/tmp/x/stock.db'),
-        '/tmp/x${Platform.pathSeparator}stock-backtest-detail.bin');
+        backtestDetailPathFor(p(['tmp', 'x', 'stock.db'])),
+        p(['tmp', 'x', 'stock-backtest-detail.bin']));
     expect(
-        backtestDetailPathFor('/tmp/x/custom.db3'),
-        '/tmp/x${Platform.pathSeparator}custom.db3-backtest-detail.bin');
+        backtestDetailPathFor(p(['tmp', 'x', 'custom.db3'])),
+        p(['tmp', 'x', 'custom.db3-backtest-detail.bin']));
   });
 }

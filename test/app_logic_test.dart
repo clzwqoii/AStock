@@ -26,7 +26,19 @@ void main() {
     tmp = await Directory.systemTemp.createTemp('applogic');
     dbPath = '${tmp.path}/t.db';
   });
-  tearDown(() => tmp.deleteSync(recursive: true));
+  tearDown(() async {
+    // Windows：isolate/sqlite 连接在测试结束后短暂未释放，删除打开中的文件报 errno 32，
+    // 重试等锁释放（POSIX 无此问题）。
+    for (var i = 0; i < 20; i++) {
+      try {
+        tmp.deleteSync(recursive: true);
+        return;
+      } on FileSystemException {
+        await Future<void>.delayed(const Duration(milliseconds: 100));
+      }
+    }
+    tmp.deleteSync(recursive: true);
+  });
 
   test('runScreening 返回展示行（涨跌/涨跌幅/量比/成交额/MA20）与数据截止日', () async {
     seedStocks(dbPath);

@@ -90,12 +90,12 @@ BEGIN
         BLOCK "040904e4"
         BEGIN
             VALUE "CompanyName", "com.chenliang" "\0"
-            VALUE "FileDescription", "stock" "\0"
+            VALUE "FileDescription", "A股选股台" "\0"
             VALUE "FileVersion", VERSION_AS_STRING "\0"
-            VALUE "InternalName", "stock" "\0"
+            VALUE "InternalName", "astock" "\0"
             VALUE "LegalCopyright", "Copyright (C) 2026 com.chenliang. All rights reserved." "\0"
-            VALUE "OriginalFilename", "stock.exe" "\0"
-            VALUE "ProductName", "stock" "\0"
+            VALUE "OriginalFilename", "ASTock.exe" "\0"
+            VALUE "ProductName", "A股选股台" "\0"
             VALUE "ProductVersion", VERSION_AS_STRING "\0"
         END
     END
