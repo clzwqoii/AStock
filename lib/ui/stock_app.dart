@@ -91,9 +91,10 @@ class _StockAppState extends State<StockApp> with WidgetsBindingObserver {
   late AccentColor _accent = AccentColor.fromName(widget.config.themeAccent);
 
   /// 设置页保存配置的目标文件：移动端由 path_provider 解析（沙盒内），桌面为 ~/.stock/.env。
+  /// Windows 没有 HOME，须退 USERPROFILE，否则装进 Program Files 后写配置被拒。
   late final String _configPath = widget.config.configPath.isNotEmpty
       ? widget.config.configPath
-      : '${Platform.environment['HOME'] ?? '.'}/.stock/.env';
+      : '${Platform.environment['HOME'] ?? Platform.environment['USERPROFILE'] ?? '.'}/.stock/.env';
   final _navigatorKey = GlobalKey<NavigatorState>();
 
   /// 回测报告缓存：启动时读一次，选股页规则列表与回测页共用；

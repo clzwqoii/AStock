@@ -61,13 +61,21 @@ class AppConfig {
   }
 
   /// 读取顺序：进程环境变量 → ~/.stock/.env（App 设置页写入处）→ 当前目录 .env（CLI 开发用）。
-  /// [dbPath] 显式指定时覆盖文件/默认值（移动端沙盒路径用）。
-  static AppConfig load({String? envFile, String? dbPath}) {
-    final home = Platform.environment['HOME'] ?? '.';
+  /// [dbPath] 显式指定时覆盖文件/默认值（移动端沙盒路径用）；
+  /// [environment]/[isWindows] 可注入测试（Windows 没有 HOME，须退 USERPROFILE）。
+  static AppConfig load({
+    String? envFile,
+    String? dbPath,
+    Map<String, String>? environment,
+    bool? isWindows,
+  }) {
+    final env = environment ?? Platform.environment;
+    final win = isWindows ?? Platform.isWindows;
+    final home = env['HOME'] ?? (win ? env['USERPROFILE'] : null) ?? '.';
     final defaultHome = '$home/.stock';
     final files = envFile != null ? [envFile] : ['$defaultHome/.env', '.env'];
     final fileVars = loadDotEnv(files);
-    String pick(String key) => Platform.environment[key] ?? fileVars[key] ?? '';
+    String pick(String key) => env[key] ?? fileVars[key] ?? '';
     final fileDb = pick('STOCK_DB_PATH');
     return AppConfig(
       tushareToken: pick('TUSHARE_TOKEN'),

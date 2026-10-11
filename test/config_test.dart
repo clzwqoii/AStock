@@ -59,6 +59,17 @@ STOCK_DB_PATH=/tmp/stock.db
       expect(cfg.configPath, endsWith('.stock/.env'));
       expect(cfg.dbPath, endsWith('.stock/stock.db'));
     });
+
+    test('Windows 无 HOME 时退 USERPROFILE，不落当前目录', () {
+      // 双击快捷方式启动时工作目录在 Program Files，HOME 缺失曾导致
+      // 配置/库写进安装目录被系统拒绝，欢迎页保存 token 直接卡死。
+      final cfg = AppConfig.load(
+        environment: {'USERPROFILE': r'C:\Users\tester'},
+        isWindows: true,
+      );
+      expect(cfg.configPath, r'C:\Users\tester' '/.stock/.env');
+      expect(cfg.dbPath, r'C:\Users\tester' '/.stock/stock.db');
+    });
   });
 
   group('主题色配置', () {
