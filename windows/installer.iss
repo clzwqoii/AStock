@@ -3,7 +3,7 @@
 ;   ISCC.exe windows\installer.iss
 ; 产物：build\installer\AStock-<版本>-Windows-Setup.exe
 
-#define AppVersion "2.6.7"
+#define AppVersion "2.6.8"
 #define AppName "A股选股台"
 #define ExeName "ASTock"
 
