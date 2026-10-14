@@ -18,6 +18,7 @@ class SyncResult {
     this.latestDate,
     this.earliestDate,
     this.failedSymbols = 0,
+    this.lastClosedDate,
   });
 
   /// 本次实际拉取的交易日数。
@@ -36,6 +37,12 @@ class SyncResult {
   /// 逐股备源拉取失败的股票只数（单只失败不中断，但必须在回执里可见，
   /// 否则大量失败也显示"回补完成"，用户以为数据齐了）。
   final int failedSymbols;
+
+  /// 本次日历口径下的最近已收盘交易日（`YYYYMMDD`）；无候选为 null。
+  /// 心跳判据（见 app_logic 的 runSync）：库水位 ≥ 它才算"确实补齐到最近收盘日"。
+  /// tushare 当日数据 17:00 后仍有发布延迟，抢跑拉到空行也"无失败"，
+  /// 只有水位对照才能区分"补齐了"与"白跑一趟"。
+  final String? lastClosedDate;
 }
 
 /// 同步规则：
@@ -270,7 +277,8 @@ class SyncService {
         rows: rows,
         latestDate: _repo.maxTradeDate(),
         earliestDate: _repo.minTradeDate(),
-        failedSymbols: failedSymbols);
+        failedSymbols: failedSymbols,
+        lastClosedDate: closedOpen.isEmpty ? null : closedOpen.last);
   }
 
   bool get _hasPerStockSources => eastmoney != null || sina != null;

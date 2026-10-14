@@ -1199,8 +1199,14 @@ Future<SyncResult> runSync({
             fromDate: fromDate,
             force: force,
             rateDelay: rateDelay);
-    // 只有本轮无失败才记心跳：有备源失败时库内仍缺数据，下次启动必须重试。
-    if (result.failedSymbols == 0) {
+    // 只有「无失败且库内确实补到最近已收盘交易日」才记心跳：有备源失败时库内
+    // 仍缺数据；抢跑时（17:00 后、tushare 当日数据发布前）同步拉到空行也"无
+    // 失败"，若照记心跳，同一收盘边界内的后续同步全部早退，当天数据整晚进不来
+    // （回补能绕过早退拉到，所以只表现为"增量同步失效"）。
+    final caughtUp = result.latestDate != null &&
+        (result.lastClosedDate == null ||
+            result.latestDate!.compareTo(result.lastClosedDate!) >= 0);
+    if (result.failedSymbols == 0 && caughtUp) {
       repo.setSyncCheckedAt(t.millisecondsSinceEpoch);
     }
     // 收尾 best-effort 重建快照（P5）：失败不吞同步结果——快照缺失/过期时

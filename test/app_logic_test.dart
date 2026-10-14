@@ -1233,6 +1233,67 @@ void main() {
     );
     expect(clients, 2, reason: '新收盘边界后必须真同步');
   });
+
+  test('C 发布前抢跑不得烧心跳：当天数据发布后重试必须拉到（6点后同步不到当天的根因）', () async {
+    // 库内止于 20260929；tushare 日历 20260930 开市。
+    final seed = BarRepository(dbPath);
+    seed.upsertBars([
+      DailyRow(
+          tsCode: 'S1.SH',
+          tradeDate: '20260929',
+          open: 10.0,
+          high: 10.0,
+          low: 10.0,
+          close: 10.0,
+          vol: 100.0,
+          amount: 1),
+    ]);
+    seed.close();
+
+    var published = false;
+    var clients = 0;
+    final client = fakeSyncClient((td) => published
+        ? [
+            ['S1.SH', td, 1.0, 1.0, 1.0, 1.0, 100.0, 10.0]
+          ]
+        : []);
+    TushareClient factory(String _) {
+      clients++;
+      return client;
+    }
+
+    // 17:30：当天已收盘但 tushare 数据还没发布，daily 返回空行、库水位不动。
+    final r1 = await runSync(
+      dbPath: dbPath,
+      token: 'tok',
+      now: () => DateTime(2026, 9, 30, 17, 30),
+      clientFactory: factory,
+    );
+    expect(r1.latestDate, '20260929');
+    expect(clients, 1);
+
+    // 18:30：数据已发布，重试必须真拉——17:30 若记了心跳，这里会整段早退
+    published = true;
+    final r2 = await runSync(
+      dbPath: dbPath,
+      token: 'tok',
+      now: () => DateTime(2026, 9, 30, 18, 30),
+      clientFactory: factory,
+    );
+    expect(clients, 2, reason: '库内未补到最近收盘日时不得早退');
+    expect(r2.rows, 1);
+    expect(r2.latestDate, '20260930');
+
+    // 补齐后同一收盘边界内再启动：恢复早退（C 优化的本意）
+    final r3 = await runSync(
+      dbPath: dbPath,
+      token: 'tok',
+      now: () => DateTime(2026, 9, 30, 19),
+      clientFactory: (_) => throw StateError('补齐后必须早退，不得创建客户端'),
+    );
+    expect(r3.dates, 0);
+    expect(r3.rows, 0);
+  });
 }
 
 final dailySeen = <String>[];
