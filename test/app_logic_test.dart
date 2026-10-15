@@ -4,6 +4,7 @@ import 'dart:io';
 import 'package:flutter_test/flutter_test.dart';
 import 'package:http/http.dart' as http;
 import 'package:http/testing.dart';
+import 'package:sqlite3/sqlite3.dart';
 import 'package:stock/app_logic.dart';
 import 'package:stock/core/backtest.dart';
 import 'package:stock/core/market.dart';
@@ -1293,6 +1294,47 @@ void main() {
     );
     expect(r3.dates, 0);
     expect(r3.rows, 0);
+  });
+
+  test('D 旧版遗留心跳作废：升级后同一收盘边界内首次点同步必须真跑（"点了没反应"的存量根因）', () async {
+    // 库内止于 20260929（同 C2：tushare 日历 20260930 开市且已收盘）。
+    final seed = BarRepository(dbPath);
+    seed.upsertBars([
+      DailyRow(
+          tsCode: 'S1.SH',
+          tradeDate: '20260929',
+          open: 10.0,
+          high: 10.0,
+          low: 10.0,
+          close: 10.0,
+          vol: 100.0,
+          amount: 1),
+    ]);
+    seed.close();
+
+    // 模拟 ≤2.6.7 旧版当晚 17 点后抢跑落下的心跳（旧键 checkedAt）。
+    // 2.6.8 只改了写入判据，拦不住这类存量值——升级后点同步会被它整段早退。
+    final raw = sqlite3.open(dbPath);
+    raw.execute("INSERT OR REPLACE INTO sync_meta(k, v) VALUES ('checkedAt', ?)",
+        [DateTime(2026, 9, 30, 17, 30).millisecondsSinceEpoch]);
+    raw.dispose();
+
+    var clients = 0;
+    final client = fakeSyncClient((td) => [
+          ['S1.SH', td, 1.0, 1.0, 1.0, 1.0, 100.0, 10.0],
+        ]);
+    final r = await runSync(
+      dbPath: dbPath,
+      token: 'tok',
+      now: () => DateTime(2026, 9, 30, 18, 30), // 同一收盘边界内
+      clientFactory: (_) {
+        clients++;
+        return client;
+      },
+    );
+    expect(clients, 1, reason: '遗留心跳必须被作废，升级后首次同步要真跑');
+    expect(r.rows, 1);
+    expect(r.latestDate, '20260930');
   });
 }
 

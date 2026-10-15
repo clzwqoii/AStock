@@ -171,14 +171,18 @@ class BarRepository {
   /// 启动同步早退判据用（见 app_logic 的 runSync）：trade_cal 限 1 次/小时、
   /// stock_basic 限 1 次/分，重复启动不该反复打网络。存库内而非旁挂文件——
   /// 少一个会与应用数据不同步的孤儿文件。
+  ///
+  /// 键名带 V2：≤2.6.7 会在抢跑空拉后照记心跳，存量值在升级后同一收盘边界内
+  /// 会把首次同步整段早退（表现为"点同步没反应"）。换键一次性作废旧值，
+  /// 升级后首跑必真同步；旧行留在表里无害。
   int? syncCheckedAt() {
-    final r = _db.select("SELECT v FROM sync_meta WHERE k = 'checkedAt'");
+    final r = _db.select("SELECT v FROM sync_meta WHERE k = 'checkedAtV2'");
     return r.isEmpty ? null : r.first.values[0] as int;
   }
 
   void setSyncCheckedAt(int epochMs) {
     _db.execute('INSERT OR REPLACE INTO sync_meta(k, v) VALUES (?, ?)',
-        ['checkedAt', epochMs]);
+        ['checkedAtV2', epochMs]);
   }
 
   void upsertStocks(List<({String tsCode, String name})> stocks) {

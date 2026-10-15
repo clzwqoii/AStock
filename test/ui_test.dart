@@ -124,6 +124,31 @@ Future<void> scrollTo(WidgetTester tester, Finder finder) =>
       expect(find.textContaining('同步完成'), findsOneWidget);
     });
 
+    testWidgets('目标日拉到 0 行（数据源发布延迟）：回执说"尚未发布"，不谎报"已齐全"', (tester) async {
+      await tester.pumpWidget(StockApp(
+        config: AppConfig(tushareToken: 'tok', dbPath: dbPath),
+        showOnboarding: false,
+        runSyncFn: ({required dbPath, required token, onProgress}) async =>
+            const SyncResult(
+                dates: 1,
+                rows: 0,
+                latestDate: '20261014',
+                lastClosedDate: '20261015'),
+        runBacktestFn: (_, {reportPath}) async => BacktestReport(
+          generatedAt: DateTime(2026, 10, 5).toIso8601String(),
+          horizons: const [10],
+          stockCount: 0,
+          baseline: const {},
+          results: const {},
+        ),
+      ));
+      await tester.pump();
+      await tester.pump(const Duration(seconds: 1));
+
+      expect(find.textContaining('尚未发布'), findsOneWidget);
+      expect(find.textContaining('数据已齐全'), findsNothing);
+    });
+
     testWidgets('无 token 时不触发同步', (tester) async {
       var calls = 0;
       await tester.pumpWidget(StockApp(

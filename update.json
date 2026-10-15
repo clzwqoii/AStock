@@ -1,9 +1,9 @@
 {
-  "version": "2.6.8",
+  "version": "2.6.9",
   "url": "https://gitee.com/clzwqoii/astock/releases",
   "assets": {
-    "android": "https://gitee.com/clzwqoii/astock/releases/download/v2.6.8/AStock-2.6.8-Android.apk",
-    "macos": "https://gitee.com/clzwqoii/astock/releases/download/v2.6.8/AStock-2.6.8-macOS.zip",
-    "macos_dmg": "https://gitee.com/clzwqoii/astock/releases/download/v2.6.8/AStock-2.6.8-macOS.dmg"
+    "android": "https://gitee.com/clzwqoii/astock/releases/download/v2.6.9/AStock-2.6.9-Android.apk",
+    "macos": "https://gitee.com/clzwqoii/astock/releases/download/v2.6.9/AStock-2.6.9-macOS.zip",
+    "macos_dmg": "https://gitee.com/clzwqoii/astock/releases/download/v2.6.9/AStock-2.6.9-macOS.dmg"
   }
 }

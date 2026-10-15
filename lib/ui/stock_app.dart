@@ -291,7 +291,11 @@ class _StockAppState extends State<StockApp> with WidgetsBindingObserver {
       // 库内最早日期是回补的验收锚点：选了 3 年而最早日期晚于 3 年前，
       // 光看行数看不出来。备源单只失败同理——大面积失败也显示"完成"。
       final receipt = StringBuffer('$doneLabel：');
-      if (r.dates == 0 && r.rows == 0) {
+      if (r.dates > 0 && r.rows == 0 && r.failedSymbols == 0) {
+        // 目标交易日试过但一行没进：数据源还没发（tushare 17 点后发布延迟
+        // 是常态）。此前的"新增 1 个交易日、0 行"自相矛盾，会被当成同步坏了。
+        receipt.write('数据源尚未发布新数据，稍后重试');
+      } else if (r.dates == 0 && r.rows == 0) {
         receipt.write('数据已齐全，无需新增交易日');
       } else {
         receipt.write('新增 ${r.dates} 个交易日、${r.rows} 行');
