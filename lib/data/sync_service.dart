@@ -19,6 +19,7 @@ class SyncResult {
     this.earliestDate,
     this.failedSymbols = 0,
     this.lastClosedDate,
+    this.todaySettled = false,
   });
 
   /// 本次实际拉取的交易日数。
@@ -43,6 +44,11 @@ class SyncResult {
   /// tushare 当日数据 17:00 后仍有发布延迟，抢跑拉到空行也"无失败"，
   /// 只有水位对照才能区分"补齐了"与"白跑一趟"。
   final String? lastClosedDate;
+
+  /// 当日（[sync] 传入 now 的日期）是否"已了结"：盘中/周末/节假日/数据已落库
+  /// 均为 true；收盘后当天数据缺失且无法自证时为 false（心跳判据最后一道，
+  /// 防止"日历看不见当天"时把没同步到位的状态记成已补齐）。
+  final bool todaySettled;
 }
 
 /// 同步规则：
@@ -176,6 +182,12 @@ class SyncService {
     // 日历是否来自降级的工作日候选：降级名单里混着节假日（永远拉不到行），
     // 缺口重试必须跳过，否则每个节假日白烧一次 tushare 配额。
     var calendarDegraded = false;
+    List<String> weekdayCandidates() => [
+          for (var d = today.subtract(Duration(days: calendarWindowDays));
+              !d.isAfter(today);
+              d = d.add(const Duration(days: 1)))
+            if (d.weekday >= DateTime.monday && d.weekday <= DateTime.friday) fmt(d)
+        ];
     // 网络层异常（DNS 失败/被墙/断网）与 tushare 错误码同样要降级：
     // 真机实测过 api.tushare.pro 解析失败时整个同步中断、一格数据都没进库。
     try {
@@ -188,20 +200,24 @@ class SyncService {
     } on Exception {
       calendarDegraded = true;
       stderr.writeln('交易日历不可用，改用工作日候选（节假日会拉到空数据并自动跳过）');
-      candidates = [];
-      for (var d = today.subtract(Duration(days: calendarWindowDays));
-          !d.isAfter(today);
-          d = d.add(const Duration(days: 1))) {
-        if (d.weekday >= DateTime.monday && d.weekday <= DateTime.friday) {
-          candidates.add(fmt(d));
-        }
-      }
+      candidates = weekdayCandidates();
+    }
+    if (!calendarDegraded && candidates.isEmpty) {
+      // 1100 天窗口不可能一个开市日都没有：解析出了结果但全是休市 =
+      // 解析形态不匹配（安卓 2026-10-16 实证：is_open 给数字时整表被滤空，
+      // 同步"看不见今天"，整晚早退）。按降级处理，明天照常重试。
+      calendarDegraded = true;
+      stderr.writeln('交易日历内容为空（解析异常？），改用工作日候选');
+      candidates = weekdayCandidates();
     }
 
     // 当日数据以 17 点为可用截止（tushare 收盘后更新）；此前视为未收盘，跳过。
     bool closed(String d) =>
         d.compareTo(todayStr) < 0 || (d == todayStr && today.hour >= 17);
     final closedOpen = [for (final d in candidates) if (closed(d)) d];
+    // 权威日历对"今天开不开市"的回答；降级时无从判断，null。
+    final bool? calendarTodayOpen =
+        calendarDegraded ? null : candidates.contains(todayStr);
 
     final synced = _repo.maxTradeDate();
     final inRange = fromDate == null && toDate == null;
@@ -268,17 +284,61 @@ class SyncService {
         rows += await _retryMissingDates(remaining, onProgress, rateDelay);
       }
     }
+
+    // 当日结算（仅水位线增量模式）：判断"今天"是否已了结，供心跳判据使用。
+    // 默认 true——盘中/周末/节假日都无需等当天数据；只有"收盘后、工作日、
+    // 库内当天数据还明显不齐"才可能置 false（此时不得写心跳，留待重试）。
+    var todaySettled = true;
+    var todayFilledBySnapshot = false;
+    if (inRange &&
+        today.weekday >= DateTime.monday &&
+        today.weekday <= DateTime.friday &&
+        closed(todayStr)) {
+      final ref = _repo.referenceRowCount(beforeDate: todayStr, days: 5);
+      final threshold = ref == null ? 1 : (ref ~/ 2 < 1 ? 1 : ref ~/ 2);
+      if (_repo.rowCountOnDate(todayStr) >= threshold) {
+        // 主循环已拉齐（或此前已有），无需任何动作。
+      } else if (!calendarDegraded && calendarTodayOpen == false) {
+        // 权威日历明确今天不开市：本就没有当天数据可等。
+      } else if (eastmoney == null) {
+        // 无东财可自证：不确认，保持重试（宁可多跑一次也不放行心跳）。
+        todaySettled = false;
+      } else {
+        try {
+          final snap = await eastmoney!.snapshotBars(tradeDate: todayStr);
+          if (snap.isNotEmpty) {
+            _repo.upsertBars(snap);
+            rows += snap.length;
+            if (!targets.contains(todayStr)) todayFilledBySnapshot = true;
+            onProgress?.call('$todayStr ${snap.length} 行（东财当日快照）');
+            // 用入库后的总行数对照阈值（与上方预检同口径）：快照之外若已有
+            // 主循环拉到的部分行，两者相加才算完整度。
+            todaySettled = _repo.rowCountOnDate(todayStr) >= threshold;
+          } else {
+            // 空快照且没走"权威节假日"分支：要么日历降级、要么权威日历说
+            // 今天开市——都只能按"数据还没发布"处理，保持重试。
+            todaySettled = false;
+            stderr.writeln('当日快照为空，当天数据未落库，保持重试');
+          }
+        } on Exception catch (e) {
+          todaySettled = false; // 无凭据不放行心跳
+          stderr.writeln('当日快照获取失败，保持重试：$e');
+        }
+      }
+    }
+
     if (needNameBackfill) {
       stderr.writeln('名单源均不可用，改用逐股行情回填名称（一次性，约 10 分钟）');
       await _backfillNames(onProgress);
     }
     return SyncResult(
-        dates: targets.length,
+        dates: targets.length + (todayFilledBySnapshot ? 1 : 0),
         rows: rows,
         latestDate: _repo.maxTradeDate(),
         earliestDate: _repo.minTradeDate(),
         failedSymbols: failedSymbols,
-        lastClosedDate: closedOpen.isEmpty ? null : closedOpen.last);
+        lastClosedDate: closedOpen.isEmpty ? null : closedOpen.last,
+        todaySettled: todaySettled);
   }
 
   bool get _hasPerStockSources => eastmoney != null || sina != null;

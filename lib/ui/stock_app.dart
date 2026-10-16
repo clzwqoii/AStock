@@ -34,6 +34,7 @@ class StockApp extends StatefulWidget {
     this.launchUrl,
     this.showOnboarding = true,
     this.updateNoticeCheck,
+    this.resumeSyncCooldown = const Duration(minutes: 10),
   });
 
   final AppConfig config;
@@ -70,6 +71,10 @@ class StockApp extends StatefulWidget {
   /// 测试注入假实现，生产用 [checkUpdateNotice]（读 build 号比对）。
   final Future<bool> Function()? updateNoticeCheck;
 
+  /// 回到前台自动同步的冷却时长：距上次同步启动不足该值时，resumed 不再
+  /// 触发（切一下 App 就重跑一轮同步纯烧配额）。测试注入 Duration.zero。
+  final Duration resumeSyncCooldown;
+
   @override
   State<StockApp> createState() => _StockAppState();
 }
@@ -88,6 +93,10 @@ class _StockAppState extends State<StockApp> with WidgetsBindingObserver {
 
   /// 同步完成后库内最新交易日（头部同步徽标用）。
   String? _syncedDate;
+
+  /// 上次「增量同步启动」的真实时刻：回到前台自动同步的冷却基准。
+  /// initState 那次也记——防止冷启动后紧随的 resumed 立刻再跑一轮。
+  DateTime? _lastSyncStartedAt;
   late AccentColor _accent = AccentColor.fromName(widget.config.themeAccent);
 
   /// 设置页保存配置的目标文件：移动端由 path_provider 解析（沙盒内），桌面为 ~/.stock/.env。
@@ -168,6 +177,20 @@ class _StockAppState extends State<StockApp> with WidgetsBindingObserver {
   @override
   void didHaveMemoryPressure() => _screening.releasePool();
 
+  /// 回到前台：距上次同步启动超过冷却时长就静默补一轮增量。
+  /// 安卓收不到任何"收盘"事件，用户晚上回到 App 是唯一触发点；不补的话，
+  /// 白天切后台挂着的应用会整天看不到新数据（安卓 2026-10-16 的实证场景）。
+  @override
+  void didChangeAppLifecycleState(AppLifecycleState state) {
+    if (state != AppLifecycleState.resumed) return;
+    final last = _lastSyncStartedAt;
+    if (last != null &&
+        DateTime.now().difference(last) < widget.resumeSyncCooldown) {
+      return;
+    }
+    _startSync(quiet: true);
+  }
+
   @override
   void dispose() {
     WidgetsBinding.instance.removeObserver(this);
@@ -239,17 +262,23 @@ class _StockAppState extends State<StockApp> with WidgetsBindingObserver {
   }
 
   /// 增量同步：只拉本地缺的交易日，库里数据齐全时接口调用为 0。
-  Future<void> _startSync() => _runSync(
-        doneLabel: '同步完成',
-        failLabel: '同步',
-        task: () => widget.runSyncFn(
-          dbPath: _config.dbPath,
-          token: _config.tushareToken,
-          onProgress: (m) {
-            if (mounted) setState(() => _syncMsg = '同步中：$m');
-          },
-        ),
-      );
+  /// [quiet]（回到前台自动同步）：进度与无新增的结果都不写回执，
+  /// 不打断用户正在看的消息；有新数据/失败时照常显示。
+  Future<void> _startSync({bool quiet = false}) {
+    _lastSyncStartedAt = DateTime.now();
+    return _runSync(
+      doneLabel: '同步完成',
+      failLabel: '同步',
+      quiet: quiet,
+      task: () => widget.runSyncFn(
+        dbPath: _config.dbPath,
+        token: _config.tushareToken,
+        onProgress: (m) {
+          if (!quiet && mounted) setState(() => _syncMsg = '同步中：$m');
+        },
+      ),
+    );
+  }
 
   /// 回补历史：绕过水位线补齐所选年数以来库里缺失的交易日；
   /// [force] 忽略已入库数据整段重拉（修半截日/口径污染）。
@@ -274,6 +303,7 @@ class _StockAppState extends State<StockApp> with WidgetsBindingObserver {
   Future<void> _runSync({
     required String doneLabel,
     required String failLabel,
+    bool quiet = false,
     required Future<SyncResult> Function() task,
   }) async {
     if (_syncing) return;
@@ -283,31 +313,38 @@ class _StockAppState extends State<StockApp> with WidgetsBindingObserver {
     }
     setState(() {
       _syncing = true;
-      _syncMsg = null;
+      if (!quiet) _syncMsg = null;
     });
     try {
       final r = await task();
       if (!mounted) return;
-      // 库内最早日期是回补的验收锚点：选了 3 年而最早日期晚于 3 年前，
-      // 光看行数看不出来。备源单只失败同理——大面积失败也显示"完成"。
-      final receipt = StringBuffer('$doneLabel：');
-      if (r.dates > 0 && r.rows == 0 && r.failedSymbols == 0) {
-        // 目标交易日试过但一行没进：数据源还没发（tushare 17 点后发布延迟
-        // 是常态）。此前的"新增 1 个交易日、0 行"自相矛盾，会被当成同步坏了。
-        receipt.write('数据源尚未发布新数据，稍后重试');
-      } else if (r.dates == 0 && r.rows == 0) {
-        receipt.write('数据已齐全，无需新增交易日');
+      // 静默规则：回到前台的自动同步、无新增且无失败 → 不写回执（保留原
+      // 消息），水位徽标/覆盖情况/报告照常更新。有新数据或失败照常显示。
+      final silent = quiet && r.rows == 0 && r.failedSymbols == 0;
+      if (silent) {
+        setState(() => _syncedDate = r.latestDate ?? _syncedDate);
       } else {
-        receipt.write('新增 ${r.dates} 个交易日、${r.rows} 行');
+        // 库内最早日期是回补的验收锚点：选了 3 年而最早日期晚于 3 年前，
+        // 光看行数看不出来。备源单只失败同理——大面积失败也显示"完成"。
+        final receipt = StringBuffer('$doneLabel：');
+        if (r.dates > 0 && r.rows == 0 && r.failedSymbols == 0) {
+          // 目标交易日试过但一行没进：数据源还没发（tushare 17 点后发布延迟
+          // 是常态）。此前的"新增 1 个交易日、0 行"自相矛盾，会被当成同步坏了。
+          receipt.write('数据源尚未发布新数据，稍后重试');
+        } else if (r.dates == 0 && r.rows == 0) {
+          receipt.write('数据已齐全，无需新增交易日');
+        } else {
+          receipt.write('新增 ${r.dates} 个交易日、${r.rows} 行');
+        }
+        if (r.earliestDate != null) receipt.write('，库内最早 ${r.earliestDate}');
+        if (r.failedSymbols > 0) {
+          receipt.write('，${r.failedSymbols} 只备源拉取失败，建议网络稳定后重跑');
+        }
+        setState(() {
+          _syncMsg = receipt.toString();
+          _syncedDate = r.latestDate ?? _syncedDate;
+        });
       }
-      if (r.earliestDate != null) receipt.write('，库内最早 ${r.earliestDate}');
-      if (r.failedSymbols > 0) {
-        receipt.write('，${r.failedSymbols} 只备源拉取失败，建议网络稳定后重跑');
-      }
-      setState(() {
-        _syncMsg = receipt.toString();
-        _syncedDate = r.latestDate ?? _syncedDate;
-      });
       // 有新增数据就重算回测报告，否则选股页规则列表上的胜率还是上周的；
       // 报告缺失（手机首次安装、从没跑过回测）时也要补算——规则排序、
       // 胜率统计行、评分与目标/止损价全都依赖这份报告。
@@ -364,7 +401,7 @@ class _StockAppState extends State<StockApp> with WidgetsBindingObserver {
             coverage: _coverage,
             syncing: _syncing,
             syncMsg: _syncMsg,
-            onSyncPressed: _startSync,
+            onSyncPressed: () => _startSync(),
             onBackfillPressed: _startBackfill,
             accent: _accent,
             onAccentChanged: _setAccent,
@@ -409,7 +446,7 @@ class _StockAppState extends State<StockApp> with WidgetsBindingObserver {
                 syncedDate: _syncedDate,
                 accent: _accent,
                 onAccentChanged: _setAccent,
-                onSyncPressed: _startSync,
+                onSyncPressed: () => _startSync(),
                 onBackfillPressed: _startBackfill,
                 configPath: _configPath,
                 initialToken: _config.tushareToken,

@@ -112,7 +112,10 @@ class TushareClient {
         'trade_cal', {'exchange': 'SSE', 'start_date': startDate, 'end_date': endDate, 'is_open': '0'},
         'cal_date,is_open');
     final out = [
-      for (final it in items) (date: it[0] as String, isOpen: it[1] == '1'),
+      // is_open 可能是字符串 '1'/'0'，也可能直接给数字（安卓 2026-10-16
+      // 实证的形态）——只认字符串会把整张日历静默滤空，同步因此"看不见今天"。
+      for (final it in items)
+        (date: it[0] as String, isOpen: it[1] == '1' || it[1] == 1),
     ]..sort((a, b) => a.date.compareTo(b.date));
     return out;
   }

@@ -1293,4 +1293,226 @@ void main() {
         expect(backfillFromDate(DateTime(2024, 2, 29), 1), '20230301');
       });
     });
+
+  group('当日结算（todaySettled）与东财快照兜底', () {
+    // 1/9(五) 18:00：已收盘工作日。库内水位由各用例自定（多为 1/6）。
+    final now = DateTime(2026, 1, 9, 18);
+
+    http.Response resp(List<String> fields, List<List<dynamic>> items) =>
+        http.Response.bytes(
+          utf8.encode(jsonEncode({
+            'code': 0,
+            'data': {'fields': fields, 'items': items},
+          })),
+          200,
+        );
+
+    /// 假 tushare：日历与逐日 daily 可配。
+    TushareClient ts({
+      List<List<dynamic>>? calItems,
+      List<List<dynamic>> Function(String td)? dailyFor,
+    }) =>
+        TushareClient(
+          token: 'tok',
+          http: MockClient((req) async {
+            final body = jsonDecode(req.body) as Map<String, dynamic>;
+            switch (body['api_name']) {
+              case 'trade_cal':
+                return resp(
+                    ['cal_date', 'is_open'], calItems ?? [['20260109', '1']]);
+              case 'stock_basic':
+                return resp(['ts_code', 'name'], [
+                  ['S1.SH', '一'],
+                  ['S2.SZ', '二'],
+                ]);
+              case 'daily':
+                final td = (body['params'] as Map)['trade_date'] as String;
+                return resp(
+                  ['ts_code', 'trade_date', 'open', 'high', 'low', 'close', 'vol', 'amount'],
+                  dailyFor?.call(td) ??
+                      [
+                        ['S1.SH', td, 1.0, 1.0, 1.0, 1.0, 100.0, 10.0]
+                      ],
+                );
+            }
+            throw StateError('unexpected api');
+          }),
+        );
+
+    /// 假东财快照：返回 [codes] 的当日 clist 行情（f124 = 2026-01-09 15:00 北京时间）。
+    EastmoneyClient emSnapshot(List<String> codes,
+            {bool throwIt = false, void Function()? onCall}) =>
+        EastmoneyClient(
+          http: MockClient((req) async {
+            onCall?.call();
+            if (throwIt) throw http.ClientException('em down');
+            final f124 =
+                DateTime.utc(2026, 1, 9, 7).millisecondsSinceEpoch ~/ 1000;
+            return http.Response.bytes(
+              utf8.encode(jsonEncode({
+                'data': {
+                  'total': codes.length,
+                  'diff': [
+                    for (final c in codes)
+                      {
+                        'f12': c,
+                        'f17': 10.0,
+                        'f15': 11.0,
+                        'f16': 9.5,
+                        'f2': 10.5,
+                        'f5': 100.0,
+                        'f6': 1000000.0,
+                        'f124': f124,
+                      },
+                  ],
+                },
+              })),
+              200,
+            );
+          }),
+        );
+
+    void seed(String date, int n) => repo.upsertBars([
+          for (var i = 0; i < n; i++)
+            DailyRow(
+                tsCode: 'S$i.SH',
+                tradeDate: date,
+                open: 10.0,
+                high: 10.0,
+                low: 10.0,
+                close: 10.0,
+                vol: 100.0,
+                amount: 1),
+        ]);
+
+    test('tushare 当日空行时用东财快照补齐，todaySettled=true', () async {
+      seed('20260106', 2);
+      final r = await SyncService(
+              ts(dailyFor: (td) => td == '20260109' ? [] : []),
+              repo,
+              now: () => now,
+              eastmoney: emSnapshot(['600000', '600519']))
+          .sync();
+
+      expect(r.rows, 2);
+      expect(r.dates, 1);
+      expect(r.latestDate, '20260109');
+      expect(r.todaySettled, isTrue);
+      expect(repo.rowCountOnDate('20260109'), 2);
+    });
+
+    test('日历空表（is_open 全失真）不得丢失今天：降级候选把当天拉回来', () async {
+      seed('20260106', 2);
+      final r = await SyncService(
+              ts(calItems: [], dailyFor: (td) => td == '20260109' ? [] : []),
+              repo,
+              now: () => now,
+              eastmoney: emSnapshot(['600000', '600519']))
+          .sync();
+
+      expect(r.rows, 2, reason: '日历空表时按工作日候选仍须看见今天并补上');
+      expect(r.latestDate, '20260109');
+      expect(r.todaySettled, isTrue);
+    });
+
+    test('当日半截数据（水位已到当天但行数不足）：快照补齐且 dates 计 1', () async {
+      seed('20260106', 4);
+      seed('20260109', 1); // 前一次同步中断留下的半截日
+      final r = await SyncService(ts(), repo,
+              now: () => now, eastmoney: emSnapshot(['600000', '600519']))
+          .sync();
+
+      expect(r.dates, 1, reason: '快照补的当天是本次实际拉取的交易日，要计进回执');
+      expect(r.rows, 2);
+      expect(repo.rowCountOnDate('20260109'), 3, reason: '半截 1 行 + 快照 2 行');
+      expect(r.todaySettled, isTrue);
+    });
+
+    test('快照为空且日历权威开市：todaySettled=false（等数据发布，不放行心跳）', () async {
+      seed('20260106', 2);
+      final r = await SyncService(
+              ts(dailyFor: (td) => []), repo,
+              now: () => now, eastmoney: emSnapshot([]))
+          .sync();
+
+      expect(r.rows, 0);
+      expect(r.todaySettled, isFalse);
+    });
+
+    test('快照异常：todaySettled=false，且不污染其它日期的结果', () async {
+      seed('20260106', 2);
+      final r = await SyncService(
+              ts(
+                calItems: [
+                  ['20260108', '1'],
+                  ['20260109', '1'],
+                ],
+                dailyFor: (td) => td == '20260108'
+                    ? [
+                        ['S1.SH', td, 1.0, 1.0, 1.0, 1.0, 100.0, 10.0]
+                      ]
+                    : [],
+              ),
+              repo,
+              now: () => now,
+              eastmoney: emSnapshot([], throwIt: true))
+          .sync();
+
+      expect(r.rows, 1, reason: '1/8 的行照常入库');
+      expect(r.latestDate, '20260108');
+      expect(r.todaySettled, isFalse);
+    });
+
+    test('权威日历说今天不开市：不触快照直接结算', () async {
+      var emCalls = 0;
+      seed('20260106', 2);
+      final r = await SyncService(
+              ts(calItems: [
+                ['20260106', '1']
+              ]),
+              repo,
+              now: () => DateTime(2026, 1, 8, 18), // 1/8 不在开市名单
+              eastmoney: emSnapshot([], onCall: () => emCalls++))
+          .sync();
+
+      expect(emCalls, 0, reason: '权威节假日不打快照');
+      expect(r.todaySettled, isTrue);
+    });
+
+    test('日历降级且快照为空：无凭据不得结算（宁重试不放行）', () async {
+      seed('20260106', 2);
+      final r = await SyncService(
+              ts(calItems: [], dailyFor: (td) => td == '20260109' ? [] : []),
+              repo,
+              now: () => now,
+              eastmoney: emSnapshot([]))
+          .sync();
+
+      expect(r.todaySettled, isFalse,
+          reason: '两个来源都没当天数据时不得当作"已补齐"烧掉心跳');
+    });
+
+    test('快照行数不足参考阈值：todaySettled=false（半截快照不算齐）', () async {
+      seed('20260106', 10); // 参考行数 10 → 阈值 5
+      final r = await SyncService(ts(dailyFor: (td) => []), repo,
+              now: () => now, eastmoney: emSnapshot(['600000', '600519']))
+          .sync();
+
+      expect(repo.rowCountOnDate('20260109'), 2, reason: '快照照常入库');
+      expect(r.todaySettled, isFalse);
+    });
+
+    test('区间回补模式不触发当日快照', () async {
+      var emCalls = 0;
+      final r = await SyncService(
+              ts(),
+              repo,
+              now: () => now,
+              eastmoney: emSnapshot(['600000'], onCall: () => emCalls++))
+          .sync(fromDate: '20260101', toDate: '20260109');
+
+      expect(emCalls, 0, reason: '回补语义下不做当日结算');
+      expect(r.todaySettled, isTrue, reason: '非增量模式不承担当日等待语义');
+    });
+  });
 }

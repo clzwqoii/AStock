@@ -28,7 +28,7 @@ import 'package:stock/data/tushare_client.dart';
 export 'package:stock/data/bar_repository.dart' show HistoryCoverage;
 
 /// 当前应用版本（发布新包时同步修改，与 pubspec.version 保持一致）。
-const kAppVersion = '2.6.9';
+const kAppVersion = '2.7.0';
 
 /// 更新清单候选源（并发竞速，第一个响应的胜出）。
 /// 国内网络优先命中 Gitee；jsDelivr 镜像可加速 GitHub raw。建仓库后替换为你的地址。
@@ -1203,9 +1203,13 @@ Future<SyncResult> runSync({
     // 仍缺数据；抢跑时（17:00 后、tushare 当日数据发布前）同步拉到空行也"无
     // 失败"，若照记心跳，同一收盘边界内的后续同步全部早退，当天数据整晚进不来
     // （回补能绕过早退拉到，所以只表现为"增量同步失效"）。
+    // lastClosedDate 为 null = 日历整段空白，无从验证补齐与否（安卓 2026-10-16
+    // 实证：解析失真让日历全空，这里曾误判 caughtUp 并烧掉心跳）。
+    // todaySettled = 收盘后当天数据已证实落库（见 SyncService.sync 的当日结算）。
     final caughtUp = result.latestDate != null &&
-        (result.lastClosedDate == null ||
-            result.latestDate!.compareTo(result.lastClosedDate!) >= 0);
+        result.lastClosedDate != null &&
+        result.latestDate!.compareTo(result.lastClosedDate!) >= 0 &&
+        result.todaySettled;
     if (result.failedSymbols == 0 && caughtUp) {
       repo.setSyncCheckedAt(t.millisecondsSinceEpoch);
     }

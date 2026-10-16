@@ -44,6 +44,33 @@ void main() {
     expect(body['fields'], 'ts_code,trade_date,open,high,low,close,vol,amount');
   });
 
+  test('trade_cal 的 is_open 为数字 1/0 时同样按开市解析', () async {
+    // tushare 存在把 is_open 给成数字的返回形态；旧实现 `== '1'` 会把整张
+    // 日历静默滤空 → 同步"看不见今天" → 当晚数据永远进不来（安卓 10-16 实证根因）。
+    final client = TushareClient(
+      token: 'tok',
+      http: MockClient((req) async => http.Response.bytes(
+            utf8.encode(jsonEncode({
+              'code': 0,
+              'data': {
+                'fields': ['cal_date', 'is_open'],
+                'items': [
+                  ['20261015', 1],
+                  ['20261016', 1],
+                  ['20261017', 0],
+                ],
+              },
+            })),
+            200,
+          )),
+    );
+
+    final cal = await client.tradeCal('20261001', '20261031');
+
+    expect([for (final c in cal) '${c.date}:${c.isOpen}'],
+        ['20261015:true', '20261016:true', '20261017:false']);
+  });
+
   test('超出单页上限时自动翻页', () async {
     final total = List.generate(5, (i) => ['00000$i.SZ', '20260930', 1.0, 2.0, 0.5, 1.5, 100.0 + i, 50.0]);
     final offsets = <int>[];

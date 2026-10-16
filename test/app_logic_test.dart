@@ -1262,6 +1262,17 @@ void main() {
       clients++;
       return client;
     }
+    // 东财当日快照兜底也会被走到（17:30 那天）：注入空快照假实现，
+    // 既避免打到真实网络，也断言"快照空 → 不烧心跳，等发布"。
+    var emCalls = 0;
+    EastmoneyClient emptyEm() => EastmoneyClient(
+        http: MockClient((req) async {
+          emCalls++;
+          return http.Response.bytes(
+            utf8.encode(jsonEncode({'data': {'total': 0, 'diff': []}})),
+            200,
+          );
+        }));
 
     // 17:30：当天已收盘但 tushare 数据还没发布，daily 返回空行、库水位不动。
     final r1 = await runSync(
@@ -1269,9 +1280,12 @@ void main() {
       token: 'tok',
       now: () => DateTime(2026, 9, 30, 17, 30),
       clientFactory: factory,
+      eastmoneyFactory: emptyEm,
     );
     expect(r1.latestDate, '20260929');
     expect(clients, 1);
+    expect(emCalls, 1, reason: '17:30 tushare 当日空行时必须尝试东财快照兜底');
+    expect(r1.todaySettled, isFalse, reason: '快照也为空时不得放行心跳');
 
     // 18:30：数据已发布，重试必须真拉——17:30 若记了心跳，这里会整段早退
     published = true;
@@ -1280,10 +1294,12 @@ void main() {
       token: 'tok',
       now: () => DateTime(2026, 9, 30, 18, 30),
       clientFactory: factory,
+      eastmoneyFactory: emptyEm,
     );
     expect(clients, 2, reason: '库内未补到最近收盘日时不得早退');
     expect(r2.rows, 1);
     expect(r2.latestDate, '20260930');
+    expect(emCalls, 1, reason: 'tushare 已补齐当天，不该再打快照');
 
     // 补齐后同一收盘边界内再启动：恢复早退（C 优化的本意）
     final r3 = await runSync(
@@ -1334,6 +1350,146 @@ void main() {
     );
     expect(clients, 1, reason: '遗留心跳必须被作废，升级后首次同步要真跑');
     expect(r.rows, 1);
+    expect(r.latestDate, '20260930');
+  });
+
+  test('E 日历空表不得烧心跳：当天数据未发布时 21 点重试必须真拉', () async {
+    // 安卓 10-16 实证的根因形态：is_open 类型失真/内容异常让日历整表失效
+    // （无守卫时 candidates 空 → "无新交易日" → caughtUp 误判 → 烧心跳整晚早退）。
+    final seed = BarRepository(dbPath);
+    seed.upsertBars([
+      DailyRow(
+          tsCode: 'S1.SH',
+          tradeDate: '20260929',
+          open: 10.0,
+          high: 10.0,
+          low: 10.0,
+          close: 10.0,
+          vol: 100.0,
+          amount: 1),
+    ]);
+    seed.close();
+
+    var published = false;
+    var clients = 0;
+    // 日历 items 为空（模拟失真的 S 形态）；daily 正常、按发布状态给行。
+    final client = TushareClient(
+      token: 'tok',
+      http: MockClient((req) async {
+        final body = jsonDecode(req.body) as Map<String, dynamic>;
+        final td = (body['params'] as Map)['trade_date'] as String?;
+        return http.Response.bytes(
+          utf8.encode(jsonEncode({
+            'code': 0,
+            'data': switch (body['api_name'] as String) {
+              'trade_cal' => {'fields': ['cal_date', 'is_open'], 'items': []},
+              'daily' => {
+                  'fields': [
+                    'ts_code',
+                    'trade_date',
+                    'open',
+                    'high',
+                    'low',
+                    'close',
+                    'vol',
+                    'amount'
+                  ],
+                  'items': published
+                      ? [
+                          [
+                            'S1.SH',
+                            td,
+                            1.0,
+                            1.0,
+                            1.0,
+                            1.0,
+                            100.0,
+                            10.0
+                          ]
+                        ]
+                      : <List<dynamic>>[],
+                },
+              _ => {'fields': ['ts_code', 'name'], 'items': <List<dynamic>>[]},
+            },
+          })),
+          200,
+        );
+      }),
+    );
+    TushareClient factory(String _) {
+      clients++;
+      return client;
+    }
+
+    EastmoneyClient emptyEm() => EastmoneyClient(
+        http: MockClient((req) async => http.Response.bytes(
+              utf8.encode(jsonEncode({'data': {'total': 0, 'diff': []}})),
+              200,
+            )));
+
+    // 20:00：日历空表、tushare 未发布、东财快照也为空。
+    // 关键：重试通道必须保持打开（不得写心跳）。
+    final r1 = await runSync(
+      dbPath: dbPath,
+      token: 'tok',
+      now: () => DateTime(2026, 9, 30, 20),
+      clientFactory: factory,
+      eastmoneyFactory: emptyEm,
+    );
+    expect(r1.latestDate, '20260929');
+    expect(r1.todaySettled, isFalse, reason: '无凭据不得结算');
+
+    // 21:00：数据已发布，重试必须真拉——20:00 若烧了心跳，这里会整段早退。
+    published = true;
+    final r2 = await runSync(
+      dbPath: dbPath,
+      token: 'tok',
+      now: () => DateTime(2026, 9, 30, 21),
+      clientFactory: factory,
+      eastmoneyFactory: emptyEm,
+    );
+    expect(clients, 2, reason: '当日未补齐时不得早退');
+    expect(r2.latestDate, '20260930');
+    expect(r2.todaySettled, isTrue);
+  });
+
+  test('E2 存量 checkedAtV2 心跳作废：升级后同一收盘边界内首次同步必须真跑', () async {
+    // V2 值是 F1 事故期"当天没数据也敢记"的坏值；换成 V3 后，同边界内的
+    // 应用重启不得被它整晚早退（与 'D' 对 V1 的保障同款）。
+    final seed = BarRepository(dbPath);
+    seed.upsertBars([
+      DailyRow(
+          tsCode: 'S1.SH',
+          tradeDate: '20260929',
+          open: 10.0,
+          high: 10.0,
+          low: 10.0,
+          close: 10.0,
+          vol: 100.0,
+          amount: 1),
+    ]);
+    seed.close();
+
+    final raw = sqlite3.open(dbPath);
+    raw.execute(
+        "INSERT OR REPLACE INTO sync_meta(k, v) VALUES ('checkedAtV2', ?)",
+        [DateTime(2026, 9, 30, 18).millisecondsSinceEpoch]);
+    raw.dispose();
+
+    var clients = 0;
+    final client = fakeSyncClient((td) => [
+          ['S1.SH', td, 1.0, 1.0, 1.0, 1.0, 100.0, 10.0],
+        ]);
+    final r = await runSync(
+      dbPath: dbPath,
+      token: 'tok',
+      now: () => DateTime(2026, 9, 30, 20), // 同一收盘边界内
+      clientFactory: (_) {
+        clients++;
+        return client;
+      },
+    );
+    expect(clients, 1, reason: 'V2 坏值必须被作废，升级后首次同步要真跑');
     expect(r.latestDate, '20260930');
   });
 }

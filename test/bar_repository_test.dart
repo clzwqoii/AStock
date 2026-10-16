@@ -624,5 +624,39 @@ void main() {
       expect(actual.contains(d), isTrue, reason: '$d 应在日历中');
     }
   });
+
+  test('referenceRowCount：取 before 之前最近 N 个交易日行数的最大值', () {
+    expect(repo.referenceRowCount(beforeDate: '20260930'), isNull, reason: '空库无参考');
+
+    // 6 个交易日，行数各不相同；窗口只取 before 之前最近 5 个
+    const counts = {
+      '20260825': 3,
+      '20260828': 1,
+      '20260831': 7,
+      '20260901': 2,
+      '20260902': 4,
+      '20260903': 9,
+    };
+    counts.forEach((d, n) {
+      repo.upsertBars([for (var i = 0; i < n; i++) row('S$i.SH', d)]);
+    });
+    expect(repo.referenceRowCount(beforeDate: '20260903'), 7,
+        reason: '8/25..9/2 最近 5 日最大值是 8/31 的 7 行');
+    expect(repo.referenceRowCount(beforeDate: '20260904'), 9,
+        reason: '全体 6 日都在窗口内时取最大值 9');
+  });
+
+  test('心跳键 V3：读写往返，旧的 checkedAt / checkedAtV2 值不再被读取', () {
+    final raw = sqlite3.open('${tmp.path}/test.db');
+    raw.execute("INSERT OR REPLACE INTO sync_meta(k, v) VALUES ('checkedAt', 1)");
+    raw.execute("INSERT OR REPLACE INTO sync_meta(k, v) VALUES ('checkedAtV2', 2)");
+    raw.dispose();
+
+    expect(repo.syncCheckedAt(), isNull,
+        reason: '存量旧键值不得再被读——它们在 F1 日历事故里可能已被烧坏');
+
+    repo.setSyncCheckedAt(1234567);
+    expect(repo.syncCheckedAt(), 1234567);
+  });
 }
 

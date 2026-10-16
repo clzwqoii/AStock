@@ -172,17 +172,31 @@ class BarRepository {
   /// stock_basic 限 1 次/分，重复启动不该反复打网络。存库内而非旁挂文件——
   /// 少一个会与应用数据不同步的孤儿文件。
   ///
-  /// 键名带 V2：≤2.6.7 会在抢跑空拉后照记心跳，存量值在升级后同一收盘边界内
-  /// 会把首次同步整段早退（表现为"点同步没反应"）。换键一次性作废旧值，
+  /// 键名带 V3：≤2.6.9 的心跳判据在「日历看不见当天」时会把当天数据没进库的
+  /// 状态误判为已补齐并记心跳（安卓 2026-10-16 实证），存量值在升级后同一收盘
+  /// 边界内会把首跑整段早退。换键一次性作废旧值（连 V1/V2 一起覆盖），
   /// 升级后首跑必真同步；旧行留在表里无害。
   int? syncCheckedAt() {
-    final r = _db.select("SELECT v FROM sync_meta WHERE k = 'checkedAtV2'");
+    final r = _db.select("SELECT v FROM sync_meta WHERE k = 'checkedAtV3'");
     return r.isEmpty ? null : r.first.values[0] as int;
   }
 
   void setSyncCheckedAt(int epochMs) {
     _db.execute('INSERT OR REPLACE INTO sync_meta(k, v) VALUES (?, ?)',
-        ['checkedAtV2', epochMs]);
+        ['checkedAtV3', epochMs]);
+  }
+
+  /// [beforeDate] 之前最近 [days] 个交易日行数的最大值；空库返回 null。
+  /// 当日完整性参考：收盘后用它与「今天的行数」比较，判断当天是否已补齐
+  /// （不能拿固定数字——全市场股票数在变，停牌也会让单日行数天然少几百）。
+  int? referenceRowCount({required String beforeDate, int days = 5}) {
+    final r = _db.select(
+        'SELECT MAX(c) FROM (SELECT COUNT(*) AS c FROM daily_bars '
+        'WHERE trade_date IN (SELECT DISTINCT trade_date FROM daily_bars '
+        'WHERE trade_date < ? ORDER BY trade_date DESC LIMIT ?) '
+        'GROUP BY trade_date)',
+        [beforeDate, days]);
+    return (r.first.values[0] as num?)?.toInt();
   }
 
   void upsertStocks(List<({String tsCode, String name})> stocks) {

@@ -28,7 +28,6 @@ class EastmoneyClient {
   /// 全部 A 股（沪深主板/创业板/科创板/北交所）名单。
   Future<List<({String tsCode, String name})>> stockList() async {
     const fields = 'f12,f13,f14';
-    final fs = 'm:0+t:6,m:0+t:80,m:1+t:2,m:1+t:23,m:0+t:81+s:2048';
     final out = <({String tsCode, String name})>[];
     var pn = 1;
     var total = 1 << 30;
@@ -41,7 +40,7 @@ class EastmoneyClient {
         'fltt': '2',
         'invt': '2',
         'fid': 'f12',
-        'fs': fs,
+        'fs': _clistFs,
         'fields': fields,
       });
       final res = await _http.get(uri, headers: _ua).timeout(timeout);
@@ -131,6 +130,111 @@ class EastmoneyClient {
     if (c == '0' || c == '3') return '.SZ';
     return '.BJ';
   }
+
+  /// 当日全市场快照（clist 实时行情接口，收盘后即最终值），单位手/千元。
+  ///
+  /// f124=最新行情 Unix 秒：只保留换算到北京时间为 [tradeDate] 的行——
+  /// 停牌/退市票的 f124 停留在上一个交易日，天然被排除，无需停牌名单；
+  /// 这也让"这笔今天确实有行情"自证，是 tushare 当日日线不可用时的兜底
+  /// （见 SyncService 的 todaySettled）。
+  ///
+  /// data 缺失或解析失败一律抛异常：调用方据此判定"无凭据"，绝不静默当空。
+  Future<List<DailyRow>> snapshotBars({required String tradeDate}) async {
+    const fields = 'f12,f17,f15,f16,f2,f5,f6,f124';
+    final out = <DailyRow>[];
+    var pn = 1;
+    var fetched = 0;
+    var total = 1 << 30;
+    // 分页用「已抓取行数」收敛而不是 out.length：被过滤掉的行（停牌/非当日）
+    // 不能让翻页提前结束。
+    while (fetched < total) {
+      final uri = Uri.parse('$apiBase/api/qt/clist/get').replace(queryParameters: {
+        'pn': '$pn',
+        'pz': '$pageSize',
+        'po': '1',
+        'np': '1',
+        'fltt': '2',
+        'invt': '2',
+        'fid': 'f12',
+        'fs': _clistFs,
+        'fields': fields,
+      });
+      // 单页 5 秒：约 56 页，网差时最坏 5 分钟内收尾；用默认 15 秒最坏会
+      // 拖到 14 分钟，拖垮整轮同步。
+      final res = await _http
+          .get(uri, headers: _ua)
+          .timeout(const Duration(seconds: 5));
+      final data =
+          (jsonDecode(utf8.decode(res.bodyBytes)) as Map<String, dynamic>)['data']
+              as Map<String, dynamic>?;
+      if (data == null) {
+        throw const FormatException('东财 clist 快照响应缺少 data');
+      }
+      total = (data['total'] as num?)?.toInt() ?? 0;
+      final diff =
+          (data['diff'] as List?)?.cast<Map<String, dynamic>>() ?? const [];
+      if (diff.isEmpty) break;
+      fetched += diff.length;
+      for (final d in diff) {
+        final row = _snapshotRow(d, tradeDate);
+        if (row != null) out.add(row);
+      }
+      pn++;
+    }
+    return out;
+  }
+
+  /// 单行快照解析：停牌/退市（'-'）、缺字段、非当日报价一律返回 null。
+  DailyRow? _snapshotRow(Map<String, dynamic> d, String tradeDate) {
+    final code = d['f12'];
+    final open = _num(d['f17']);
+    final high = _num(d['f15']);
+    final low = _num(d['f16']);
+    final close = _num(d['f2']);
+    final vol = _num(d['f5']);
+    final amount = _num(d['f6']);
+    final f124 = _num(d['f124']);
+    if (code is! String ||
+        open == null ||
+        high == null ||
+        low == null ||
+        close == null ||
+        vol == null ||
+        amount == null ||
+        f124 == null) {
+      return null;
+    }
+    // 行情时间固定按北京时间（UTC+8）换算：设备在他国时区时用本地时区
+    // 换算会整体错一天，全市场行都会被滤掉。
+    final t = DateTime.fromMillisecondsSinceEpoch(f124.toInt() * 1000,
+            isUtc: true)
+        .add(const Duration(hours: 8));
+    final date = '${t.year.toString().padLeft(4, '0')}'
+        '${t.month.toString().padLeft(2, '0')}'
+        '${t.day.toString().padLeft(2, '0')}';
+    if (date != tradeDate) return null;
+    return DailyRow(
+      tsCode: '$code${_marketSuffix(code)}',
+      tradeDate: date,
+      open: open.toDouble(),
+      high: high.toDouble(),
+      low: low.toDouble(),
+      close: close.toDouble(),
+      vol: vol.toDouble(),
+      amount: amount.toDouble() / 1000, // 元 → 千元，与主源同口径
+    );
+  }
+
+  /// fltt=2 下数值字段大多是数字，个别部署给字符串，两者都收。
+  static num? _num(Object? v) {
+    if (v is num) return v;
+    if (v is String) return num.tryParse(v);
+    return null;
+  }
+
+  /// clist 的全市场筛选串：沪深主板/创业板/科创板/北交所。
+  static const _clistFs =
+      'm:0+t:6,m:0+t:80,m:1+t:2,m:1+t:23,m:0+t:81+s:2048';
 
   static const _ua = {'User-Agent': 'Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36'};
   static const _hisBase = 'https://push2his.eastmoney.com';

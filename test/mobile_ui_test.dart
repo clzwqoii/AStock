@@ -1,6 +1,7 @@
 import 'dart:io';
 
 import 'package:flutter/material.dart';
+import 'package:flutter/services.dart';
 import 'package:flutter_test/flutter_test.dart';
 import 'package:stock/app_logic.dart';
 import 'package:stock/config.dart';
@@ -22,6 +23,16 @@ void _phone(WidgetTester tester) {
   tester.view.devicePixelRatio = 3.0;
   addTearDown(tester.view.resetPhysicalSize);
   addTearDown(tester.view.resetDevicePixelRatio);
+}
+
+/// 模拟「切后台再回前台」：走真实的 flutter/lifecycle 平台通道
+/// （handleAppLifecycleStateChanged 是 @protected，测试里不能直接调）。
+Future<void> _backgroundThenResume(WidgetTester tester) async {
+  Future<void> send(String state) => tester.binding.defaultBinaryMessenger
+      .handlePlatformMessage(
+          'flutter/lifecycle', const StringCodec().encodeMessage(state), (_) {});
+  await send('AppLifecycleState.inactive');
+  await send('AppLifecycleState.resumed');
 }
 
 void main() {
@@ -438,5 +449,72 @@ void main() {
     expect(find.textContaining('同步完成'), findsOneWidget);
     expect(find.textContaining('未同步'), findsNothing);
     expect(find.text('已同步 10-06'), findsOneWidget);
+  });
+
+  testWidgets('回到前台自动同步：冷却期内不重复打网络', (tester) async {
+    _phone(tester);
+    var calls = 0;
+    await tester.pumpWidget(StockApp(
+      config: AppConfig(tushareToken: 'tok', dbPath: dbPath),
+      showOnboarding: false,
+      runSyncFn: ({required dbPath, required token, onProgress}) async {
+        calls++;
+        return const SyncResult(dates: 0, rows: 0, latestDate: '20261015');
+      },
+      runBacktestFn: (_, {reportPath}) async => BacktestReport(
+        generatedAt: DateTime(2026, 10, 5).toIso8601String(),
+        horizons: const [10],
+        stockCount: 0,
+        baseline: const {},
+        results: const {},
+      ),
+    ));
+    await tester.pump();
+    await tester.pump(const Duration(seconds: 1));
+    expect(calls, 1, reason: '冷启动自动同步一次');
+
+    await _backgroundThenResume(tester);
+    await tester.pump();
+    await tester.pump(const Duration(seconds: 1));
+    expect(calls, 1, reason: '刚同步过：冷却期内回到前台必须被挡掉');
+  });
+
+  testWidgets('回到前台自动同步：冷却到期后触发，无新增回执保持静默', (tester) async {
+    _phone(tester);
+    var calls = 0;
+    await tester.pumpWidget(StockApp(
+      config: AppConfig(tushareToken: 'tok', dbPath: dbPath),
+      showOnboarding: false,
+      resumeSyncCooldown: Duration.zero,
+      runSyncFn: ({required dbPath, required token, onProgress}) async {
+        calls++;
+        return SyncResult(
+          dates: calls == 1 ? 1 : 0,
+          rows: calls == 1 ? 2 : 0,
+          latestDate: '20261015',
+          earliestDate: '20231009',
+        );
+      },
+      runBacktestFn: (_, {reportPath}) async => BacktestReport(
+        generatedAt: DateTime(2026, 10, 5).toIso8601String(),
+        horizons: const [10],
+        stockCount: 0,
+        baseline: const {},
+        results: const {},
+      ),
+    ));
+    await tester.pump();
+    await tester.pump(const Duration(seconds: 1));
+    expect(calls, 1);
+    expect(find.textContaining('新增 1 个交易日、2 行'), findsOneWidget);
+
+    await _backgroundThenResume(tester);
+    await tester.pump();
+    await tester.pump(const Duration(seconds: 1));
+    expect(calls, 2, reason: '冷却到期后回到前台应自动同步');
+    expect(find.textContaining('数据已齐全'), findsNothing,
+        reason: '静默：无新增时不得刷出「数据已齐全」回执');
+    expect(find.textContaining('新增 1 个交易日、2 行'), findsOneWidget,
+        reason: '旧回执保留，后台静默同步不打扰用户');
   });
 }
